@@ -1,0 +1,68 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Wiggle Works"
+config/version="1.0.0"
+config/description="A squishy physics playground. Play together over Wi-Fi."
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7", "Forward Plus")
+config/icon="res://art/icon.png"
+run/max_fps=144
+
+[autoload]
+
+Settings="*res://autoload/settings.gd"
+Sfx="*res://autoload/sfx.gd"
+Catalog="*res://autoload/catalog.gd"
+Updater="*res://autoload/updater.gd"
+
+[display]
+
+window/size/viewport_width=1440
+window/size/viewport_height=880
+window/size/initial_position_type=3
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/stretch/scale_mode="fractional"
+
+[internationalization]
+
+locale/include_text_server_data=true
+
+[gui]
+
+theme/custom_font="res://fonts/Nunito.ttf"
+
+[layer_names]
+
+2d_physics/layer_1="ground"
+2d_physics/layer_2="toys"
+2d_physics/layer_3="wigglies"
+
+[physics]
+
+common/physics_ticks_per_second=120
+common/max_physics_steps_per_frame=10
+2d/default_gravity=980.0
+2d/solver/solver_iterations=16
+2d/sleep_threshold_linear=4.0
+3d/physics_engine="Jolt Physics"
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
+renderer/rendering_method.mobile="mobile"
+rendering_device/fallback_to_opengl3=true
+viewport/hdr_2d=true
+anti_aliasing/quality/msaa_2d=2
+environment/defaults/default_clear_color=Color(0.53, 0.8, 0.96, 1)
+textures/vram_compression/import_etc2_astc=true
