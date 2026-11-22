@@ -1961,8 +1961,10 @@ func _anim_dragon(dt: float, _spd: float, act: String, k: float, mood: String) -
 	tl.rotation = Vector3(0.12 + sin(t * 1.7) * 0.1, sin(t * 1.3) * 0.3, 0)
 	hp.rotation = Vector3(sin(t * 1.4) * 0.08, sin(t * 0.7) * 0.12, 0)
 	jaw.rotation.x = 0.05 + sin(t * 1.1) * 0.04
-	for n in ["leg_fl", "leg_fr", "leg_bl", "leg_br"]:
-		(pv[n] as Node3D).rotation.x = 0.7 + sin(t * 2.0 + float(n.length())) * 0.08
+	var legs := ["leg_fl", "leg_fr", "leg_bl", "leg_br"]
+	for i in legs.size():
+		# each leg sways a little out of step with the others
+		(pv[legs[i]] as Node3D).rotation.x = 0.7 + sin(t * 2.0 + i * 1.7) * 0.08
 	if breath:
 		var w := smoothstep(0.0, 0.15, k) * (1.0 - smoothstep(0.9, 1.0, k))
 		hp.rotation.x = 0.4 * w + sin(t * 40.0) * 0.02

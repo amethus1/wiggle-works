@@ -303,6 +303,11 @@ static func draw_toy(ci: CanvasItem, t, origin := Vector2.ZERO, zoom := 1.0) -> 
 			if t.id == "motor":
 				ci.draw_circle(Vector2(0, -r * 0.35), r * 0.09, Color(0.4, 2.0, 0.8) if t.is_on() else Color("2d3436"), true, -1.0, true)
 			outline_circle(ci, Vector2.ZERO, r, col)
+		"rocket" when t.def.get("part", false):
+			# a bazooka's rocket (the Rocket Booster machine has the same id)
+			panel(ci, Rect2(-w * 0.5, -h * 0.5, w * 0.8, h), h * 0.5, col)
+			ci.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.3, -h * 0.5), Vector2(w * 0.5, 0), Vector2(w * 0.3, h * 0.5)]), Color("e74c3c"))
+			ci.draw_colored_polygon(PackedVector2Array([Vector2(-w * 0.5, -h * 0.4), Vector2(-w * 0.85, 0), Vector2(-w * 0.5, h * 0.4)]), Color(2.4, 1.3, 0.3))
 		"rocket":
 			if t.is_on():
 				var fl := 0.8 + 0.3 * sin(tm * 40.0)
@@ -570,10 +575,6 @@ static func draw_toy(ci: CanvasItem, t, origin := Vector2.ZERO, zoom := 1.0) -> 
 				ci.draw_colored_polygon(PackedVector2Array([Vector2.ZERO, Vector2.from_angle(a - 0.45) * h * 0.3, Vector2.from_angle(a + 0.45) * h * 0.3]), col)
 			if t.fuse >= 0.0:
 				ci.draw_circle(Vector2(w * 0.3, -h * 0.25), 4.0, Color(2.6, 0.5, 0.4) if int(tm * 4.0) % 2 == 0 else Color("7f1d1d"), true, -1.0, true)
-		"rocket":
-			panel(ci, Rect2(-w * 0.5, -h * 0.5, w * 0.8, h), h * 0.5, col)
-			ci.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.3, -h * 0.5), Vector2(w * 0.5, 0), Vector2(w * 0.3, h * 0.5)]), Color("e74c3c"))
-			ci.draw_colored_polygon(PackedVector2Array([Vector2(-w * 0.5, -h * 0.4), Vector2(-w * 0.85, 0), Vector2(-w * 0.5, h * 0.4)]), Color(2.4, 1.3, 0.3))
 		"arrow":
 			ci.draw_line(Vector2(-w * 0.5, 0), Vector2(w * 0.4, 0), Color("8b5a2b"), 2.5, true)
 			ci.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.35, -4), Vector2(w * 0.55, 0), Vector2(w * 0.35, 4)]), Color("b2bec3"))

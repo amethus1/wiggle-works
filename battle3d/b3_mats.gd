@@ -62,12 +62,16 @@ static func flat(c: Color, depth_test := true) -> StandardMaterial3D:
 	return m
 
 
-## Shaded material that takes its colour from particle/vertex colours.
-static func vcol(unshaded := false, alpha := false) -> StandardMaterial3D:
+## Shaded material that takes its colour from particle/vertex colours,
+## multiplied by `tint` (like a MultiMesh instance colour).
+static func vcol(unshaded := false, alpha := false, tint := Color.WHITE) -> StandardMaterial3D:
 	var key := "v%s%s" % [unshaded, alpha]
+	if tint != Color.WHITE:
+		key += tint.to_html()
 	var m: StandardMaterial3D = _mats.get(key)
 	if m == null:
 		m = StandardMaterial3D.new()
+		m.albedo_color = tint
 		m.vertex_color_use_as_albedo = true
 		m.vertex_color_is_srgb = true
 		m.roughness = 0.9
@@ -316,7 +320,9 @@ render_mode unshaded, depth_test_disabled, cull_disabled, shadows_disabled;
 instance uniform float hp = 1.0;
 instance uniform vec4 team : source_color = vec4(1.0);
 void vertex() {
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(INV_VIEW_MATRIX[0], INV_VIEW_MATRIX[1], INV_VIEW_MATRIX[2], MODEL_MATRIX[3]);
+	// faces the camera, but keeps the bar's own size (big fighters get bigger bars)
+	vec3 s = vec3(length(MODEL_MATRIX[0].xyz), length(MODEL_MATRIX[1].xyz), length(MODEL_MATRIX[2].xyz));
+	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(INV_VIEW_MATRIX[0] * s.x, INV_VIEW_MATRIX[1] * s.y, INV_VIEW_MATRIX[2] * s.z, MODEL_MATRIX[3]);
 }
 void fragment() {
 	vec2 uv = UV;

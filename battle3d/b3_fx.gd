@@ -16,6 +16,7 @@ class Item:
 
 var battle = null
 var _items: Array[Item] = []
+var _owner := {}          # pooled node -> the Item moving it now (see _add)
 var _pools := {}          # name -> Array of nodes
 var _next := {}           # name -> int
 var _balls: Array[MeshInstance3D] = []
@@ -331,6 +332,18 @@ func set_dust_color(c: Color) -> void:
 		p.color_ramp = g
 
 
+## Starts animating `it`. Pools hand out their nodes in turn, so a busy
+## battle can reuse a node while an older effect is still moving it: that
+## older effect just stops (it would otherwise fight over the node and hide
+## the new effect when it ends).
+func _add(it: Item) -> void:
+	var old: Item = _owner.get(it.node)
+	if old != null:
+		old.node = null
+	_owner[it.node] = it
+	_items.append(it)
+
+
 # ------------------------------------------------------------------ public
 func _fx_explosion(pos: Vector3, r: float, kind := 0) -> void:
 	# kind 0 fire, 1 acid, 2 nuke-white
@@ -365,7 +378,7 @@ func _ball(pos: Vector3, s0: float, s1: float, life: float, delay: float, kind :
 	it.delay = delay
 	it.size = s1
 	it.f = s0
-	_items.append(it)
+	_add(it)
 
 
 func _fx_flame(pos: Vector3) -> void:
@@ -382,7 +395,7 @@ func _fx_flame(pos: Vector3) -> void:
 	it.life = 0.5
 	it.size = randf_range(0.18, 0.32)
 	it.vel = Vector3(randf_range(-0.3, 0.3), 2.2, randf_range(-0.3, 0.3))
-	_items.append(it)
+	_add(it)
 
 
 func _fx_trail(pos: Vector3, s := 0.25) -> void:
@@ -399,7 +412,7 @@ func _fx_trail(pos: Vector3, s := 0.25) -> void:
 	it.life = 0.9
 	it.size = s
 	it.vel = Vector3(randf_range(-0.2, 0.2), 0.5, randf_range(-0.2, 0.2))
-	_items.append(it)
+	_add(it)
 
 
 func _fx_light(pos: Vector3, rng: float, energy: float, life: float, col := Color(1.0, 0.6, 0.25)) -> void:
@@ -415,7 +428,7 @@ func _fx_light(pos: Vector3, rng: float, energy: float, life: float, col := Colo
 	it.kind = "light"
 	it.life = life
 	it.f = energy
-	_items.append(it)
+	_add(it)
 
 
 func _fx_scorch(pos: Vector3, size: float) -> void:
@@ -442,7 +455,7 @@ func _fx_ring(pos: Vector3, r0: float, r1: float, life: float, tint := Color(1, 
 	it.life = life
 	it.f = r0
 	it.size = r1
-	_items.append(it)
+	_add(it)
 
 
 func _fx_tracer(a: Vector3, b: Vector3, col: Color, life := 0.06) -> void:
@@ -462,7 +475,7 @@ func _fx_tracer(a: Vector3, b: Vector3, col: Color, life := 0.06) -> void:
 	it.kind = "tracer"
 	it.life = life
 	it.size = l
-	_items.append(it)
+	_add(it)
 	hit_puff(b, -dir)
 
 
@@ -488,7 +501,7 @@ func _fx_beam(a: Vector3, b: Vector3, col: Color, width := 0.16, life := 0.18) -
 	it.life = life
 	it.size = l
 	it.f = width
-	_items.append(it)
+	_add(it)
 	_emit("sparks", b, 0.6)
 	light(a.lerp(b, 0.5), minf(l, 14.0), 4.0, life, base)
 
@@ -508,7 +521,7 @@ func _fx_breath(pos: Vector3, vel: Vector3, size := 0.5, life := 0.6) -> void:
 	it.life = life
 	it.size = size
 	it.vel = vel
-	_items.append(it)
+	_add(it)
 
 
 func _fx_hit_puff(pos: Vector3, _n: Vector3) -> void:
@@ -527,7 +540,7 @@ func _fx_muzzle(pos: Vector3, dir: Vector3, s := 1.0) -> void:
 	it.node = m
 	it.kind = "muzzle"
 	it.life = 0.05
-	_items.append(it)
+	_add(it)
 
 
 func _fx_sparks(pos: Vector3, _n := 10) -> void:
@@ -556,7 +569,7 @@ func _fx_heal(pos: Vector3) -> void:
 	it.node = p
 	it.kind = "plus"
 	it.life = 0.9
-	_items.append(it)
+	_add(it)
 
 
 func _fx_number(pos: Vector3, v: float) -> void:
@@ -575,7 +588,7 @@ func _fx_number(pos: Vector3, v: float) -> void:
 	it.node = l
 	it.kind = "num"
 	it.life = 0.9
-	_items.append(it)
+	_add(it)
 
 
 ## A cartoon word that pops up and floats away ("HONK!", "BONK!").
@@ -594,7 +607,7 @@ func _fx_word(pos: Vector3, text: String, col: Color) -> void:
 	it.node = l
 	it.kind = "num"
 	it.life = 0.8
-	_items.append(it)
+	_add(it)
 
 
 func _fx_splash(pos: Vector3, acid: bool) -> void:
@@ -652,7 +665,7 @@ func _fx_nuke(pos: Vector3) -> void:
 	it.node = root
 	it.kind = "nuke"
 	it.life = 9.0
-	_items.append(it)
+	_add(it)
 	ring(pos + Vector3(0, 0.6, 0), 2.0, 58.0, 1.5, Color(1.0, 0.95, 0.85, 0.9))
 	ring(pos + Vector3(0, 3.0, 0), 1.0, 40.0, 2.2, Color(1.0, 0.7, 0.4, 0.6))
 	for i in 6:
@@ -705,6 +718,11 @@ func _process(dt: float) -> void:
 	var i := 0
 	while i < _items.size():
 		var it := _items[i]
+		if it.node == null:
+			# its node was taken by a newer effect
+			_items[i] = _items[_items.size() - 1]
+			_items.pop_back()
+			continue
 		if it.delay > 0.0:
 			it.delay -= dt
 			if it.delay <= 0.0:
@@ -755,6 +773,7 @@ func _process(dt: float) -> void:
 			"nuke":
 				_nuke_update(it)
 		if done:
+			_owner.erase(it.node)
 			if it.kind == "nuke":
 				it.node.queue_free()
 			else:
@@ -767,11 +786,14 @@ func _process(dt: float) -> void:
 
 func clear() -> void:
 	for it in _items:
+		if it.node == null:
+			continue
 		if it.kind == "nuke":
 			it.node.queue_free()
 		else:
 			it.node.visible = false
 	_items.clear()
+	_owner.clear()
 	for d in _decals:
 		d.visible = false
 

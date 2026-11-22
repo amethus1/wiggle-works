@@ -506,7 +506,8 @@ func uproot(sb: StaticBody3D, vel: Vector3, battle) -> void:
 		mm.set_instance_transform(mi, Transform3D(Basis.from_scale(Vector3.ZERO), ixf.origin))
 		var vis := MeshInstance3D.new()
 		vis.mesh = kind_mesh(String(sb.get_meta("scenery")))
-		vis.material_override = B3Mats.vcol()
+		# keep its tint (volcano rocks stay dark, desert rocks sandy)
+		vis.material_override = B3Mats.vcol(false, false, sb.get_meta("tint", Color.WHITE) as Color)
 		vis.scale = Vector3.ONE * float(sb.get_meta("ks"))
 		rb.add_child(vis)
 	for c in sb.get_children():
@@ -749,6 +750,7 @@ func _scenery_body(kind: String, e: Array, mm: MultiMesh, j: int) -> void:
 	sb.set_meta("mm", mm)
 	sb.set_meta("mi", j)
 	sb.set_meta("ks", s)
+	sb.set_meta("tint", e[1])
 	var sid := int(e[5])
 	sb.set_meta("sid", sid)
 	_by_sid[sid] = sb

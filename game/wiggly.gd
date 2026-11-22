@@ -418,6 +418,7 @@ func use_special() -> void:
 			world.fx_event("special", {"p": com, "k": kind, "r": radius()})
 		"gummy":
 			special_t = 8.0
+			stuck_links = 0   # up to 3 new sticks every time Sticky Mode starts
 			world.fx_event("special", {"p": com, "k": kind, "r": radius()})
 		"zappy":
 			world.zap_area(com, 190.0, self)

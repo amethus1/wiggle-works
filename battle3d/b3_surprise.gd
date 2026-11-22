@@ -51,7 +51,9 @@ static func run(b, seed_v := 0) -> void:
 		var dinos: Array = B3Defs.UNIT_ORDER.get("dinos", [])
 		for k in rng.randi_range(2, 4):
 			var dk := String(dinos[rng.randi() % dinos.size()])
-			b.spawn_unit(dk, "wild", Vector3(rng.randf_range(-5, 5), 0, rng.randf_range(-5, 5)), "attack")
+			var dp := Vector3(rng.randf_range(-5, 5), 0, rng.randf_range(-5, 5))
+			dp.y = b.surface_y(Vector3(dp.x, 60.0, dp.z))      # on the ground, not inside a hill
+			b.spawn_unit(dk, "wild", dp, "attack")
 	# the middle: barrels, mines and maybe a pool
 	for k in rng.randi_range(0, 6):
 		var p := Vector3(rng.randf_range(-9, 9), 0, rng.randf_range(-9, 9))
@@ -95,7 +97,9 @@ static func _pool(theme: String) -> Array:
 	return people + vehicles
 
 
-## Fills `budget` points of fighters (big ones cost more) in rows behind `base`.
+## Fills `budget` points of fighters (big ones cost more) in rows behind
+## `base`, people in front and the big ones (tanks, T-Rexes) behind, each
+## with as much room as it needs so nobody starts inside anyone else.
 static func _army(b, rng: RandomNumberGenerator, team: String, base: Vector3, face: Vector3, pool: Array, budget: int) -> void:
 	var roster: Array = []
 	for k in rng.randi_range(2, 4):
@@ -115,17 +119,53 @@ static func _army(b, rng: RandomNumberGenerator, team: String, base: Vector3, fa
 			continue
 		picks.append(id)
 		left -= c
+	picks.sort_custom(func(p1, p2): return room(String(p1)) < room(String(p2)))
 	var side := Vector3(-face.z, 0, face.x)
 	var yaw := atan2(face.x, face.z)
-	var per_row := maxi(4, int(ceil(sqrt(picks.size() * 2.0))))
-	for i in picks.size():
-		var row := floori(float(i) / per_row)
-		var col := i % per_row
-		var off := (col - (per_row - 1) * 0.5) * 1.7
-		var spacing := 1.7 + (2.0 if cost(String(picks[i])) >= 4.0 else 0.0)
-		var p: Vector3 = base + side * off - face * row * spacing + Vector3(rng.randf_range(-0.3, 0.3), 0, rng.randf_range(-0.3, 0.3))
-		p.y = b.surface_y(Vector3(p.x, 60.0, p.z))
-		b.spawn_unit(String(picks[i]), team, p, "auto", yaw)
+	var width := maxi(4, int(ceil(sqrt(picks.size() * 2.0)))) * 1.7
+	var back := 0.0      # how far behind `base` the middle of the last row was
+	var last_deep := 0.0
+	var i := 0
+	while i < picks.size():
+		# one row: as many as fit across (always at least one)
+		var row: Array = []
+		var used := 0.0
+		var deep := 0.0
+		while i < picks.size() and (row.is_empty() or used + room(String(picks[i])) <= width + 0.01):
+			var rm := room(String(picks[i]))
+			row.append(picks[i])
+			used += rm
+			deep = maxf(deep, rm)
+			i += 1
+		if last_deep > 0.0:
+			back += (last_deep + deep) * 0.5
+		last_deep = deep
+		var x := -used * 0.5
+		for id in row:
+			var rm2 := room(String(id))
+			var p: Vector3 = base + side * (x + rm2 * 0.5) - face * back + Vector3(rng.randf_range(-0.3, 0.3), 0, rng.randf_range(-0.3, 0.3))
+			x += rm2
+			p.y = b.surface_y(Vector3(p.x, 60.0, p.z))
+			b.spawn_unit(String(id), team, p, "auto", yaw)
+
+
+## How much space (metres across) a fighter needs in a line: 1.7 for a
+## person, more for horses, big animals, dinosaurs and vehicles.
+static func room(id: String) -> float:
+	var d := B3Defs.unit_def(id)
+	var r := 0.44      # about how wide it is from its middle, before its size (like B3Rig's radius)
+	match String(d.get("body", "")):
+		"vehicle":
+			return float(d.get("size", 3.0)) + 1.0
+		"quad":
+			var q: Dictionary = B3Rig.QUAD.get(String(d.style), {"bw": 1.0, "bl": 1.0})
+			r = maxf(float(q.bw) * 0.6, float(q.bl) * 0.32)
+		"biped":
+			var q2: Dictionary = B3Rig.BIPED.get(String(d.style), {"bl": 1.0})
+			r = float(q2.bl) * 0.38
+		"rider", "dragon":
+			r = 0.65      # horses and dragons are long
+	return maxf(1.7, r * float(d.get("size", 1.0)) * 2.0 + 0.8)
 
 
 ## How many army points a fighter is worth (by toughness).

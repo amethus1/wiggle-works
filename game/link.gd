@@ -30,6 +30,11 @@ func setup(k: String, body_a: PhysicsBody2D, body_b: PhysicsBody2D, pa: Vector2,
 	b = body_b
 	la = anchor_of(a, pa)
 	lb = anchor_of(b, pb)
+	if (k == "glue" or k == "hinge") and is_instance_valid(b):
+		# The pins hold both bodies at a's end of the drag, so b's anchor goes
+		# there too. Otherwise the gap between where you started and where you
+		# let go looks like the joint being ripped apart, and it snaps at once.
+		lb = b.to_local(world_a())
 	rest = maxf(8.0, world_a().distance_to(world_b()))
 
 

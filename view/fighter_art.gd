@@ -228,7 +228,8 @@ static func _beast(f) -> void:
 		if parts.has("torso"):
 			var tor: Array = parts.torso
 			_tf(ci, tor[0], tor[1], Vector2(fc, 1.0))
-			_beast_body(f, ci, d, b, legs, col, false)
+			# a long tail is its own ragdoll piece (drawn above), so don't draw a second one
+			_beast_body(f, ci, d, b, legs, col, false, not parts.has("tail"))
 			_tf(ci, Vector2.ZERO, 0.0, Vector2.ONE)
 		if parts.has("head"):
 			var hp: Array = parts.head
@@ -240,7 +241,7 @@ static func _beast(f) -> void:
 
 
 ## Body, legs, neck, head and tail around the body centre (facing right).
-static func _beast_body(f, ci: CanvasItem, d: Dictionary, b: Vector2, legs: float, col: Color, standing: bool) -> void:
+static func _beast_body(f, ci: CanvasItem, d: Dictionary, b: Vector2, legs: float, col: Color, standing: bool, with_tail := true) -> void:
 	var s: float = f.size
 	var moving := clampf(absf(f.move), 0.0, 1.0) if standing else 0.0
 	var dark := col.darkened(0.3)
@@ -265,7 +266,8 @@ static func _beast_body(f, ci: CanvasItem, d: Dictionary, b: Vector2, legs: floa
 		for sgn in [1.0, -1.0]:
 			var tip := Vector2(-b.x * 0.2, -b.y * 0.2) + Vector2(cos(-PI * 0.5 + flap * sgn), sin(-PI * 0.5 + flap * sgn)) * b.x * 1.4
 			ci.draw_colored_polygon(PackedVector2Array([Vector2(-b.x * 0.3, 0), Vector2(b.x * 0.3, -b.y * 0.1), tip]), col.darkened(0.15 if sgn > 0 else 0.3))
-	_tail(ci, d, float(d.tail) * s, b, col, false, f.t, moving)
+	if with_tail:
+		_tail(ci, d, float(d.tail) * s, b, col, false, f.t, moving)
 	# body
 	var bp := Art.ellipse(Vector2.ZERO, b.x * 0.5, b.y * 0.5, 28)
 	ci.draw_colored_polygon(bp, col)

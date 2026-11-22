@@ -565,7 +565,9 @@ static func impact(world: World, t: Toy, other, closing: float, at: Vector2) -> 
 					world.fx_event("arrow_hit", {"p": at})
 					world.remove(t.uid, false)
 					return
-				if closing > 300.0 and not (other is Toy):
+				# arrows stick into the ground and platforms, not into toys or wobbly Wigglies
+				# (a Wiggly moves away and would leave the arrow floating in the air)
+				if closing > 300.0 and not (other is Toy or other is JellyPoint):
 					t.extra.proj = "stuck"
 					t.extra.life = 5.0
 					t.nailed = true

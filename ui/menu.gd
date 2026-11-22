@@ -10,6 +10,7 @@ var layer: CanvasLayer
 var logo: Label
 var hello: Label
 var modal: Control = null
+var modal_x: Button = null     # the open pop-up's ✕
 var _t := 0.0
 var _hop_t := 1.0
 
@@ -146,6 +147,7 @@ func _auto_update_check() -> void:
 ## "✨ A new version is ready!" with Update now / Later.
 func _update_modal(info: Dictionary) -> void:
 	var v := _modal("✨ New version!", 580)
+	var close := modal_x
 	var msg := UI.label("Wiggle Works %s is ready. You have %s." % [info.version, Updater.current()], 20)
 	msg.autowrap_mode = TextServer.AUTOWRAP_WORD
 	v.add_child(msg)
@@ -183,8 +185,10 @@ func _update_modal(info: Dictionary) -> void:
 			Updater.install(info)
 			status.text = "The download page opened in your web browser."
 			return
+		# while it downloads and swaps, the pop-up stays open (✕ is off too)
 		go.disabled = true
 		later.disabled = true
+		close.disabled = true
 		bar.visible = true
 		status.text = "Downloading..."
 		Updater.progress.connect(on_progress)
@@ -195,6 +199,7 @@ func _update_modal(info: Dictionary) -> void:
 			status.text = "😕 " + problem
 			go.disabled = false
 			later.disabled = false
+			close.disabled = false
 			bar.visible = false
 		elif is_instance_valid(status):
 			status.text = "✅ Restarting with the new version...")
@@ -246,10 +251,13 @@ func _modal(title_txt: String, width := 600.0) -> VBoxContainer:
 	head.add_child(sp)
 	var x := UI.button("✕", UI.PANEL2, 18, 44)
 	x.pressed.connect(func():
+		if Updater.installing:
+			return   # an update is downloading: its pop-up shows how it went
 		modal.queue_free()
 		modal = null
 		_hello())
 	head.add_child(x)
+	modal_x = x
 	v.add_child(head)
 	return v
 

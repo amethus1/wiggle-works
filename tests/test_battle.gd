@@ -83,6 +83,13 @@ func _ready() -> void:
 	await _fire_breathers()
 	await _gorilla_and_robot()
 	await _vehicle_palette()
+	await _no_air_jumps()
+	await _melee_reach()
+	await _hazard_damage()
+	await _shots_past_friends()
+	await _proj_gravity()
+	await _fx_pool()
+	await _model_bits()
 	await _ui_smoke()
 	await _performance()
 	if b and is_instance_valid(b):
@@ -356,12 +363,17 @@ func _lava_acid() -> void:
 		if gone == reds.size():
 			break
 	check(gone == reds.size(), "fighters who charge into lava or acid get KO'd (%d / %d after %.1fs)" % [gone, reds.size(), t])
-	await sim(3.5)
-	var in_pool := 0
-	for rd in b.ragdolls:
-		if b.hazard_at(rd.center(), 0.0) != null:
-			in_pool += 1
-	check(in_pool == 0, "their ragdolls sink away (%d left in the pools)" % in_pool)
+	# (one knocked out by the heat gets thrown up first, lands, then sinks)
+	var in_pool := 99
+	var waited := 0.0
+	while in_pool > 0 and waited < 6.0:
+		await sim(0.5)
+		waited += 0.5
+		in_pool = 0
+		for rd in b.ragdolls:
+			if b.hazard_at(rd.center(), 0.0) != null:
+				in_pool += 1
+	check(in_pool == 0, "their ragdolls sink away (%d left in the pools after %.1fs)" % [in_pool, waited])
 	# sensible fighters walk around a pool
 	await fresh()
 	b.spawn_hazard("lava", at(0, 0), 4.0)
@@ -856,3 +868,295 @@ func _vehicle_palette() -> void:
 	check(tk.team == "green" and tk.rig != null, "and it can change team")
 	b.remove_unit(tk)
 	check(b.team_counts().get("green", 0) == 0, "and be erased")
+
+
+# ------------------------------------------------- fixes from a code review
+func rule(id: String, v: String) -> void:
+	B3Rules.set_value(id, v)
+	b.apply_rules()
+
+
+## A fighter jumps off solid ground only: not again at the top of a jump
+## (that gave endless jumps, worst in Moon gravity), but yes off a tower.
+func _no_air_jumps() -> void:
+	print("jumping")
+	for g in ["normal", "moon"]:
+		await fresh()
+		rule("gravity", g)
+		var s: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful")
+		await sim(0.6)
+		check(s._grounded, "%s gravity: a soldier on the ground can jump" % g)
+		B3Player.start(s)
+		var c := B3Player.me
+		c.jump = true
+		await sim(0.1)
+		var up := s.linear_velocity.y
+		var top := false
+		for i in 300:
+			await get_tree().physics_frame
+			if s.linear_velocity.y < 0.5:
+				top = true
+				break
+		var high: float = s.position.y - b.world.height_at(s.position.x, s.position.z)
+		var air := not s._grounded
+		c.jump = true
+		for i in 3:
+			await get_tree().physics_frame
+		check(up > 4.0 and top and high > 0.5 and air, "%s gravity: at the top of a jump it's in the air (%.1f m up)" % [g, high])
+		check(s.linear_velocity.y < 1.0, "%s gravity: pressing jump again up there does nothing (%.1f m/s up)" % [g, s.linear_velocity.y])
+		B3Player.stop()
+	rule("gravity", "normal")
+	# standing on a tower still counts as standing
+	await fresh()
+	b.spawn_struct("tower", at(0, 0), 0.0)
+	await sim(0.3)
+	var top_y: float = b.surface_y(Vector3(0, 30, 0))
+	var a: B3Unit = b.spawn_unit("archer", "blue", Vector3(0, top_y, 0), "defend")
+	await sim(1.5)
+	check(a.position.y > 4.0 and a._grounded, "an archer on top of a tower is standing on something (y %.1f)" % a.position.y)
+	B3Player.start(a)
+	B3Player.me.jump = true
+	await sim(0.1)
+	check(a.linear_velocity.y > 3.0, "and can jump off it")
+	B3Player.stop()
+	# a jeep up in the air can't drive or steer there
+	var j: B3Vehicle = b.spawn_unit("jeep", "red", at(14, 0)) as B3Vehicle
+	await sim(0.5)
+	var on_ground := j._grounded
+	j.global_position = at(14, 0) + Vector3(0, 3.0, 0)
+	j.linear_velocity = Vector3.ZERO
+	j._drive(1.0 / 60.0)
+	check(on_ground and not j._grounded, "a jeep hanging still in mid-air isn't on the ground")
+
+
+## Melee only reaches things level with you, and a big slam never heals.
+func _melee_reach() -> void:
+	print("melee reach")
+	await fresh()
+	# a tiny giant's hammer slam with a big parked plane right at its edge,
+	# and a pterodactyl flying over the middle of it
+	var g: B3Unit = b.spawn_unit("giant", "red", at(0, 0), "peaceful", 0.0, 0.5)
+	var tk: B3Unit = b.spawn_unit("plane", "blue", at(0, 12), "peaceful", 0.0)
+	(tk as B3Aircraft).parked = true
+	var bird: B3Unit = b.spawn_unit("ptero", "blue", at(-6, 4), "peaceful")
+	var foot: B3Unit = b.spawn_unit("stick", "blue", at(6, 4), "peaceful")
+	await sim(1.0)
+	var w: Dictionary = B3Defs.weapon("hammer")
+	var r: float = float(w.aoe) * g.size
+	var c: Vector3 = g.position + g.forward() * (float(w.range) * g.size * 0.6 + g.radius)
+	tk.global_position = Vector3(c.x, tk.position.y, c.z) + g.forward() * (r + tk.radius * 0.9)
+	bird.global_position = Vector3(c.x, bird.position.y, c.z)
+	foot.global_position = Vector3(c.x, foot.position.y, c.z) + Vector3(0.3, 0, 0)
+	var hp0: float = tk.hp
+	g._melee_hit(w)
+	check(tk.hp < hp0, "a tiny giant's slam at the edge of a big parked plane hurts it, never heals it (%.0f -> %.0f)" % [hp0, tk.hp])
+	check(bird.hp == bird.max_hp and foot.hp < foot.max_hp, "it hits the fighter beside it but not the pterodactyl %.1f m overhead" % (bird.position.y - g.position.y))
+	# a knight under a hovering helicopter can't reach it with his sword
+	await fresh()
+	var h: B3Unit = b.spawn_unit("heli", "blue", at(0, 0), "peaceful")
+	var k: B3Unit = b.spawn_unit("knight", "red", at(3, 3), "peaceful")
+	var s: B3Unit = b.spawn_unit("soldier", "blue", at(-3, 3), "peaceful")
+	await sim(2.5)
+	k.global_position = Vector3(h.position.x, k.position.y, h.position.z)
+	s.global_position = Vector3(h.position.x + 0.9, s.position.y, h.position.z)
+	k.target = h
+	var hh: float = h.hp
+	k._melee_hit(k.melee)
+	check(h.position.y - k.position.y > 5.0 and h.hp == hh, "a knight can't sword a helicopter hovering %.1f m overhead" % (h.position.y - k.position.y))
+	k.target = s
+	var sh: float = s.hp
+	k._melee_hit(k.melee)
+	check(s.hp < sh, "but he does hit the soldier next to him")
+
+
+## Puts `u` in pool `h` for one lava/acid tick and says how much health it lost.
+func _dip(u: B3Unit, h: B3Hazard) -> float:
+	var back := u.global_position
+	u.global_position = h.global_position + Vector3(0, 0.2, 0)
+	u._hz_t = 0.0
+	var hp0 := u.hp
+	u._hazards(0.1)
+	var lost := hp0 - u.hp
+	u.global_position = back
+	u.hp = u.max_hp
+	u.burn_t = 0.0
+	return lost
+
+
+## Lava, acid and burning count Toughness, armour and fire resistance like
+## any other hit, and dragons don't mind fire.
+func _hazard_damage() -> void:
+	print("hazard damage")
+	await fresh()
+	var lava: B3Hazard = b.spawn_hazard("lava", at(0, 0), 3.0)
+	var acid: B3Hazard = b.spawn_hazard("acid", at(0, 14), 3.0)
+	var s: B3Unit = b.spawn_unit("soldier", "red", at(-10, -8), "peaceful")
+	var tk: B3Unit = b.spawn_unit("tank", "red", at(10, -8), "peaceful")
+	var d: B3Unit = b.spawn_unit("dragon", "red", at(-10, 10), "peaceful")
+	await sim(0.5)
+	var ls := _dip(s, lava)
+	check(absf(ls - lava.dps * 0.1 * (1.0 - s.armor)) < 0.01, "lava hurts a soldier through its armour (%.2f a tick)" % ls)
+	var lt := _dip(tk, lava)
+	check(lt > 0.0 and lt < ls * 0.5, "a tank's armour keeps most of the lava's heat out (%.2f a tick)" % lt)
+	var ld := _dip(d, lava)
+	var ad := _dip(d, acid)
+	check(ld == 0.0 and ad > 0.0, "a dragon doesn't mind lava (%.2f), but acid still stings (%.2f)" % [ld, ad])
+	rule("health", "super")
+	var ls2 := _dip(s, lava)
+	check(absf(ls2 - ls / 6.0) < 0.01, "with Super toughness lava does a sixth as much (%.2f)" % ls2)
+	# burning, too
+	var hp0 := s.hp
+	s.burn_t = 0.6
+	await sim(0.5)
+	var burnt_super := hp0 - s.hp
+	rule("health", "normal")
+	s.hp = s.max_hp
+	s.burn_t = 0.6
+	await sim(0.5)
+	var burnt := s.max_hp - s.hp
+	check(burnt > 1.0 and burnt_super < burnt * 0.3, "and burning does less to tough fighters (%.1f vs %.1f)" % [burnt_super, burnt])
+
+
+## Bullets fly past friends, like arrows: a gunner doesn't shoot the teammate
+## standing in front of it. A rocket whose shooter is knocked out on the way
+## still knows its team (for "Blasts hurt teammates: No").
+func _shots_past_friends() -> void:
+	print("shots past friends")
+	await fresh()
+	var gun: B3Unit = b.spawn_unit("gunner", "red", at(-6, 0), "peaceful", PI * 0.5)
+	var mate: B3Unit = b.spawn_unit("knight", "red", at(-3.5, 0), "peaceful", -PI * 0.5)
+	var foe: B3Unit = b.spawn_unit("elephant", "blue", at(3, 0), "peaceful")
+	foe.max_hp = 5000.0
+	foe.hp = 5000.0
+	await sim(0.5)
+	gun.target = foe
+	for i in 12:
+		gun._fire_gun(gun.wpn)
+		await get_tree().physics_frame
+	check(mate.hp == mate.max_hp and not mate.down, "a gunner's bullets fly past the teammate in front of it")
+	check(foe.hp < foe.max_hp, "and hit the enemy behind it (%.0f damage)" % (foe.max_hp - foe.hp))
+	# a fast arrow flies past two friends close together in a row (both in
+	# one step of its flight), not just the first
+	var ar: B3Unit = b.spawn_unit("archer", "red", at(-6, -6), "peaceful", PI * 0.5)
+	var row: Array[B3Unit] = []
+	for x in [-3.6, -2.6]:
+		row.append(b.spawn_unit("knight", "red", at(x, -6), "peaceful", -PI * 0.5))
+	var foe2: B3Unit = b.spawn_unit("elephant", "blue", at(3, -6), "peaceful")
+	foe2.max_hp = 5000.0
+	foe2.hp = 5000.0
+	await sim(0.5)
+	var from := ar.position + Vector3(0, 1.3, 0)
+	b.spawn_proj("arrow", from, B3Proj.lob(from, foe2.center(), 0.08, "arrow"), ar, B3Defs.weapon("bow"))
+	await sim(0.8)
+	check(row[0].hp == row[0].max_hp and row[1].hp == row[1].max_hp and foe2.hp < foe2.max_hp, "a fast arrow flies past two friends close together and hits the enemy")
+	var rk: B3Unit = b.spawn_unit("rocketeer", "red", at(-6, 8), "peaceful")
+	await sim(0.3)
+	var p: B3Proj = b.spawn_proj("rocket", rk.position + Vector3(0, 3.0, 0), Vector3(0, 0, 0.1), rk, B3Defs.weapon("bazooka"))
+	b.remove_unit(rk, false)
+	await get_tree().physics_frame
+	var o: Dictionary = p._blast_opts() if is_instance_valid(p) else {}
+	check(o.get("by") == null and String(o.get("team", "")) == "red", "a rocket still knows its team after its shooter is gone")
+	# with "Blasts hurt teammates: No", it lands among the shooter's friends
+	rule("friendly", "off")
+	var rk2: B3Unit = b.spawn_unit("rocketeer", "red", at(10, 8), "peaceful")
+	var mates: Array[B3Unit] = []
+	for i in 3:
+		mates.append(b.spawn_unit("soldier", "red", at(10 + i * 1.2 - 1.2, 14), "peaceful"))
+	await sim(0.4)
+	b.spawn_proj("rocket", at(10, 14) + Vector3(0, 3.0, 0), Vector3(0, -12, 0), rk2, B3Defs.weapon("bazooka"))
+	b.remove_unit(rk2, false)
+	await sim(1.0)
+	var hurt := 0
+	for m in mates:
+		if not is_instance_valid(m) or m.down or m.hp < m.max_hp:
+			hurt += 1
+	check(hurt == 0, "and spares them with friendly fire off (%d hurt)" % hurt)
+	rule("friendly", "on")
+
+
+## Arrows, grenades and shells fall with the 🌍 Gravity rule, and aiming
+## allows for it; a rocketeer's rocket allows for its sag.
+func _proj_gravity() -> void:
+	print("projectile gravity")
+	for g in ["normal", "moon"]:
+		await fresh()
+		rule("gravity", g)
+		var from := at(-10, 0) + Vector3(0, 1.5, 0)
+		var to := at(6, 0)
+		var p: B3Proj = b.spawn_proj("arrow", from, B3Proj.lob(from, to, 0.9, "arrow"), null, {})
+		check(absf(p.g - 9.8 * B3Rules.gravity_k()) < 0.01, "%s gravity: arrows fall at %.1f m/s²" % [g, p.g])
+		await sim(1.5)
+		var miss: float = p.global_position.distance_to(to) if is_instance_valid(p) else 99.0
+		check(is_instance_valid(p) and p.stuck and miss < 0.8, "%s gravity: an arrow lands where it was aimed (%.2f m off)" % [g, miss])
+	rule("gravity", "normal")
+	await fresh()
+	var rk: B3Unit = b.spawn_unit("rocketeer", "red", at(-11, 0), "peaceful", PI * 0.5)
+	var tg: B3Unit = b.spawn_unit("elephant", "blue", at(11, 0), "peaceful")
+	tg.max_hp = 1e5
+	tg.hp = 1e5
+	await sim(0.5)
+	rk.target = tg
+	rk._shoot_proj(rk.wpn)
+	var rocket: B3Proj = null
+	for c in b.proj_root.get_children():
+		if c is B3Proj and (c as B3Proj).kind == "rocket":
+			rocket = c
+	var last := Vector3(-99, 0, -99)
+	for i in 300:
+		if not is_instance_valid(rocket):
+			break
+		last = rocket.global_position
+		await get_tree().physics_frame
+	var off := Vector2(last.x - tg.position.x, last.z - tg.position.z).length()
+	check(off < tg.radius + 1.0, "a rocketeer's rocket reaches its target 22 m away (lands %.1f m from it)" % off)
+
+
+## A pooled effect node handed to a new effect isn't moved or hidden early
+## by the older effect that had it before.
+func _fx_pool() -> void:
+	print("effect pool")
+	await fresh()
+	var fx: B3Fx = b.fx
+	var n: OmniLight3D = fx._lights[fx._light_i]
+	for i in fx._lights.size():
+		fx.light(Vector3(i, 2, 0), 5.0, 3.0, 0.3)
+	fx.light(Vector3(0, 2, 5), 5.0, 3.0, 3.0)      # the first light again, for longer
+	var owners := 0
+	for it in fx._items:
+		if it.node == n:
+			owners += 1
+	check(owners == 1, "a reused light is run by one effect at a time (%d)" % owners)
+	await sim(1.0)
+	check(n.visible and n.light_energy > 0.1 and n.global_position.z > 4.0, "the newer, longer flash is still lit after the old one would have ended")
+	await sim(3.0)
+	check(not n.visible, "and goes out when it's done")
+
+
+## Small model fixes: cheering tank crew stay in their hatch, a dragon's
+## dangling legs sway out of step, health bars keep their size.
+func _model_bits() -> void:
+	print("models")
+	await fresh()
+	var tk: B3Unit = b.spawn_unit("tank", "red", at(0, 0), "peaceful")
+	var d: B3Unit = b.spawn_unit("dragon", "red", at(10, 0), "peaceful")
+	await sim(0.5)
+	var vr := tk.rig as B3VRig
+	var seats: Array[float] = []
+	for cm in vr.crew:
+		seats.append(cm.position.y)
+	var bob := 0.0
+	for f in 437:
+		vr.animate(1.0 / 60.0, 0.0, "", 0.0, false, "cheer")
+		for i in vr.crew.size():
+			bob = maxf(bob, absf(vr.crew[i].position.y - seats[i]))
+	vr.animate(1.0 / 60.0, 0.0, "", 0.0, false, "")
+	var back := 0.0
+	for i in vr.crew.size():
+		back = maxf(back, absf(vr.crew[i].position.y - seats[i]))
+	check(seats.size() > 0 and bob > 0.005 and bob < 0.05 and back < 0.0001, "cheering tank crew bob in their hatch and sit back down after (%.3f m, then %.4f m)" % [bob, back])
+	var legs: Array[float] = []
+	for ln in ["leg_fl", "leg_fr", "leg_bl", "leg_br"]:
+		legs.append((d.rig.pv[ln] as Node3D).rotation.x)
+	var spread := legs.max() - legs.min() as float
+	check(spread > 0.01, "a dragon's dangling legs don't all swing together (%.3f)" % spread)
+	check(B3Mats.HPBAR_SHADER.contains("length(MODEL_MATRIX[0].xyz)") and tk.bar.scale.x > 1.0, "health bars face the camera but keep their size (bigger for big fighters)")

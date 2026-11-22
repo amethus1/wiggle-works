@@ -98,6 +98,9 @@ func _ready() -> void:
 		await _fly_plane()
 		await _bounds()
 		await _shot_down()
+		await _edge_crash()
+		await _past_friends()
+		await _moon_bombs()
 		await _eyes()
 		await _net()
 		await _scenarios()
@@ -567,6 +570,103 @@ func _shot_down() -> void:
 		c.fire2 = false
 		check(not alive(me) and not alive(foe), "%s: blowing up a jeep right next to you wrecks you too, without a hitch" % kind)
 		B3Player.stop()
+
+
+## Shot down right at the edge of the map, a plane still comes down inside it
+## and counts as knocked out (the shooter gets it), even while it's flown.
+func _edge_crash() -> void:
+	print("shot down at the edge")
+	for played in [false, true]:
+		await fresh()
+		var lim := B3Defs.BOUNDS
+		var pl := spawn("plane", "red", at(lim - 12, 0), "auto", PI * 0.5) as B3Aircraft
+		var shooter := spawn("soldier", "blue", at(0, 0), "peaceful")
+		await sim(0.1)
+		if played:
+			B3Player.start(pl)
+			B3Player.me.fp = true
+			B3Player.me.look_yaw = PI * 0.5
+		# heading straight out, flat out
+		pl.global_basis = Basis(Vector3.UP, PI * 0.5)
+		pl.pitch = 0.0
+		pl.air_spd = pl.speed * 1.3
+		var k0 := shooter.kills
+		pl.hurt(99999.0, Vector3.UP, 1.0, shooter, "blast")
+		var far := 0.0
+		var t := 0.0
+		while alive(pl) and t < 15.0:
+			await sim(0.1)
+			t += 0.1
+			if alive(pl):
+				far = maxf(far, maxf(absf(pl.position.x), absf(pl.position.z)))
+		var who := "flown by you" if played else "on its own"
+		check(not alive(pl) and b.kos >= 1 and shooter.kills > k0, "%s: a plane shot down at the edge crashes and is knocked out (%d KOs)" % [who, b.kos])
+		check(far < lim, "%s: and it comes down inside the map (%.0f of %.0f m)" % [who, far, lim])
+		B3Player.stop()
+
+
+## Machine guns fire past friends too: an MG turret doesn't shoot the
+## teammate standing in front of it.
+func _past_friends() -> void:
+	print("guns fire past friends")
+	await fresh()
+	var nest := spawn("mgnest", "red", at(-8, 0), "peaceful", PI * 0.5) as B3Vehicle
+	var mate := spawn("knight", "red", at(-4, 0), "peaceful", -PI * 0.5)
+	var foe := spawn("elephant", "blue", at(4, 0), "peaceful")
+	foe.max_hp = 5000.0
+	foe.hp = 5000.0
+	nest.target = foe
+	await sim(1.5)
+	var vr := nest.rig as B3VRig
+	for i in 12:
+		nest._vgun(nest.wpn, vr.muzzle, false)
+		await get_tree().physics_frame
+	check(mate.hp == mate.max_hp and not mate.down, "an MG turret's bullets fly past the teammate in front of it")
+	check(foe.hp < foe.max_hp, "and hit the enemy behind it (%.0f damage)" % (foe.max_hp - foe.hp))
+
+
+## Bombs fall with the 🌍 Gravity rule (slowly in Moon gravity), and a plane
+## allows for it: it still drops them on the enemy.
+func _moon_bombs() -> void:
+	for gname in ["normal", "moon"]:
+		await _bombs_in(gname)
+
+
+func _bombs_in(gname: String) -> void:
+	print("bombs in %s gravity" % gname)
+	await fresh()
+	B3Rules.set_value("gravity", gname)
+	b.apply_rules()
+	var pl := spawn("plane", "red", at(-20, 0))
+	var foes: Array[B3Unit] = []
+	for i in 6:
+		foes.append(spawn("soldier", "blue", at(10, -10 + i * 4.0), "peaceful"))
+	for f in foes:
+		f.max_hp = 2000.0
+		f.hp = 2000.0
+	await sim(0.3)
+	b.set_fighting(true)
+	var near := 99.0
+	var seen := {}
+	var fall := 0.0
+	var t := 0.0
+	while t < 60.0 and near > 8.0:
+		await sim(0.1)
+		t += 0.1
+		for c in b.proj_root.get_children():
+			if c is B3Proj and (c as B3Proj).kind == "bomb":
+				seen[c] = (c as B3Proj).global_position
+				fall = (c as B3Proj).g
+		for bk in seen.keys():
+			if not is_instance_valid(bk):
+				var at_: Vector3 = seen[bk]
+				for f in foes:
+					near = minf(near, Vector2(at_.x - f.position.x, at_.z - f.position.z).length())
+				seen.erase(bk)
+	check(absf(fall - 9.8 * B3Rules.gravity_k()) < 0.01, "%s gravity: its bombs fall at %.1f m/s²" % [gname, fall])
+	check(alive(pl) and near <= 8.0, "%s gravity: a plane's bomb lands among the enemy (%.1f m from one, after %ds)" % [gname, near, int(t)])
+	B3Rules.set_value("gravity", "normal")
+	b.apply_rules()
 
 
 # ------------------------------------------------------------------- seats

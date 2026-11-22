@@ -162,7 +162,7 @@ func _hurl() -> void:
 	var aim := target.position + Vector3(target.linear_velocity.x, 0, target.linear_velocity.z) * 0.5 + Vector3(0, 0.4, 0)
 	var flat := _flat(aim - from)
 	var tt := clampf(flat.length() / 12.0, 0.55, 1.4)
-	var vel := flat / tt + Vector3(0, (aim.y - from.y + 0.5 * 9.8 * tt * tt) / tt, 0)
+	var vel := B3Proj.lob(from, aim, tt, "boulder")
 	battle.spawn_proj("boulder", from, vel, self, B3Defs.weapon("boulder"))
 	battle.snd("swing", from, 0.8)
 	battle.snd("growl", position, 0.5)
@@ -180,7 +180,7 @@ func _fire_gun(w: Dictionary) -> void:
 	var s := float(w.get("spread", 0.01))
 	dir = (dir + Vector3(rng.randf_range(-s, s), rng.randf_range(-s, s) * 0.6, rng.randf_range(-s, s))).normalized()
 	var to := from + dir * (float(w.range) * 1.4)
-	var hit: Dictionary = battle.raycast(from, to, B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_PROP | B3Defs.L_SCENERY, [get_rid()])
+	var hit := shot_ray(from, to)
 	var end := to
 	if not hit.is_empty():
 		end = hit.position

@@ -1,6 +1,7 @@
 class_name B3Saves
 ## Save slots for 3D battles: the map, rules, fighters (kind, team, mood,
-## place, health, size), buildings, props (barrels, C4, mines, crates),
+## place, health, size, and the extra toughness or slowness some History
+## armies get), buildings, props (barrels, C4, mines, crates),
 ## lava/acid pools and the camera. Stored as JSON in user://b3_saves/.
 ## Saving during or after a fight saves the setup from when Fight! was
 ## pressed, so loading it gives you the same battle to play again.
@@ -22,7 +23,11 @@ static func snapshot(b) -> Dictionary:
 		if not is_instance_valid(u) or u.dead:
 			continue
 		var p: Vector3 = u.center() if u.down else u.position
-		us.append({"k": u.kind, "t": u.team, "p": u.pers_choice, "x": p.x, "z": p.z, "f": u.facing, "hp": u.hp / maxf(1.0, u.max_hp), "s": u.size_mult, "sd": int(u.get_meta("seed", -1))})
+		var e := {"k": u.kind, "t": u.team, "p": u.pers_choice, "x": p.x, "y": p.y, "z": p.z, "f": u.facing,
+			"hp": u.hp / maxf(1.0, u.max_hp), "mh": u.max_hp, "sp": u.speed, "s": u.size_mult, "sd": int(u.get_meta("seed", -1))}
+		if u.has_meta("history"):
+			e["h"] = true      # a History battle's fighter (B3History keeps the fight from stalling)
+		us.append(e)
 	var ss: Array = []
 	for s: B3Struct in b.structs:
 		if is_instance_valid(s) and not s.pieces.is_empty():
@@ -55,7 +60,8 @@ static func restore(b, d: Dictionary, with_rules := true, same_map := false) -> 
 	if with_rules and not rules.is_empty():
 		B3Rules.load_from_settings()
 		for k in rules:
-			if B3Rules.DEFAULTS.has(k):
+			# (Screen shake is how you like to watch, not part of the battle)
+			if B3Rules.DEFAULTS.has(k) and k != "shake":
 				B3Rules.values[k] = String(rules[k])
 		Settings.b3_rules = B3Rules.values.duplicate()
 		Settings.save()
@@ -82,12 +88,24 @@ static func restore(b, d: Dictionary, with_rules := true, same_map := false) -> 
 		var p = b.spawn_prop(String(e.k), Vector3(float(e.x), float(e.y), float(e.z)), float(e.yaw))
 		if p:
 			p.global_position = Vector3(float(e.x), float(e.y), float(e.z))
+	var watched: Array = []
 	for e in d.get("units", []):
 		var x := float(e.x)
 		var z := float(e.z)
-		var u = b.spawn_unit(String(e.k), String(e.t), Vector3(x, b.surface_y(Vector3(x, 60.0, z)), z), String(e.get("p", "auto")), float(e.get("f", 0.0)), float(e.get("s", 1.0)), int(e.get("sd", -1)))
+		# the floor right under where it was (inside a bunker, not on its roof);
+		# old saves without a height get the top of whatever is there
+		var top := float(e.y) + 0.6 if e.has("y") else 60.0
+		var u = b.spawn_unit(String(e.k), String(e.t), Vector3(x, b.surface_y(Vector3(x, top, z)), z), String(e.get("p", "auto")), float(e.get("f", 0.0)), float(e.get("s", 1.0)), int(e.get("sd", -1)))
 		if u:
+			if e.has("mh"):
+				u.max_hp = float(e.mh)      # History: tougher hoplites, worn-out French knights...
+			if e.has("sp"):
+				u.speed = float(e.sp)       # ...and slow ones stuck in the mud
 			u.hp = u.max_hp * clampf(float(e.get("hp", 1.0)), 0.05, 1.0)
+			if bool(e.get("h", false)):
+				watched.append(u)
+	if not watched.is_empty():
+		B3History.watch(b, watched)
 	var c: Array = d.get("cam", [])
 	if c.size() == 4:
 		b.cam.focus = Vector3(float(c[0]), 0, float(c[1]))

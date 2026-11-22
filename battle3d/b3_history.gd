@@ -231,7 +231,7 @@ static func run(b, id_s: String) -> void:
 			view = _dday(b, f)
 		"bulge":
 			view = _bulge(b, f)
-	_watch(b, _next_gen(b), f.units)
+	watch(b, f.units)
 	# turn the view so the two armies face each other across the screen
 	var yaw_deg := rad_to_deg(atan2(-f.ax.z, f.ax.x))
 	b.cam.yaw = yaw_deg
@@ -244,6 +244,15 @@ static func run(b, id_s: String) -> void:
 		b.ui.refresh()
 	if go:
 		b.later(0.6, func(): b.set_fighting(true))
+
+
+## Keeps the battle from stalling (see _watch). Also called by B3Saves when
+## ⏮ Reset or 💾 Load puts a History battle's fighters back.
+static func watch(b, units: Array) -> void:
+	for u in units:
+		if is_instance_valid(u):
+			(u as Node).set_meta("history", true)      # saved with the battle (B3Saves)
+	_watch(b, _next_gen(b), units)
 
 
 static func _next_gen(b) -> int:

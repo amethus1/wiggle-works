@@ -28,7 +28,9 @@ var fp_ctl: B3Ctl = null
 var fov := 72.0
 var hands: B3FPView = null      # the weapon in your hands in first person
 var battle = null
-var _hidden_near: Array = []    # fighters right in front of your face (hidden in first person)
+var _hidden_near: Array = []    # teammates right in front of your face (hidden in first person)
+var _hid: Array = []            # the meshes of your own body we hid (they go with it into a ragdoll)
+var _fp_rig := 0                # the model we hid (its id); standing up or changing team builds a new one
 const HIDE_LAYER := 1 << 19     # render layer for the body you're looking out of
 
 
@@ -76,46 +78,62 @@ func too_close(p: Vector3) -> bool:
 
 ## Looks out of `u`'s eyes (null goes back to the overhead view).
 func set_first_person(u: B3Unit, c: B3Ctl) -> void:
-	if fp_unit != null and is_instance_valid(fp_unit):
-		_show_body(fp_unit, true)
+	_show_body()
 	fp_unit = u
 	fp_ctl = c
-	if hands:
-		hands.queue_free()
-		hands = null
 	if u != null:
-		hands = B3FPView.new()
-		cam.add_child(hands)
-		hands.setup(u)
-		_show_body(u, false)
+		_new_body(u)
 		cam.projection = Camera3D.PROJECTION_PERSPECTIVE
 		cam.fov = fov
 		cam.near = 0.08
 		cam.far = 900.0
 	else:
+		if hands:
+			hands.queue_free()
+			hands = null
 		cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 		cam.near = 1.0
 		cam.far = 700.0
 	apply()
 
 
+## Hides `u`'s body (its model right now) and puts its weapon in your hands.
+func _new_body(u: B3Unit) -> void:
+	if hands:
+		hands.queue_free()
+	hands = B3FPView.new()
+	cam.add_child(hands)
+	hands.setup(u)
+	_hide_body(u)
+	_fp_rig = u.rig.get_instance_id() if u.rig else 0
+
+
 ## Puts a fighter's body on a layer the first-person camera doesn't draw, so
 ## you don't see the inside of your own head.
-func _show_body(u: Node, on: bool) -> void:
+func _hide_body(u: Node) -> void:
 	if not is_instance_valid(u):
 		return
 	for c in u.find_children("*", "VisualInstance3D", true, false):
 		var vi := c as VisualInstance3D
 		if _keep(vi, u):
 			continue      # a car's bonnet or a plane's cockpit frame stays in view
-		if on:
-			if vi.has_meta("fp_layers"):
-				vi.layers = int(vi.get_meta("fp_layers"))
-				vi.remove_meta("fp_layers")
-		else:
-			if not vi.has_meta("fp_layers"):
-				vi.set_meta("fp_layers", vi.layers)
-			vi.layers = HIDE_LAYER
+		if not vi.has_meta("fp_layers"):
+			vi.set_meta("fp_layers", vi.layers)
+			_hid.append(vi)
+		vi.layers = HIDE_LAYER
+
+
+## Draws every mesh we hid again, wherever it is now: when you fall over, your
+## body's meshes move into the ragdoll, and that stays on the field after a
+## knock-out (with its X eyes and stars).
+func _show_body() -> void:
+	for o in _hid:
+		if is_instance_valid(o) and (o as Node).has_meta("fp_layers"):
+			var vi := o as VisualInstance3D
+			vi.layers = int(vi.get_meta("fp_layers"))
+			vi.remove_meta("fp_layers")
+	_hid.clear()
+	_fp_rig = 0
 
 
 ## True if `n` or a parent (up to the unit) has the "fp_keep" meta.
@@ -155,6 +173,8 @@ func _process(_d: float) -> void:
 	if fp_ctl != null and not first_person():
 		set_first_person(null, null)      # the fighter we were looking out of is gone
 	if first_person():
+		if fp_unit.rig != null and fp_unit.rig.get_instance_id() != _fp_rig:
+			_new_body(fp_unit)      # got back up, or changed team: a new model to hide (and a new weapon to hold)
 		var p := fp_unit.global_position
 		focus = Vector3(p.x, 0, p.z)
 		_hide_near(p)
@@ -178,12 +198,13 @@ func _process(_d: float) -> void:
 
 
 ## In first person, a teammate standing in your face would fill the whole
-## view, so fighters within an arm's length are hidden until they move away.
+## view, so teammates within an arm's length are hidden until they move away.
+## Enemies always stay in view (you need to see the one swinging at you).
 func _hide_near(at: Vector3) -> void:
 	var keep: Array = []
 	if battle != null and at.x != INF:
 		for u: B3Unit in battle.units:
-			if u == fp_unit or u.rig == null or u is B3Vehicle:
+			if u == fp_unit or u.rig == null or u is B3Vehicle or fp_unit.is_enemy(u):
 				continue
 			var d := Vector2(u.position.x - at.x, u.position.z - at.z).length()
 			if d < 1.1 + u.radius and absf(u.position.y - at.y) < 2.5:

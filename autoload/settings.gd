@@ -5,6 +5,7 @@ extends Node
 signal sticker_earned(id: String)
 
 const PATH := "user://settings.cfg"
+const SAVE_DELAY := 3.0       # counters save this many seconds after they change (see count)
 const COLORS := [
 	Color8(100, 220, 255), Color8(120, 240, 140), Color8(255, 110, 170), Color8(190, 140, 255),
 	Color8(255, 230, 90), Color8(255, 120, 90), Color8(90, 200, 190), Color8(255, 165, 55),
@@ -26,10 +27,12 @@ var b3_rules := {}            # 3D Battle rules (see B3Rules)
 var b3_mouse_k := 1.0         # first-person mouse speed
 var auto_update := true       # 🔄 look for a new version on GitHub when the game starts
 var testing := false          # tests and screenshots never write the save file
+var file := PATH              # where it's saved (tests point this somewhere else)
+var _unsaved := false         # counters changed since the last save
 
 
 func _ready() -> void:
-	testing = DisplayServer.get_name() == "headless" or Array(OS.get_cmdline_user_args()).any(func(a): return String(a).begins_with("--shot"))
+	testing = DisplayServer.get_name() == "headless" or test_run(OS.get_cmdline_user_args())
 	load_settings()
 	if player_name == "":
 		randomize()
@@ -37,11 +40,20 @@ func _ready() -> void:
 		player_color = COLORS[randi() % COLORS.size()]
 
 
+## Screenshots (--shot) and test suites (--test=, even windowed ones like
+## perf) start from fresh settings and never write the player's file.
+static func test_run(args: PackedStringArray) -> bool:
+	for a in args:
+		if a.begins_with("--shot") or a.begins_with("--test"):
+			return true
+	return false
+
+
 func load_settings() -> void:
 	if testing:
 		return
 	var c := ConfigFile.new()
-	if c.load(PATH) != OK:
+	if c.load(file) != OK:
 		return
 	player_name = String(c.get_value("player", "name", ""))
 	player_color = c.get_value("player", "color", COLORS[0])
@@ -59,6 +71,7 @@ func load_settings() -> void:
 
 
 func save() -> void:
+	_unsaved = false
 	if testing:
 		return
 	var c := ConfigFile.new()
@@ -75,7 +88,29 @@ func save() -> void:
 	c.set_value("battle3d", "rules", b3_rules)
 	c.set_value("battle3d", "mouse", b3_mouse_k)
 	c.set_value("update", "auto", auto_update)
-	c.save(PATH)
+	c.save(file)
+
+
+## Saves soon, once, however many counters change in the meantime (a chain of
+## booms shouldn't write the file fifty times).
+func save_soon() -> void:
+	if _unsaved:
+		return
+	_unsaved = true
+	get_tree().create_timer(SAVE_DELAY, true, false, true).timeout.connect(func():
+		if _unsaved:
+			save())
+
+
+## True while a change is waiting for save_soon().
+func unsaved() -> bool:
+	return _unsaved
+
+
+func _exit_tree() -> void:
+	# quitting before save_soon() got to it: keep the progress
+	if _unsaved:
+		save()
 
 
 func add_recent(id: String) -> void:
@@ -96,12 +131,15 @@ func award(id: String) -> bool:
 	return true
 
 
-## Adds to a named counter and awards `sticker` when it reaches `goal`.
+## Adds to a named counter and awards `sticker` when it reaches `goal`. The
+## count is saved too, so a sticker half-way done is still half-way done
+## next time.
 func count(name: String, sticker := "", goal := 0, amount := 1) -> int:
 	var v := int(counters.get(name, 0)) + amount
 	counters[name] = v
-	if sticker != "" and v >= goal:
-		award(sticker)
+	if sticker != "" and v >= goal and award(sticker):
+		return v   # award() saved everything
+	save_soon()
 	return v
 
 

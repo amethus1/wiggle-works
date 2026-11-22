@@ -6,7 +6,9 @@ extends Node2D
 ## On a network client the world is a "puppet": it draws what the host sends.
 
 signal fx(name: String, args: Dictionary)   # every visual/sound event (the host forwards these)
-signal world_changed
+## rebuilt: the playground was loaded, undone or cleared (old effects go too);
+## false when only a setting changed (pause, speed, night, gravity, fighting).
+signal world_changed(rebuilt: bool)
 
 const UNDO_MAX := 15
 const MAX_TOYS := 420
@@ -112,7 +114,7 @@ func load_world(id: String, with_starters := true) -> void:
 		Worlds.add_starters(self, id)
 	_undo.clear()
 	Settings.mark("worlds", id, "explorer", Catalog.WORLDS.size())
-	world_changed.emit()
+	world_changed.emit(true)
 
 
 ## Water areas are rectangles; cut away the ground so only the pond shows.
@@ -122,12 +124,15 @@ func _cut_water() -> void:
 		var rect: Rect2 = water[wi]
 		var pieces: Array = [PackedVector2Array([rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)])]
 		for g in terrain.get_children():
-			if not (g is Ground):
+			# ground from the last world (or a removed platform) is still here until
+			# the end of the frame: it mustn't cut holes in the new water
+			if not (g is Ground) or g.is_queued_for_deletion():
 				continue
 			var next: Array = []
 			for pc in pieces:
 				for out in Geometry2D.clip_polygons(pc, g.poly):
-					if not Geometry2D.is_polygon_clockwise(out) or true:
+					# clockwise pieces are holes (ground sunk completely in the water)
+					if not Geometry2D.is_polygon_clockwise(out):
 						next.append(out)
 			pieces = next
 		for pc in pieces:
@@ -453,11 +458,12 @@ func clear_toys() -> void:
 ## Takes away every platform and pit the players built (the world's own stay).
 func clear_placed() -> void:
 	var groups := {}
+	# placed things have groups above 0; the world's own forts and catwalks are below 0
 	for pl in platforms:
-		if int(pl.group) != 0:
+		if int(pl.group) > 0:
 			groups[int(pl.group)] = true
 	for i in liquid_groups.size():
-		if int(liquid_groups[i]) != 0:
+		if int(liquid_groups[i]) > 0:
 			groups[int(liquid_groups[i])] = true
 	for g in groups:
 		remove_platform_group(g)
@@ -530,12 +536,21 @@ func thing_at(p: Vector2, pad := 6.0):
 	for i in range(kids.size() - 1, -1, -1):
 		var t = kids[i]
 		if t is Toy and things.get(t.uid) == t and t.hit_test(p):
-			return t
+			return _holder_or(t)
 	for i in range(kids.size() - 1, -1, -1):
 		var t = kids[i]
 		if t is Toy and things.get(t.uid) == t and t.hit_test(p, pad):
-			return t
+			return _holder_or(t)
 	return null
+
+
+## A weapon in someone's hands counts as part of them: clicking it picks the person.
+func _holder_or(t: Toy):
+	if t.extra.has("held_by"):
+		var f = things.get(int(t.extra.held_by))
+		if f is Fighter:
+			return f
+	return t
 
 
 # --------------------------------------------------------------- commands
@@ -598,12 +613,17 @@ func apply_command(pid: int, c: Dictionary) -> void:
 			if t is Fighter:
 				t._drop_weapon(Vector2(t.facing * 150.0, -200))
 				t.weapon_id = ""
+		"revive":
+			# just this one fighter (✨ Heal Everyone is the spell for everybody)
+			if t is Fighter:
+				t.revive()
+				fx_event("heal", {"p": t.center()})
 		"fight":
 			battle_on = bool(c.get("on", true))
 			for f in fighters():
 				f.target = null
 			fx_event("battle_start" if battle_on else "click", {})
-			world_changed.emit()
+			world_changed.emit(false)
 		"platform":
 			var a := Vector2(c.x0, c.y0)
 			var b := Vector2(c.x1, c.y1)
@@ -672,7 +692,7 @@ func apply_command(pid: int, c: Dictionary) -> void:
 			elif t is Fighter:
 				t.facing = -t.facing
 		"nail":
-			if t is Toy:
+			if t is Toy and not t.extra.has("held_by"):
 				t.nailed = not t.nailed
 				t.update_freeze()
 				fx_event("nail", {"p": t.global_position, "on": t.nailed})
@@ -717,23 +737,23 @@ func apply_command(pid: int, c: Dictionary) -> void:
 			cast_magic(String(c.get("id", "")))
 		"gravity":
 			set_gravity(String(c.get("id", "normal")))
-			world_changed.emit()
+			world_changed.emit(false)
 		"night":
 			set_night(bool(c.get("on", false)))
-			world_changed.emit()
+			world_changed.emit(false)
 		"pause":
 			set_paused(bool(c.get("on", false)))
-			world_changed.emit()
+			world_changed.emit(false)
 		"speed":
 			set_speed(float(c.get("v", 1.0)))
-			world_changed.emit()
+			world_changed.emit(false)
 		"world":
 			if allow_world_actions or pid == 0:
 				load_world(String(c.get("id", "meadow")))
 		"clear":
 			if allow_world_actions or pid == 0:
 				clear_toys()
-				world_changed.emit()
+				world_changed.emit(true)
 		"undo":
 			if allow_world_actions or pid == 0:
 				undo()
@@ -770,6 +790,8 @@ func clone(t) -> void:
 
 # ------------------------------------------------------------------ grabs
 func grab_start(pid: int, t, at: Vector2) -> void:
+	if t is Toy and t.extra.has("held_by"):
+		return   # a weapon in someone's hands goes where they go
 	var g := {"uid": t.uid, "target": at, "whole": false, "seen": Time.get_ticks_msec(), "pull": 0.0}
 	if t is Wiggly:
 		g.idx = t.nearest_point(at)
@@ -809,7 +831,7 @@ func grab_end(pid: int) -> void:
 		t.grabbed_by.erase(pid)
 		# Drop a Wiggly onto one of the same kind to combine them.
 		for o in wigglies():
-			if o != t and o.kind == t.kind and o.com.distance_to(t.com) < (o.radius() + t.radius()) * 0.85:
+			if o != t and o.kind == t.kind and o.com.distance_to(t.com) < (o.radius() + t.radius()) * 0.85 and not _just_popped(o, t):
 				merge_wigglies(o, t)
 				break
 
@@ -826,7 +848,12 @@ func _drive_grabs(dt: float) -> void:
 		if t is Wiggly:
 			if t.points.is_empty():
 				continue
-			if g.whole or paused or t.frozen_t > 0.0:
+			if paused:
+				# physics is stopped, so pushing won't move it: carry the whole Wiggly
+				var mv: Vector2 = target + g.off - t.points[int(g.idx)].global_position
+				t.teleport(t.com + mv)
+				continue
+			if g.whole or t.frozen_t > 0.0:
 				var d: Vector2 = target - t.com
 				for p in t.points:
 					p.linear_velocity = d * 14.0
@@ -854,7 +881,12 @@ func _drive_grabs(dt: float) -> void:
 				g.local = Vector2.ZERO
 			if part:
 				var pa: Vector2 = part.to_global(g.local)
-				part.linear_velocity = ((target - pa) * 16.0).limit_length(2600.0)
+				if paused:
+					# physics is stopped: carry every piece of the ragdoll along
+					for b in t.all_bodies():
+						b.global_position += target - pa
+				else:
+					part.linear_velocity = ((target - pa) * 16.0).limit_length(2600.0)
 				t.down_t = 0.0
 		elif t is Toy:
 			var anchor: Vector2 = t.to_global(g.local)
@@ -888,14 +920,22 @@ func split_wiggly(w: Wiggly, pid := -1) -> void:
 		if nw:
 			nw.paint = paint
 			nw.dizzy_t = 1.2
+			nw.set_meta("popped_t", nw.t)
 	if w1:
 		w1.set_velocity(vel - pull_dir * 260.0)
 	if w2:
 		w2.set_velocity(vel + pull_dir * 260.0)
-		if pid >= 0 and grabs.has(pid):
-			grab_start(pid, w2, Vector2(grabs[pid].target))
+		# remove() let go of the old Wiggly, so keep hold of this half instead
+		if pid >= 0 and g != null:
+			grab_start(pid, w2, Vector2(g.target))
 	fx_event("split", {"p": c, "k": kind})
 	Settings.award("pop")
+
+
+## The two halves of a Wiggly that just popped: letting go of one right away
+## mustn't stick them straight back together.
+func _just_popped(a: Wiggly, b: Wiggly) -> bool:
+	return a.t - float(a.get_meta("popped_t", -INF)) < 1.0 and b.t - float(b.get_meta("popped_t", -INF)) < 1.0
 
 
 func merge_wigglies(a: Wiggly, b: Wiggly) -> void:
@@ -1105,17 +1145,21 @@ func random_open_spot(near: Vector2) -> Vector2:
 	return near + Vector2(0, -150)
 
 
+## The pool of water at `p` (lava and acid don't count: they hurt, they don't float things).
 func in_water(p: Vector2) -> Rect2:
-	for r in water:
-		if r.has_point(p):
-			return r
+	for i in water.size():
+		if water[i].has_point(p) and (i >= liquid_kinds.size() or liquid_kinds[i] == "water"):
+			return water[i]
 	return Rect2()
 
 
 # ----------------------------------------------------------- the loop
 func _physics_process(dt: float) -> void:
 	vision_time += dt
-	if puppet or paused:
+	if puppet:
+		return
+	if paused:
+		_drive_grabs(dt)   # everything is stopped, but you can still move things around
 		return
 	_handle_impacts()
 	for w in wiggly_layer.get_children():
@@ -1566,4 +1610,4 @@ func restore(d: Dictionary) -> void:
 		l.uid_b = int(e.b)
 		l.build(pin_parent)
 		links.append(l)
-	world_changed.emit()
+	world_changed.emit(true)

@@ -22,6 +22,9 @@ static var team := ""               # whose side you were on (first person jumps
 static var last_pos := Vector3.ZERO # where you were (the nearest teammate takes over)
 
 const MASK := B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_PROP | B3Defs.L_SCENERY
+## Attacks that take a moment before the shot or throw goes off: sniper and
+## Robot aim, bazooka aim, bow draw, Wizard spell, grenade throw.
+const WINDUPS := ["aim", "bow", "cast", "throw"]
 
 
 static func active() -> bool:
@@ -112,9 +115,38 @@ static func control(u: B3Unit, dt: float) -> void:
 			u.battle.snd("whoosh", u.position, 0.4, 1.3)
 	if u.flying and c.lift != 0.0:
 		u._alt = clampf(u._alt + c.lift * dt * 6.0, 2.0, 30.0)
-	u.target = _pick_target(u, c)
+	var locked := false
+	if c.windup != "":
+		if u.act == c.windup:
+			# overhead: still winding up, so stay on the enemy you clicked even if the mouse moves off it
+			locked = not c.fp and is_instance_valid(u.target) and (c.windup == "throw" or not u.target.down)
+		else:
+			# the wind-up is over. The fighter shot at its enemy if it still had one;
+			# if not (it moved off, or there never was one), the shot goes where you're aiming.
+			if c.windup != "throw" and u.act == "" and u.act_t >= u.act_len and not _had_target(u):
+				_shoot_at(u, c, u.act_w, false)
+			c.windup = ""
+	if not locked:
+		u.target = _pick_target(u, c)
+	_swing_landed(u, dt)
 	if c.fire and u.cd <= 0.0 and u.act == "":
 		_attack(u, c)
+
+
+## The test the fighter itself makes when a wind-up ends (B3Unit._act_update):
+## true if it has an enemy to shoot at.
+static func _had_target(u: B3Unit) -> bool:
+	return is_instance_valid(u.target) and not u.target.down
+
+
+## A melee swing lands halfway through (B3Unit._melee_hit). If it hurt the
+## enemy just now, the first-person crosshair shows a hit marker.
+static func _swing_landed(u: B3Unit, dt: float) -> void:
+	if u.act != "attack" or u.act_len <= 0.0 or not is_instance_valid(u.target):
+		return
+	var half := u.act_len * 0.5
+	if u.act_t >= half and u.act_t - dt < half and u.target.hurt_t <= 0.0:
+		u.battle.player_hit(u, u.target)
 
 
 ## The enemy under the cursor or crosshair, or (for melee) whoever is right in front.
@@ -145,16 +177,27 @@ static func _pick_target(u: B3Unit, c: B3Ctl) -> B3Unit:
 static func _attack(u: B3Unit, c: B3Ctl) -> void:
 	var w: Dictionary = u.wpn
 	var ty := String(w.type)
-	var aim_at := c.aim
-	if not (ty in ["gun", "proj", "throw"]) or (u.target != null and not c.fp):
-		u._attack(w)      # melee, or overhead with an enemy under the mouse: the fighter aims itself
+	var spell := String(w.get("proj", "")) == "fireball"
+	if not (ty in ["gun", "proj", "throw"]) or (u.target != null and not c.fp) or spell:
+		# melee, a Wizard's spell (it always waves its staff first), or overhead
+		# with an enemy under the mouse: the fighter attacks by itself, wind-up and all
+		u._attack(w)
+		if u.act in WINDUPS:
+			c.windup = u.act
 		return
-	# shoot exactly at the spot (first person: the crosshair; overhead: the ground under the mouse)
-	match ty:
+	_shoot_at(u, c, w, true)
+
+
+## Shoots exactly at the spot you're aiming at (first person: the crosshair;
+## overhead: the ground under the mouse). `start_cd` is false after a wind-up
+## (its cooldown started with it).
+static func _shoot_at(u: B3Unit, c: B3Ctl, w: Dictionary, start_cd: bool) -> void:
+	var aim_at := c.aim
+	match String(w.type):
 		"gun":
 			_fire_at(u, w, aim_at if c.fp else aim_at + Vector3(0, 0.9, 0))
 		"proj":
-			_proj_at(u, w, aim_at)
+			_proj_at(u, w, aim_at, start_cd)
 		"throw":
 			_throw_at(u, w, aim_at)
 
@@ -167,11 +210,25 @@ static func _fire_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
 		s *= 0.5        # aiming down the sights
 	dir = (dir + Vector3(u.rng.randf_range(-s, s), u.rng.randf_range(-s, s) * 0.6, u.rng.randf_range(-s, s))).normalized()
 	var to := from + dir * (float(w.range) * 1.6)
-	var hit: Dictionary = u.battle.raycast(from, to, MASK, [u.get_rid()])
+	var hit: Dictionary = u.shot_ray(from, to)      # flies past teammates, like the computer's shots
 	var end := to
 	if not hit.is_empty():
 		end = hit.position
 		u.battle.shot_hit(hit, w, dir, u)
+	if w.has("beam"):
+		# the Robot's laser: a fat glowing beam, the same as when it fires by itself (B3Special)
+		var bc: Color = w.get("tracer", Color(5, 1, 1))
+		u.battle.fx.beam(from, end, bc, float(w.beam), 0.22)
+		u.battle.fx.beam(from, end, Color(2.6, 1.6, 1.6), float(w.beam) * 0.3, 0.16)
+		u.battle.fx.muzzle(from, dir, 1.4)
+		u.battle.snd(String(w.get("snd", "gun_laser")), from, 0.85)
+		if u.rig:
+			u.rig.recoil = 1.0
+		u.act = "shoot"
+		u.act_t = 0.0
+		u.act_len = 0.15
+		u.cd = float(w.cd)
+		return
 	var tc: Color = w.get("tracer", Color(4, 3, 1))
 	u.battle.fx.tracer(from, end, tc, 0.08)
 	if w.has("smoke") and u.has_method("musket_smoke"):
@@ -195,36 +252,39 @@ static func _fire_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
 		u.cd = float(w.cd)
 
 
-static func _proj_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
+static func _proj_at(u: B3Unit, w: Dictionary, point: Vector3, start_cd := true) -> void:
 	var from := u._muzzle_pos()
 	var sp := float(w.get("speed", 20.0))
 	var kind_s := String(w.get("proj", "rocket"))
 	var vel: Vector3
+	# B3Proj.lob aims for the Gravity rule, so shots land where you point in Moon gravity too
 	if kind_s == "arrow":
-		var flat := u._flat(point - from)
-		var tt := maxf(flat.length() / sp, 0.15)
-		vel = flat / tt + Vector3(0, (point.y - from.y + 0.5 * 9.8 * tt * tt) / tt, 0)
+		var tt := maxf(u._flat(point - from).length() / sp, 0.15)
+		vel = B3Proj.lob(from, point, tt, kind_s)
 	else:
 		var p := point + (Vector3(0, 0.3, 0) if not (u.ctl and u.ctl.fp) else Vector3.ZERO)
-		vel = (p - from).normalized() * sp
+		vel = B3Proj.lob(from, p, maxf(from.distance_to(p) / sp, 0.05), kind_s)
 	u.battle.spawn_proj(kind_s, from, vel, u, w)
 	u.battle.snd(String(w.get("snd", "bazooka")), from, 0.8)
 	if kind_s == "rocket":
 		u.battle.fx.muzzle(from, vel.normalized(), 1.8)
+	elif kind_s == "fireball":
+		u.battle.fx.muzzle(from, vel.normalized(), 1.3)
 	if u.rig:
 		u.rig.recoil = 1.0
-	u.cd = float(w.cd)
+	if start_cd:
+		u.cd = float(w.cd)
 
 
 static func _throw_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
 	var from := u.position + Vector3(0, u.aim_y + 0.5, 0) + u.forward() * 0.3
-	var flat := u._flat(point - from)
-	var tt := clampf(flat.length() / 9.0, 0.6, 1.5)
-	var vel := flat / tt + Vector3(0, (point.y - from.y + 0.5 * 9.8 * tt * tt) / tt, 0)
-	var p = u.battle.spawn_proj(String(w.get("proj", "grenade")), from, vel, u, w)
+	var tt := clampf(u._flat(point - from).length() / 9.0, 0.6, 1.5)
+	var kind_s := String(w.get("proj", "grenade"))
+	var vel := B3Proj.lob(from, point, tt, kind_s)
+	var p = u.battle.spawn_proj(kind_s, from, vel, u, w)
 	if p and "fuse" in p:
 		p.fuse = tt + 0.5
 	u.battle.snd("swing", from, 0.5)
 	u._start_act("throw", 0.4, w)
 	u.act_fired = true
-	u.cd = float(w.cd) * 0.6
+	u.cd = float(w.cd)      # the same as when the Grenadier throws by itself

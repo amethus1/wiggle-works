@@ -40,7 +40,6 @@ func setup(b, k: String, v: Vector3) -> void:
 			B3Mats.add(self, B3Mats.box(Vector3(0.12, 0.01, 0.14)), B3Mats.mat(Color("ff6b6b")), Vector3(0, 0, -0.36), Vector3.ZERO, Vector3.ONE, false)
 			B3Mats.add(self, B3Mats.box(Vector3(0.01, 0.12, 0.14)), B3Mats.mat(Color("ff6b6b")), Vector3(0, 0, -0.36), Vector3.ZERO, Vector3.ONE, false)
 		"rocket":
-			g = 1.2
 			B3Mats.add(self, B3Mats.cyl(0.07, 0.07, 0.55, 8), B3Mats.mat(Color("6b7048")), Vector3.ZERO, Vector3(90, 0, 0))
 			B3Mats.add(self, B3Mats.cyl(0.0, 0.07, 0.2, 8), B3Mats.mat(Color("d94c3a")), Vector3(0, 0, 0.37), Vector3(90, 0, 0))
 			B3Mats.add(self, B3Mats.sphere(0.09, 8), B3Mats.glow(Color(1.0, 0.6, 0.2), 4.0), Vector3(0, 0, -0.3), Vector3.ZERO, Vector3.ONE, false)
@@ -66,13 +65,11 @@ func setup(b, k: String, v: Vector3) -> void:
 			B3Mats.add(self, B3Mats.sphere(0.32, 12), B3Mats.glow(Color(0.35, 1.0, 0.25, 0.85), 1.4), Vector3.ZERO)
 			B3Mats.add(self, B3Mats.cyl(0.12, 0.12, 0.18, 10), B3Mats.mat(Color("6b4a32")), Vector3(0, 0, 0.35), Vector3(90, 0, 0))
 		"fireball":
-			g = 0.0
 			life = 4.0
 			B3Mats.add(self, B3Mats.sphere(0.2, 12), B3Mats.glow(Color(1.0, 0.85, 0.4), 4.0), Vector3.ZERO, Vector3.ZERO, Vector3.ONE, false)
 			B3Mats.add(self, B3Mats.sphere(0.34, 12), B3Mats.glow(Color(1.0, 0.42, 0.08, 0.55), 2.5), Vector3.ZERO, Vector3.ZERO, Vector3.ONE, false)
 			B3Mats.add(self, B3Mats.cyl(0.0, 0.3, 0.6, 10), B3Mats.glow(Color(1.0, 0.35, 0.05, 0.4), 2.0), Vector3(0, 0, -0.38), Vector3(-90, 0, 0), Vector3.ONE, false)
 		"tankshell":
-			g = 2.0
 			B3Mats.add(self, B3Mats.cyl(0.09, 0.09, 0.4, 10), B3Mats.mat(Color("4a4f38")), Vector3.ZERO, Vector3(90, 0, 0))
 			B3Mats.add(self, B3Mats.cyl(0.0, 0.09, 0.18, 10), B3Mats.mat(Color("d9a54a"), 0.3), Vector3(0, 0, 0.29), Vector3(90, 0, 0))
 			B3Mats.add(self, B3Mats.sphere(0.1, 8), B3Mats.glow(Color(1.0, 0.6, 0.2), 3.0), Vector3(0, 0, -0.22), Vector3.ZERO, Vector3.ONE, false)
@@ -85,7 +82,30 @@ func setup(b, k: String, v: Vector3) -> void:
 			B3Mats.add(self, B3Mats.sphere(0.36, 8), rock, Vector3.ZERO, Vector3(20, 30, 0), Vector3(1.0, 0.8, 0.9))
 			B3Mats.add(self, B3Mats.sphere(0.24, 7), B3Mats.mat(Color("77726d"), 0.95), Vector3(0.2, 0.1, 0.05))
 			_spin = 7.0
+	g = gravity(kind)
 	_orient()
+
+
+## How fast a `k` projectile drops (m/s²), with the 🌍 Gravity rule: arrows,
+## grenades and bombs fall like anything else, rockets and tank shells only
+## sag a little and fireballs not at all.
+static func gravity(k: String) -> float:
+	var g0 := 9.8
+	match k:
+		"rocket":
+			g0 = 1.2
+		"tankshell":
+			g0 = 2.0
+		"fireball":
+			g0 = 0.0
+	return g0 * B3Rules.gravity_k()
+
+
+## The launch velocity that takes a `k` projectile from `from` to `to` in
+## `tt` seconds (an arc, or nearly straight for rockets). Everything that
+## aims uses this, so shots still land on target in Moon or Heavy gravity.
+static func lob(from: Vector3, to: Vector3, tt: float, k: String) -> Vector3:
+	return (to - from) / tt + Vector3(0, 0.5 * gravity(k) * tt, 0)
 
 
 func set_shooter(u) -> void:
@@ -135,9 +155,12 @@ func _physics_process(dt: float) -> void:
 	_q.to = to
 	_q.exclude = [shooter_rid] if shooter_rid.is_valid() else []
 	var hit: Dictionary = battle.space().intersect_ray(_q)
-	# arrows and grenades fly past friends
-	if not hit.is_empty() and team != "" and hit.collider is B3Unit and (hit.collider as B3Unit).team == team and team != "wild":
-		_q.exclude = [shooter_rid, (hit.collider as B3Unit).get_rid()] if shooter_rid.is_valid() else [(hit.collider as B3Unit).get_rid()]
+	# arrows, rockets and grenades fly past friends (a whole line of them, not
+	# just the first one)
+	var skip: Array = _q.exclude
+	while skip.size() < 6 and not hit.is_empty() and team != "" and team != "wild" and hit.collider is B3Unit and (hit.collider as B3Unit).team == team:
+		skip.append((hit.collider as B3Unit).get_rid())
+		_q.exclude = skip
 		hit = battle.space().intersect_ray(_q)
 	if hit.is_empty():
 		global_position = to
@@ -205,16 +228,24 @@ func _boom(p: Vector3) -> void:
 		"boulder":
 			_crash(p)
 		_:
-			var by = battle.unit_by_rid(shooter_rid)
-			battle.explode(p, radius, power, dmg, {"by": by})
+			battle.explode(p, radius, power, dmg, _blast_opts())
 	queue_free()
+
+
+## Who a blast belongs to: the shooter for its knock-outs, and its team (kept
+## even if the shooter was knocked out while this was flying) so that with
+## friendly fire off the blast still spares that team.
+func _blast_opts() -> Dictionary:
+	var o := {"by": battle.unit_by_rid(shooter_rid)}
+	if team != "":
+		o["team"] = team
+	return o
 
 
 ## Wizard fireball: a small fiery blast that sets fighters burning and leaves
 ## a little patch of fire on the ground for a few seconds.
 func _fire_burst(p: Vector3) -> void:
-	var by = battle.unit_by_rid(shooter_rid)
-	battle.explode(p, radius, power, dmg, {"by": by})
+	battle.explode(p, radius, power, dmg, _blast_opts())
 	var spare := ""
 	if team != "" and team != "wild" and not B3Rules.friendly_fire():
 		spare = team

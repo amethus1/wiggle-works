@@ -4,10 +4,11 @@ class_name NetCommon
 const PORT := 24700
 const BEACON_PORT := 24701
 const GAME_ID := "wiggle-works"
-const VERSION := 1
+const VERSION := 2             # 2: fighters' health, personality and weapon are in snapshots
 const MAX_FRIENDS := 7
 const SNAP_HZ := 20.0
 const EMOJI := ["👋", "😂", "😮", "🎉", "❤️", "👍", "🔥", "💥"]
+const MAX_UNPACKED := 4 * 1024 * 1024   # biggest packet we'll unpack (real snapshots are far smaller)
 
 
 static func encode(d: Dictionary) -> PackedByteArray:
@@ -23,21 +24,65 @@ static func encode(d: Dictionary) -> PackedByteArray:
 	return plain
 
 
+## Unpacks a packet from encode(). Anything broken, empty or suspiciously
+## big comes back as {} (and is ignored).
 static func decode(pkt: PackedByteArray) -> Dictionary:
-	if pkt.size() < 2:
+	if pkt.size() < 2 or pkt[0] > 1:
 		return {}
 	var raw: PackedByteArray
 	if pkt[0] == 1:
 		if pkt.size() < 6:
 			return {}
 		var n := pkt[1] | (pkt[2] << 8) | (pkt[3] << 16) | (pkt[4] << 24)
-		if n <= 0 or n > 8 * 1024 * 1024:
+		if n <= 0 or n > MAX_UNPACKED:
 			return {}
 		raw = pkt.slice(5).decompress(n, FileAccess.COMPRESSION_ZSTD)
 	else:
 		raw = pkt.slice(1)
-	var v = bytes_to_var(raw)
+	if raw.size() < 4:
+		return {}
+	var v: Variant = bytes_to_var(raw)
 	return v if typeof(v) == TYPE_DICTIONARY else {}
+
+
+## True for a real, sensible number (not NaN or infinity, not huge).
+static func num_ok(v: Variant, limit := 1.0e6) -> bool:
+	if not (v is float or v is int):
+		return false
+	var f := float(v)
+	return is_finite(f) and absf(f) <= limit
+
+
+static func vec2_ok(v: Variant, limit := 1.0e5) -> bool:
+	return v is Vector2 and (v as Vector2).is_finite() and absf((v as Vector2).x) <= limit and absf((v as Vector2).y) <= limit
+
+
+static func vec3_ok(v: Variant, limit := 1.0e5) -> bool:
+	if not (v is Vector3) or not (v as Vector3).is_finite():
+		return false
+	var p: Vector3 = v
+	return absf(p.x) <= limit and absf(p.y) <= limit and absf(p.z) <= limit
+
+
+## A friend's name from a hello packet: short plain text, or "Friend".
+static func clean_name(v: Variant) -> String:
+	var nm := String(v).strip_edges().substr(0, 16) if v is String else ""
+	return nm if nm != "" else "Friend"
+
+
+## Rate limit: true if `who` (a friend's info) may do another `what` now.
+## Lets `burst` happen at once, then `per_s` a second, so a stuck key or a
+## broken copy of the game can't flood the host.
+static func allow(who: Dictionary, what: String, per_s: float, burst: float) -> bool:
+	var now := Time.get_ticks_msec() / 1000.0
+	var key := "rate_" + what
+	var b: Array = who.get(key, [burst, now])
+	var tokens := minf(burst, float(b[0]) + (now - float(b[1])) * per_s)
+	if tokens < 1.0:
+		who[key] = [tokens, now]
+		return false
+	who[key] = [tokens - 1.0, now]
+	return true
 
 
 static func local_addresses() -> Array:
@@ -66,7 +111,8 @@ static func snapshot(game) -> Dictionary:
 	var fs: Array = []
 	for f in w.fighters():
 		var e := [f.uid, f.type, f.team, f.state, f.hp / maxf(1.0, f.max_hp), f.center(), f.facing, f.aim, f.walk, f.move, f.swing,
-			f.grounded, f.mood, f.size, f.helmet, f.body_armor, f.shield, f.burning > 0.0, f.player_id >= 0, f.paint.to_html() if f.paint.a > 0.0 else ""]
+			f.grounded, f.mood, f.size, f.helmet, f.body_armor, f.shield, f.burning > 0.0, f.player_id >= 0, f.paint.to_html() if f.paint.a > 0.0 else "",
+			f.hp, f.max_hp, f.pers, f.weapon_id]
 		if f.state != "stand":
 			var ps := {}
 			for k in f.parts:
@@ -110,16 +156,26 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 			w.battle_on = bool(st[6])
 		if changed and game.hud:
 			game.hud.refresh()
+	# first take away what the host no longer has, so nothing new lands on its number
 	var seen := {}
+	for key in ["toys", "wigs", "fighters"]:
+		for e in s.get(key, []):
+			seen[int(e[0])] = true
+	for uid in w.things.keys():
+		if not seen.has(uid):
+			_drop_puppet(w, uid)
 	for e in s.get("toys", []):
 		var uid: int = e[0]
-		seen[uid] = true
 		var t = w.things.get(uid)
+		if t != null and not (t is Toy):
+			_drop_puppet(w, uid)
+			t = null
 		if t == null:
 			var id: String = e[1]
 			var d := Catalog.toy(id)
 			if float(e[9]) > 0.0:
 				d = Builders.part_def(id, float(e[9]))
+			_free_uid(w)
 			t = w.spawn_toy(id, e[2], e[3], float(e[4]), d)
 			if t == null:
 				continue
@@ -152,14 +208,17 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 		ToyLogic.update_light(w, t)
 	for e in s.get("wigs", []):
 		var uid: int = e[0]
-		seen[uid] = true
 		var wg = w.things.get(uid)
+		if wg != null and not (wg is Wiggly):
+			_drop_puppet(w, uid)
+			wg = null
 		var pts: PackedVector2Array = e[4]
 		if wg == null:
 			var c := Vector2.ZERO
 			for p in pts:
 				c += p
 			c /= maxf(1.0, pts.size())
+			_free_uid(w)
 			wg = w.spawn_wiggly(String(e[1]), c, float(e[2]))
 			if wg == null:
 				continue
@@ -181,9 +240,12 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 		wg.puff = float(e[10])
 	for e in s.get("fighters", []):
 		var uid: int = e[0]
-		seen[uid] = true
 		var f = w.things.get(uid)
+		if f != null and not (f is Fighter):
+			_drop_puppet(w, uid)
+			f = null
 		if f == null:
+			_free_uid(w)
 			f = w.spawn_fighter(String(e[1]), e[5], String(e[2]), "", 1.0, false)
 			if f == null:
 				continue
@@ -209,10 +271,14 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 		f.net["hp"] = float(e[4])
 		f.net["mood"] = String(e[12])
 		f.net["tc"] = e[5]
-		if e.size() > 20:
-			f.net["tparts"] = e[20]
+		f.hp = float(e[20])
+		f.max_hp = float(e[21])
+		f.pers = String(e[22])
+		f.weapon_id = String(e[23])
+		if e.size() > 24:
+			f.net["tparts"] = e[24]
 			if not f.net.has("parts") or String(f.net.get("prev_st", "")) == "stand":
-				f.net["parts"] = (e[20] as Dictionary).duplicate(true)
+				f.net["parts"] = (e[24] as Dictionary).duplicate(true)
 		else:
 			f.net.erase("parts")
 		f.net["prev_st"] = String(e[3])
@@ -234,15 +300,26 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 		for e in liqs:
 			w.add_liquid(e[0], String(e[1]))
 		w._cut_water()
-	for uid in w.things.keys():
-		if not seen.has(uid):
-			var t = w.things[uid]
-			w.things.erase(uid)
-			t.queue_free()
 	var ls: Array = []
 	for l in s.get("links", []):
 		ls.append({"k": l[0], "a": l[1], "b": l[2], "on": l[3]})
 	w.link_view.remote_links = ls
+
+
+## Removes a puppet the host no longer has (node and all).
+static func _drop_puppet(w: World, uid: int) -> void:
+	var t = w.things.get(uid)
+	w.things.erase(uid)
+	if t != null and is_instance_valid(t):
+		(t as Node).queue_free()
+
+
+## A new puppet is spawned under a number of our own, then renumbered to the
+## host's. Skips numbers already in use here, so making it can't knock
+## another puppet out of the list (it would be left behind as a frozen ghost).
+static func _free_uid(w: World) -> void:
+	while w.things.has(w.next_uid + 1):
+		w.next_uid += 1
 
 
 ## Smoothly moves puppets toward the latest snapshot (call every frame on a client).

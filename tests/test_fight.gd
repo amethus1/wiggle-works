@@ -157,6 +157,137 @@ func _ready() -> void:
 	check(w.platforms.size() == np, "and the platforms (%d)" % w.platforms.size())
 	check(w.in_liquid(Vector2(600, 250)) == "acid", "and the acid vat")
 
+	print("fight button and effects")
+	await fresh()
+	var gm := Game.new()   # just its "the world changed" handler
+	gm.effects = fx
+	w.world_changed.connect(gm._on_world_changed)
+	fx.pops.clear()
+	w.apply_command(0, {"cmd": "fight", "on": true})
+	var popped := fx.pops.any(func(q): return String(q.t).contains("FIGHT"))
+	w.apply_command(0, {"cmd": "night", "on": true})
+	w.apply_command(0, {"cmd": "night", "on": false})
+	check(popped and fx.pops.any(func(q): return String(q.t).contains("FIGHT")), "⚔️ FIGHT! stays on screen (pressing ⚔️ or 🌙 doesn't wipe the effects)")
+	w.world_changed.disconnect(gm._on_world_changed)
+	gm.free()
+
+	print("reviving and armor")
+	await fresh()
+	var ko1 := w.spawn_fighter("stick", Vector2(-200, 150), "red", "peaceful")
+	var ko2 := w.spawn_fighter("stick", Vector2(200, 150), "red", "peaceful")
+	await frames(20)
+	ko1.hurt(9999.0)
+	ko2.hurt(9999.0)
+	await frames(10)
+	w.apply_command(0, {"cmd": "revive", "uid": ko1.uid})
+	await frames(10)
+	check(ko1.alive() and not ko2.alive(), "💖 Revive gets just that one fighter back up")
+	var vest1 := w.spawn_toy("body_armor", ko1.center() + Vector2(30, -60))
+	w.apply_command(0, {"cmd": "give", "uid": vest1.uid})
+	var armor1 := ko1.armor
+	var vest2 := w.spawn_toy("body_armor", ko1.center() + Vector2(30, -60))
+	w.apply_command(0, {"cmd": "give", "uid": vest2.uid})
+	check(ko1.body_armor and is_equal_approx(ko1.armor, armor1) and w.things.has(vest2.uid), "a second vest doesn't pile on more armor (%.2f)" % ko1.armor)
+
+	print("swings, reloads and bites")
+	await fresh()
+	var swinger := w.spawn_fighter("knight", Vector2(-40, 150), "red", "attack")
+	var punchbag := w.spawn_fighter("stick", Vector2(40, 150), "blue", "peaceful")
+	punchbag.max_hp = 10000.0
+	punchbag.hp = 10000.0
+	var swung := false
+	for i in 120 * 4:
+		await get_tree().physics_frame
+		if swinger.hit_t > 0.0:
+			swung = true
+			break
+	w.apply_command(0, {"cmd": "pause", "on": true})
+	var hp_paused := punchbag.hp
+	await frames(120)
+	var waited := punchbag.hp == hp_paused
+	w.apply_command(0, {"cmd": "pause", "on": false})
+	await frames(60)
+	check(swung and waited and punchbag.hp < hp_paused, "a sword swing waits while the game is paused, then lands")
+	await fresh()
+	w.battle_on = false
+	var gunner := w.spawn_fighter("gunner", Vector2(0, 150), "red", "ranged")
+	await frames(10)
+	gunner.reload_t = 1.5   # just emptied its machine gun
+	await frames(120 * 2)
+	check(gunner.reload_t <= 0.0, "a gunner reloads while it isn't shooting (%.1f s left)" % gunner.reload_t)
+	await fresh()
+	w.spawn_fighter("trex", Vector2(-400, 150), "red", "attack", 2.0)
+	var snack := w.spawn_fighter("stick", Vector2(300, 150), "blue", "peaceful")
+	snack.max_hp = 100000.0
+	snack.hp = 100000.0
+	var bites := {"swing": 0, "hit": 0}
+	var count_bites := func(n: String, _a: Dictionary) -> void:
+		if bites.has(n):
+			bites[n] += 1
+	w.fx.connect(count_bites)
+	var first := -1
+	for i in 120 * 8:
+		await get_tree().physics_frame
+		if bites.swing > 0 and first < 0:
+			first = i
+		if first >= 0 and i - first > 70:
+			break
+	w.fx.disconnect(count_bites)
+	check(bites.swing >= 1 and bites.hit >= 1, "a big T-Rex's first bite lands instead of snapping at thin air (%d bites, %d hits)" % [bites.swing, bites.hit])
+
+	print("ragdolls, held weapons and arrows")
+	await fresh()
+	var aimer := w.spawn_fighter("soldier", Vector2(0, 150), "red", "peaceful")
+	await frames(20)
+	aimer.aim = -PI * 0.5   # rifle straight up: the arm starts half a turn from the body
+	aimer.hurt(99999.0)
+	# 2-3 s after the knock-out, once the body has landed and stopped rolling,
+	# averaged over a second: a helicopter arm keeps whirling (50+ rad/s
+	# before the fix), a normal ragdoll is lying still
+	var spin_sum := {}
+	for i in 360:
+		await get_tree().physics_frame
+		if i >= 240:
+			for p in aimer.all_bodies():
+				spin_sum[p] = float(spin_sum.get(p, 0.0)) + absf(p.angular_velocity) / 120.0
+	var spin := 0.0
+	for p in spin_sum:
+		spin = maxf(spin, float(spin_sum[p]))
+	check(spin < 10.0, "a knocked-out fighter's arms lie still, not spinning like a helicopter (%.1f rad/s on average)" % spin)
+	await fresh()
+	w.battle_on = false
+	var rifleman := w.spawn_fighter("soldier", Vector2(0, 150), "red", "peaceful")
+	await frames(30)
+	var gun: Toy = rifleman.weapon_toy
+	var muzzle_end := gun.to_global(Vector2(gun.w * 0.45, 0))
+	var butt_end := gun.to_global(Vector2(-gun.w * 0.45, 0))
+	var tip: Vector2 = muzzle_end if absf(muzzle_end.x - rifleman.center().x) > absf(butt_end.x - rifleman.center().x) else butt_end
+	check(w.thing_at(tip) == rifleman, "clicking a soldier's rifle picks the soldier (you can't pull it out of their hands)")
+	w.apply_command(0, {"cmd": "nail", "uid": gun.uid})
+	check(not gun.nailed, "and you can't nail it on its own")
+	w.apply_command(0, {"cmd": "pause", "on": true})
+	var c0 := rifleman.center()
+	w.apply_command(0, {"cmd": "grab", "uid": rifleman.uid, "x": c0.x, "y": c0.y})
+	for i in 20:
+		w.apply_command(0, {"cmd": "drag", "x": c0.x + 200.0, "y": c0.y - 100.0})
+		await get_tree().physics_frame
+	w.apply_command(0, {"cmd": "release"})
+	var moved := rifleman.center() - c0
+	w.apply_command(0, {"cmd": "pause", "on": false})
+	check(moved.distance_to(Vector2(200, -100)) < 40.0, "while paused you can drag a fighter somewhere else (moved %s)" % str(moved))
+	await fresh()
+	var target_jelly := w.spawn_wiggly("bloop", Vector2(0, 0))
+	await frames(2)
+	target_jelly.set_frozen(5.0)   # hangs in the air
+	Combat.launch(w, null, "arrow", Vector2(-250, 0), 0.0, 900.0)
+	var floating := false
+	for i in 90:
+		await get_tree().physics_frame
+		for a in w.toys():
+			if a.id == "arrow" and a.nailed and a.global_position.y < 200.0:
+				floating = true
+	check(not floating, "an arrow that hits a Wiggly bounces off instead of sticking in mid-air")
+
 	print("nuke")
 	await fresh()
 	for i in 6:

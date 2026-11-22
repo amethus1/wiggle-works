@@ -23,9 +23,12 @@ func setup(u: B3Unit) -> void:
 	if arm == null:
 		return
 	var hand := arm.get_node_or_null("Hand") as Node3D
-	if hand == null:
-		return
-	model = hand.duplicate() as Node3D
+	if hand != null:
+		model = hand.duplicate() as Node3D
+	else:
+		model = _arm_end(arm)      # the Robot: its laser cannon is built onto its arm
+		if model == null:
+			return
 	model.transform = Transform3D.IDENTITY
 	add_child(model)
 	for c in model.find_children("*", "VisualInstance3D", true, false):
@@ -53,6 +56,24 @@ func setup(u: B3Unit) -> void:
 			return
 	model.scale = Vector3.ONE * 0.8
 	transform = _base
+
+
+## A copy of what's built onto the end of an arm (past the forearm), turned
+## to point forward like a held weapon. For fighters without a "Hand", like
+## the Robot with its laser cannon. Null if there's nothing there.
+func _arm_end(arm: Node3D) -> Node3D:
+	var n := Node3D.new()
+	# the arm hangs down its -y; a held weapon points along +z
+	var turn := Transform3D(Basis(Vector3.RIGHT, -PI * 0.5), Vector3(0, 0, -0.7))
+	for c in arm.get_children():
+		if c is VisualInstance3D and (c as Node3D).position.y < -0.65:
+			var m := (c as Node3D).duplicate() as Node3D
+			m.transform = turn * (c as Node3D).transform
+			n.add_child(m)
+	if n.get_child_count() == 0:
+		n.free()
+		return null
+	return n
 
 
 func _process(dt: float) -> void:

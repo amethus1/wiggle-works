@@ -51,8 +51,16 @@ func send_hello() -> void:
 
 
 func send_cmd(c: Dictionary) -> void:
-	var fast := String(c.get("cmd", "")) in ["drag", "input", "rotate"]
-	_send({"m": "cmd", "c": c}, not fast)
+	_send({"m": "cmd", "c": c}, needs_reliable(c))
+
+
+## Steady streams (dragging, walking, turning) can lose a packet: the next one
+## is right behind. A jump, special move or pressing/letting go of attack
+## happens once, so it must arrive.
+static func needs_reliable(c: Dictionary) -> bool:
+	if not String(c.get("cmd", "")) in ["drag", "input", "rotate"]:
+		return true
+	return c.has("jump") or c.has("special") or c.has("attack")
 
 
 func emote(id: int) -> void:

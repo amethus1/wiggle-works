@@ -10,6 +10,7 @@ static var _next_uid := 0
 
 const MASK := B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_PROP | B3Defs.L_SCENERY
 const LAUNCH := 6.5       # knock speed (after stability) that turns a unit into a ragdoll
+const MELEE_UP := 1.0     # melee hits and charges reach about this far over your head (or under your feet)
 
 var battle = null
 var kind := ""
@@ -245,7 +246,7 @@ func _physics_process(dt: float) -> void:
 		return
 	if burn_t > 0.0:
 		burn_t -= dt
-		hp -= dt * 7.0
+		hp -= dt * 7.0 * _env_share(true)
 		_burn_fx -= dt
 		if _burn_fx <= 0.0:
 			_burn_fx = 0.12
@@ -274,7 +275,10 @@ func _physics_process(dt: float) -> void:
 
 func _move(dt: float) -> void:
 	var v := linear_velocity
-	_grounded = flying or absf(v.y) < 0.9 or position.y - battle.world.height_at(position.x, position.z) < 0.2
+	# on the ground, or standing still on something (a tower, a crate). Just
+	# moving slowly up or down isn't enough: that's the top of every jump.
+	var gap: float = position.y - battle.world.height_at(position.x, position.z)
+	_grounded = flying or gap < 0.2 or (absf(v.y) < 0.9 and _feet_on_something(0.25))
 	var ctrl := 1.0 if _grounded else 0.12
 	if stun_t > 0.0:
 		ctrl *= 0.12
@@ -300,6 +304,13 @@ func _move(dt: float) -> void:
 
 func _is_grounded_now() -> bool:
 	return _grounded
+
+
+## True if something solid (a building, a crate, a rock, another fighter) is
+## right under its feet, no more than `below` metres down.
+func _feet_on_something(below: float) -> bool:
+	var hit: Dictionary = battle.raycast(position + Vector3(0, 0.3, 0), position - Vector3(0, below, 0), MASK, [get_rid()])
+	return not hit.is_empty()
 
 
 # -------------------------------------------------------------------- brain
@@ -498,6 +509,14 @@ func _volley_ok(w: Dictionary) -> bool:
 
 func _flat(v: Vector3) -> Vector3:
 	return Vector3(v.x, 0.0, v.z)
+
+
+## How far apart two bodies are up and down (0 when they overlap): a sword
+## can't reach someone on top of a tower or a helicopter overhead.
+func _height_gap(u: B3Unit) -> float:
+	var lo := position.y
+	var ulo := u.position.y
+	return maxf(0.0, maxf(ulo - (lo + tall), lo - (ulo + u.tall)))
 
 
 func _reach(w: Dictionary, u: B3Unit) -> float:
@@ -732,12 +751,15 @@ func _melee_hit(w: Dictionary) -> void:
 			c = position
 			r = float(w.aoe) + radius
 		for u: B3Unit in battle.units.duplicate():
-			if u == self or u.down or not is_enemy(u):
+			if u == self or u.down or not is_enemy(u) or _height_gap(u) > MELEE_UP:
 				continue
 			var d := _flat(u.position - c).length()
 			if d < r + u.radius:
+				# weaker towards the edge, but never less than that (a big tank
+				# whose middle is past the edge still gets hit, not healed)
+				var f := clampf(d / r, 0.0, 1.0)
 				var dir := (_flat(u.position - position).normalized() + Vector3.UP * 0.7).normalized()
-				u.hurt(dmg * (1.0 - 0.35 * d / r), dir, knock * (1.0 - 0.3 * d / r), self)
+				u.hurt(dmg * (1.0 - 0.35 * f), dir, knock * (1.0 - 0.3 * f), self)
 		battle.blast_props(c, r, knock * 0.5)
 		battle.fx.dust(c, r)
 		battle.shake(float(w.get("shake", 0.1)), c)
@@ -747,7 +769,7 @@ func _melee_hit(w: Dictionary) -> void:
 	if target == null or not is_instance_valid(target) or target.down:
 		return
 	var d2 := _flat(target.position - position).length()
-	if d2 > _reach(w, target) * 1.35:
+	if d2 > _reach(w, target) * 1.35 or _height_gap(target) > MELEE_UP:
 		return
 	var up := 0.95 if w.has("toss") else 0.35
 	var dir2 := (_flat(target.position - position).normalized() + Vector3.UP * up).normalized()
@@ -771,13 +793,7 @@ func _fire_gun(w: Dictionary) -> void:
 	var s := float(w.get("spread", 0.03))
 	dir = (dir + Vector3(rng.randf_range(-s, s), rng.randf_range(-s, s) * 0.6, rng.randf_range(-s, s))).normalized()
 	var to := from + dir * (float(w.range) * 1.4)
-	var hit: Dictionary = battle.raycast(from, to, B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_PROP | B3Defs.L_SCENERY, [get_rid()])
-	if w.has("volley"):
-		# musket lines fire past their own front rank (it kneels)
-		var skip: Array = [get_rid()]
-		while skip.size() < 6 and not hit.is_empty() and hit.collider is B3Unit and not is_enemy(hit.collider):
-			skip.append((hit.collider as B3Unit).get_rid())
-			hit = battle.raycast(from, to, B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_PROP | B3Defs.L_SCENERY, skip)
+	var hit := shot_ray(from, to)
 	var end := to
 	if not hit.is_empty():
 		end = hit.position
@@ -802,6 +818,18 @@ func _fire_gun(w: Dictionary) -> void:
 			cd = float(w.cd)
 	else:
 		cd = float(w.cd) * rng.randf_range(0.9, 1.15)
+
+
+## Where a bullet from `from` towards `to` hits. Like arrows, bullets fly
+## past friends (musket lines fire past their kneeling front rank, a gunner
+## past the teammate in front of it): only enemies, walls and things stop them.
+func shot_ray(from: Vector3, to: Vector3) -> Dictionary:
+	var skip: Array = [get_rid()]
+	var hit: Dictionary = battle.raycast(from, to, MASK, skip)
+	while skip.size() < 6 and not hit.is_empty() and hit.collider is B3Unit and not is_enemy(hit.collider as B3Unit):
+		skip.append((hit.collider as B3Unit).get_rid())
+		hit = battle.raycast(from, to, MASK, skip)
+	return hit
 
 
 ## A musket's big flash and puff of white smoke.
@@ -829,11 +857,13 @@ func _shoot_proj(w: Dictionary) -> void:
 	if kind_s == "arrow":
 		var flat := _flat(aim - from)
 		var tt := maxf(flat.length() / sp, 0.15)
-		vel = flat / tt + Vector3(0, (aim.y - from.y + 0.5 * 9.8 * tt * tt) / tt, 0)
+		vel = B3Proj.lob(from, aim, tt, kind_s)
 		vel += Vector3(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.3, 0.3), rng.randf_range(-0.5, 0.5))
 	else:
+		# rockets and fireballs fly nearly straight: aim a little high for the
+		# sag on the way (fireballs don't sag)
 		aim.y = target.position.y + 0.3
-		vel = (aim - from).normalized() * sp
+		vel = B3Proj.lob(from, aim, maxf(from.distance_to(aim) / sp, 0.05), kind_s)
 	battle.spawn_proj(kind_s, from, vel, self, w)
 	battle.snd(String(w.snd), from, 0.8)
 	if kind_s == "rocket":
@@ -849,7 +879,7 @@ func _throw(w: Dictionary) -> void:
 	var aim := target.position + Vector3(target.linear_velocity.x, 0, target.linear_velocity.z) * 0.6
 	var flat := _flat(aim - from)
 	var tt := clampf(flat.length() / 9.0, 0.6, 1.5)
-	var vel := flat / tt + Vector3(0, (aim.y - from.y + 0.5 * 9.8 * tt * tt) / tt, 0)
+	var vel := B3Proj.lob(from, aim, tt, "grenade")
 	var p = battle.spawn_proj("grenade", from, vel, self, w)
 	p.fuse = tt + 0.5
 	battle.snd("swing", from, 0.5)
@@ -893,7 +923,7 @@ func _charging(dt: float) -> void:
 	look = charge_dir
 	var w := wpn
 	for u: B3Unit in battle.units.duplicate():
-		if u == self or u.down or not is_enemy(u) or charge_hit.has(u.uid):
+		if u == self or u.down or not is_enemy(u) or charge_hit.has(u.uid) or _height_gap(u) > MELEE_UP:
 			continue
 		var d := _flat(u.position - position).length()
 		if d < radius + u.radius + 0.5:
@@ -955,7 +985,7 @@ func _fly(dt: float) -> void:
 func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit") -> void:
 	if dead:
 		return
-	dmg /= battle.r_tough      # Battle Rules: toughness and knockback
+	dmg = maxf(dmg, 0.0) / battle.r_tough      # Battle Rules: toughness and knockback (a hit never heals)
 	knock *= battle.r_knock
 	if down:
 		hp -= dmg * (1.0 - armor)
@@ -979,6 +1009,7 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 			battle.snd("clang", position, 0.7)
 			battle.fx.sparks(position + Vector3(0, 1.0, 0) + forward() * 0.4, 6)
 	hp -= d
+	battle.player_hit(by, self)      # first-person hit marker, if it was you
 	hurt_t = 0.0
 	if rig:
 		rig.flash()
@@ -1115,11 +1146,15 @@ func _hazards(dt: float) -> void:
 		return
 	if flying and position.y > h.surface + 1.0:
 		return
-	hp -= h.dps * 0.1
+	var fire := h.kind == "lava" or h.kind == "fire"
+	var k := _env_share(fire)
+	if k <= 0.0:
+		return       # a dragon doesn't mind lava or flames
+	hp -= h.dps * 0.1 * k
 	hurt_t = 0.0
 	if rig:
 		rig.flash()
-	if h.kind == "lava" or h.kind == "fire":
+	if fire:
 		burn_t = 2.5
 	if h.kind != "fire" and _grounded and rng.randf() < 0.5:
 		linear_velocity.y = 3.5
@@ -1129,6 +1164,14 @@ func _hazards(dt: float) -> void:
 		_ko(Vector3.UP * 2.5, null)
 		if h.kind != "fire" and ragdoll:
 			pass
+
+
+## How much of lava, acid, flame or burning damage gets through: like any
+## hit, the Toughness rule and armour count, and dragons don't mind fire.
+func _env_share(fire: bool) -> float:
+	if fire and kind == "dragon":
+		return 0.0
+	return (1.0 - armor) / battle.r_tough
 
 
 func _process(dt: float) -> void:

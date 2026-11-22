@@ -126,10 +126,16 @@ func _on_disconnected(id: int) -> void:
 	var f: Dictionary = friends[id]
 	friends.erase(id)
 	game.world.grab_end(id)
+	# whatever they were playing goes back to doing its own thing
 	for w in game.world.wigglies():
 		if w.player_id == id:
 			w.player_id = -1
 			w.move_input = 0.0
+	for fi in game.world.fighters():
+		if fi.player_id == id:
+			fi.player_id = -1
+			fi.move_input = 0.0
+			fi.want_attack = false
 	game.effects.handle("poof", {"p": game.cam.center()})
 	if game.hud:
 		game.hud.toast("%s left" % f.name)
@@ -140,12 +146,14 @@ func _on_packet(id: int, pkt: PackedByteArray) -> void:
 	var d := NetCommon.decode(pkt)
 	match String(d.get("m", "")):
 		"hello":
-			if int(d.get("v", 0)) != NetCommon.VERSION:
+			if not (d.get("v") is int) or int(d.v) != NetCommon.VERSION:
 				_send_to(id, {"m": "bye", "why": "Different game version. Update Wiggle Works on both computers."})
 				return
 			var first := not friends.has(id)
-			var name := String(d.get("name", "Friend")).strip_edges().substr(0, 16)
-			friends[id] = {"name": name if name != "" else "Friend", "color": d.get("color", Color.WHITE)}
+			if first:
+				friends[id] = {}
+			friends[id].name = NetCommon.clean_name(d.get("name"))
+			friends[id].color = d.color if d.get("color") is Color else Color.WHITE
 			if first:
 				_send_to(id, {"m": "welcome", "id": id, "world": game.world.world_id})
 				Settings.award("friends")
@@ -156,16 +164,85 @@ func _on_packet(id: int, pkt: PackedByteArray) -> void:
 		"cmd":
 			if friends.has(id) and typeof(d.get("c")) == TYPE_DICTIONARY:
 				var c: Dictionary = d.c
-				if String(c.get("cmd", "")) in ["world", "clear", "undo"] and not game.world.allow_world_actions:
+				if not cmd_ok(c):
+					return
+				if String(c.cmd) in ["world", "clear", "undo"] and not game.world.allow_world_actions:
+					return
+				if String(c.cmd) in SPAWNY and not NetCommon.allow(friends[id], "spawn", 6.0, 15.0):
 					return
 				game.world.apply_command(id, c)
-				if String(c.get("cmd", "")) == "play":
+				if String(c.cmd) == "play":
 					friends[id].ctrl = int(c.get("uid", -1))
 		"cur":
 			if friends.has(id):
-				friends[id].cursor = d.get("p", null)
+				friends[id].cursor = d.p if NetCommon.vec2_ok(d.get("p")) else null
 		"emote":
-			if friends.has(id):
-				friends[id].emote = int(d.get("id", 0))
+			if friends.has(id) and d.get("id") is int and int(d.id) >= 0 and int(d.id) < NetCommon.EMOJI.size():
+				friends[id].emote = int(d.id)
 				friends[id].emo_t = Time.get_ticks_msec() / 1000.0
 				Sfx.play("pop", null, 0.4, 1.4)
+
+
+# ------------------------------------------------------- checking friends
+## What friends may ask for. Anything else, a missing piece or something of
+## the wrong kind (text where a number goes, NaN, a made-up team) is ignored,
+## so a broken or hacked copy of the game can't crash the host.
+const CMDS := ["spawn", "grab", "drag", "release", "use", "team", "pers", "give", "drop", "fight", "platform",
+	"unplatform", "detonate", "link", "unlink", "paint", "erase", "clone", "resize", "flip", "nail", "rotate",
+	"play", "input", "magic", "gravity", "night", "pause", "speed", "world", "clear", "undo"]
+const NUMS := {"x": 1.0e5, "y": 1.0e5, "x0": 1.0e5, "y0": 1.0e5, "x1": 1.0e5, "y1": 1.0e5, "ax": 1.0e5, "ay": 1.0e5,
+	"bx": 1.0e5, "by": 1.0e5, "uid": 2.0e9, "a": 2.0e9, "ai": 2.0e9, "b": 2.0e9, "bi": 2.0e9,
+	"s": 20.0, "d": 10.0, "v": 10.0, "move": 10.0}
+const TEXTS := ["id", "team", "pers", "kind", "style", "color"]
+const FLAGS := ["on", "whole", "jump", "special", "attack"]
+const SPAWNY := ["spawn", "clone", "platform", "link", "magic"]     # make new things: rate-limited
+
+
+static func cmd_ok(c: Dictionary) -> bool:
+	var cmd: Variant = c.get("cmd")
+	if not (cmd is String) or not CMDS.has(cmd):
+		return false
+	for k in NUMS:
+		if c.has(k) and not NetCommon.num_ok(c[k], float(NUMS[k])):
+			return false
+	for k in TEXTS:
+		if c.has(k) and not (c[k] is String and (c[k] as String).length() <= 40):
+			return false
+	for k in FLAGS:
+		if c.has(k) and not (c[k] is bool):
+			return false
+	var has_all := func(keys: Array) -> bool:
+		for k in keys:
+			if not c.has(k):
+				return false
+		return true
+	match String(cmd):
+		"spawn":
+			return c.has("id") and _known_team(String(c.get("team", "")), true) and _known_pers(String(c.get("pers", "")), true)
+		"team":
+			return _known_team(String(c.get("team", "")), false)
+		"pers":
+			return _known_pers(String(c.get("pers", "")), false)
+		"platform":
+			return has_all.call(["x0", "y0", "x1", "y1"])
+		"link":
+			return has_all.call(["ax", "ay", "bx", "by"]) and Game.LINK_TOOLS.has(String(c.get("kind", "")))
+		"input":
+			return c.has("ax") == c.has("ay")
+		"paint":
+			return Color.html_is_valid(String(c.get("color", "ffffff")))
+		"resize":
+			return float(c.get("s", 1.0)) >= 0.1
+		"gravity":
+			return Catalog.GRAVITIES.any(func(g): return g.id == String(c.get("id", "normal")))
+		"world":
+			return Catalog.WORLDS.any(func(w): return w.id == String(c.get("id", "meadow")))
+	return true
+
+
+static func _known_team(t: String, blank_ok: bool) -> bool:
+	return (blank_ok and t == "") or Catalog.TEAM_ORDER.has(t)
+
+
+static func _known_pers(p: String, blank_ok: bool) -> bool:
+	return (blank_ok and p == "") or Catalog.PERSONALITIES.any(func(x): return x.id == p)

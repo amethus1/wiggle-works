@@ -1,7 +1,7 @@
 extends Node
 ## Headless checks for the extra 3D Battle features: Battle Rules, playing as
 ## a fighter (overhead and first person), the follow camera, screen shake,
-## save slots, ⏮ Reset, Surprise Battle and the MVP.
+## save slots, ⏮ Reset, Surprise Battle, the MVP and the HUD's layout.
 ## godot --headless --path . -- --test=b3more
 
 const SPEED := 4.0
@@ -61,13 +61,21 @@ func _ready() -> void:
 	await _rules()
 	await _player()
 	await _first_person()
+	await _player_gravity()
 	await _fp_knockout()
+	await _play_fixes()
+	await _fp_body()
+	await _hit_marker()
+	await _blast_rules()
 	await _shake()
 	await _saves()
 	await _reset()
+	await _reset_more()
 	await _grab_vehicle()
 	await _sizes()
 	await _surprise()
+	await _surprise_room()
+	await _hud()
 	B3Rules.reset()
 	B3Saves.delete_all_test_saves()
 	if b and is_instance_valid(b):
@@ -450,6 +458,7 @@ func _reset() -> void:
 	b.set_fighting(true)
 	await sim(3.0)
 	check(b.reset_battle() and (b.units as Array).filter(func(u): return not u.dead).size() == 10, "and it works again and again")
+	check(not b.ui.reset_btn.disabled, "(the ⏮ button stays on after a Reset)")
 	b.clear_units()
 	check(B3Saves.load_slot(b, 4), "loading the slot saved after the fight")
 	var n := 0
@@ -584,3 +593,420 @@ func _sizes() -> void:
 	await sim(0.3)
 	var sizes: Array = b.units.map(func(u): return u.size_mult)
 	check(sizes.has(2.5) and sizes.has(0.5), "sizes are saved with the battle (%s)" % str(sizes))
+
+
+
+# ------------------------------------------------------- playing: the fixes
+## Waits (up to `t` seconds of battle time) until `fn` says yes.
+func wait_for(fn: Callable, t := 3.0) -> bool:
+	var end: float = b.time + t
+	var guard := 0
+	while not fn.call() and b.time < end and guard < int(t * 60.0 * SPEED) + 600:
+		await get_tree().physics_frame
+		guard += 1
+	return fn.call()
+
+
+func _play_fixes() -> void:
+	print("playing: ghosts, the History tab, wind-ups")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	await sim(0.3)
+	b.tools.play_as(me)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(not b.tools._line.visible, "(the placement ghosts step aside while you play)")
+	b.tools.stop_playing()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(b.tools._line.visible, "and come back when you stop playing")
+	# 📜 History soldiers get a team picker, and don't end up on the wild team
+	b.ui.set_cat("dinos")
+	var was := String(b.tools.team)
+	b.ui.set_cat("history")
+	check(b.ui.team_box.visible, "📜 the History tab shows the team, mood and size pickers")
+	check(was == "wild" and b.tools.team != "wild", "and after the Dinos tab its soldiers aren't on the wild team (%s)" % b.tools.team)
+	b.ui.set_cat("people")
+	# a Grenadier you play throws as often as one on its own
+	await fresh()
+	var gr: B3Unit = b.spawn_unit("grenadier", "red", at(0, 0), "peaceful", 0.0)
+	await sim(0.3)
+	b.tools.play_as(gr)
+	b.tools._mouse = b.cam.screen_pos(at(-6, 0))
+	B3Player.me.fire = true
+	await wait_for(func(): return gr.act == "throw")
+	B3Player.me.fire = false
+	check(gr.act == "throw" and gr.cd > float(gr.wpn.cd) * 0.9, "💣 a Grenadier you play waits as long between grenades as one on its own (%.1f s)" % gr.cd)
+	b.tools.stop_playing()
+	# a Wizard you play waves its staff first, even when you click the ground
+	var wz: B3Unit = b.spawn_unit("wizard", "red", at(0, 5), "peaceful", 0.0)
+	await sim(0.3)
+	b.tools.play_as(wz)
+	b.tools._mouse = b.cam.screen_pos(at(-7, 5))
+	await get_tree().process_frame
+	B3Player.me.fire = true
+	await wait_for(func(): return wz.act == "cast")
+	B3Player.me.fire = false
+	check(wz.act == "cast", "🧙 a Wizard you play casts its spell before the fireball, even at the ground")
+	var fireball := func() -> bool:
+		for p in b.proj_root.get_children():
+			if p is B3Proj and (p as B3Proj).kind == "fireball":
+				return true
+		return false
+	var flew: bool = await wait_for(fireball, 2.0)
+	check(flew, "and then the fireball flies")
+	b.tools.stop_playing()
+	# the sniper keeps aiming at the enemy you clicked, even if the mouse moves off it
+	await fresh()
+	var sn: B3Unit = b.spawn_unit("sniper", "red", at(0, 0), "peaceful", 0.0)
+	var foe: B3Unit = b.spawn_unit("soldier", "blue", at(0, 10), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(sn)
+	b.tools._mouse = b.cam.screen_pos(foe.position)
+	await get_tree().process_frame
+	B3Player.me.fire = true
+	await wait_for(func(): return sn.act == "aim")
+	B3Player.me.fire = false
+	check(sn.act == "aim", "(the sniper takes aim at the enemy under the mouse)")
+	b.tools._mouse = b.cam.screen_pos(at(-12, -6))
+	await sim(1.5)
+	check(foe.hp < foe.max_hp or foe.down or foe.dead, "🎯 moving the mouse off it while the sniper aims still takes the shot")
+	b.tools.stop_playing()
+	# clearing the fighters while you play one isn't a knock-out
+	var me2: B3Unit = b.spawn_unit("soldier", "red", at(5, 0), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me2)
+	b.clear_units()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var ko_toast := false
+	for c in b.ui.toasts.get_children():
+		for l in c.find_children("*", "Label", true, false):
+			if "knocked out" in (l as Label).text:
+				ko_toast = true
+	check(not B3Player.playing and not ko_toast, "🧹 clearing the fighters while you play just stops playing (no knock-out message)")
+
+
+## Your own body in first person: hidden when you get back up or change
+## team, drawn again as a knocked-out ragdoll; teammates in your face fade
+## but enemies don't.
+func _fp_body() -> void:
+	print("first person: your body and the ones near you")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	var mate: B3Unit = b.spawn_unit("soldier", "red", at(0.9, 0.5), "peaceful")
+	var foe: B3Unit = b.spawn_unit("knight", "blue", at(-0.9, 0.5), "peaceful")
+	b.spawn_unit("soldier", "red", at(12, 0), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me, true)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(not mate.rig.visible, "👀 a teammate right in your face fades in first person")
+	check(foe.rig.visible, "but an enemy right next to you stays in view")
+	me.knock_down(Vector3(0, 3, 0))
+	await sim(0.2)
+	var up: bool = await wait_for(func(): return not me.down, 14.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(up and own_body_hidden(me), "back on your feet in first person, you still don't see the inside of your own head (%s)" % ("hidden" if own_body_hidden(me) else "up" if up else "still down"))
+	me.set_team("green")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(own_body_hidden(me) and b.cam.hands.model != null, "nor after changing team (and the rifle is still in your hands)")
+	b.tools.stop_playing()
+	# knocked out for good: the body you were looking out of stays on the field
+	await fresh()
+	var ko: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	b.spawn_unit("soldier", "red", at(6, 0), "peaceful", 0.0)
+	await sim(0.3)
+	b.tools.play_as(ko, true)
+	await get_tree().process_frame
+	await ko_now(ko)
+	var corpse: B3Ragdoll = null
+	for rd in b.ragdolls:
+		if is_instance_valid(rd) and rd.dead:
+			corpse = rd
+	var drawn := corpse != null
+	if corpse:
+		for c in corpse.find_children("*", "VisualInstance3D", true, false):
+			if (c as VisualInstance3D).layers == B3Cam.HIDE_LAYER:
+				drawn = false
+	check(drawn, "💫 knocked out, your old body lies there with X eyes for everyone to see")
+	check(B3Player.active() and b.cam.first_person() and own_body_hidden(B3Player.unit), "and the teammate you jump into is hidden instead")
+	b.tools.stop_playing()
+	# the Robot holds its laser cannon in first person too
+	var rb: B3Unit = b.spawn_unit("robot", "red", at(-6, 0), "peaceful", 0.0)
+	await sim(0.3)
+	b.tools.play_as(rb, true)
+	await get_tree().process_frame
+	check(b.cam.hands != null and b.cam.hands.model != null, "🤖 the Robot's laser cannon shows in first person")
+	b.tools.stop_playing()
+
+
+## True if every mesh of `u`'s model is on the layer the camera doesn't draw.
+func own_body_hidden(u: B3Unit) -> bool:
+	if u == null or not is_instance_valid(u) or u.rig == null:
+		return false
+	for c in u.rig.find_children("*", "MeshInstance3D", true, false):
+		if (c as MeshInstance3D).layers != B3Cam.HIDE_LAYER:
+			return false
+	return true
+
+
+func _hit_marker() -> void:
+	print("first-person hit marker")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("knight", "red", at(0, 0), "peaceful", 0.0)
+	var foe: B3Unit = b.spawn_unit("viking", "blue", at(0, 1.3), "peaceful")
+	var pal: B3Unit = b.spawn_unit("soldier", "red", at(6, 6), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me, true)
+	await get_tree().process_frame
+	var ch = b.ui.crosshair
+	ch.hit_t = 0.0
+	B3Player.me.look_yaw = 0.0
+	B3Player.me.look_pitch = -0.2
+	B3Player.me.fire = true
+	var marked: bool = await wait_for(func(): return ch.hit_t > 0.0, 2.0)
+	B3Player.me.fire = false
+	check(marked and (foe.hp < foe.max_hp or foe.down), "✨ your sword hitting an enemy flashes the crosshair's hit marker")
+	await sim(0.5)
+	ch.hit_t = 0.0
+	b.shot_hit({"collider": pal, "position": pal.center()}, B3Defs.weapon("rifle"), Vector3.RIGHT, me)
+	check(ch.hit_t == 0.0, "but hitting a teammate doesn't")
+	b.shot_hit({"collider": foe, "position": foe.center()}, B3Defs.weapon("rifle"), Vector3.RIGHT, pal)
+	check(ch.hit_t == 0.0, "and nor does someone else's shot")
+	b.explode(foe.center(), 2.0, 4.0, 5.0, {"by": me})
+	check(ch.hit_t > 0.0, "your grenade or rocket hitting an enemy does")
+	b.tools.stop_playing()
+
+
+# ------------------------------------------------------------ blast rules
+func _blast_rules() -> void:
+	print("blasts and the Battle Rules")
+	await fresh()
+	rule("friendly", "off")
+	var thrower: B3Unit = b.spawn_unit("grenadier", "red", at(-8, 0), "peaceful")
+	var lying: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful")
+	var mate: B3Unit = b.spawn_unit("soldier", "red", at(8, 0), "peaceful")
+	await sim(0.3)
+	lying.knock_down(Vector3(0, 2, 0))
+	await sim(0.6)
+	var hp0: float = lying.hp
+	b.explode(lying.center() + Vector3(0, 0.3, 0), 3.5, 12.0, 60.0, {"by": thrower})
+	await sim(0.1)
+	check(lying.down and lying.hp >= hp0 - 0.01, "with friendly fire off, your blast spares a teammate lying on the ground too")
+	b.explode(mate.center() + Vector3(0.5, 0, 0), 3.0, 12.0, 60.0, {"team": "red"})
+	await sim(0.1)
+	check(mate.hp >= mate.max_hp - 0.01 and not mate.down, "and a grenade whose thrower got knocked out since still spares their team")
+	rule("friendly", "on")
+	# ☄️ MEGA explosions: the nuke's fireball reaches past where its shock
+	# wave starts, but nobody gets hit by both
+	await fresh()
+	rule("booms", "mega")
+	var big: B3Unit = b.spawn_unit("elephant", "blue", at(16, 0), "peaceful")
+	await sim(0.3)
+	big.max_hp = 1000000.0
+	big.hp = big.max_hp
+	b.nuke_blast(at(0, 0) + Vector3(0, 0.5, 0))
+	var after_fireball: float = big.hp
+	await sim(2.5)
+	check(after_fireball < big.max_hp, "(the nuke's fireball reaches 16 m with MEGA explosions)")
+	# the wave only tops it up to the bigger of the two hits (it used to add a whole second hit, ~280 more)
+	var fire_dmg: float = big.max_hp - after_fireball
+	check(after_fireball - big.hp < 0.4 * fire_dmg, "☢️ and its shock wave doesn't hit the same elephant again in full (%.0f more after %.0f)" % [after_fireball - big.hp, fire_dmg])
+	rule("booms", "normal")
+
+
+# ------------------------------------------------------ reset: the fixes
+func _reset_more() -> void:
+	print("reset and saves: more")
+	await fresh()
+	for i in 3:
+		b.spawn_unit("soldier", "red", at(-6, i * 2.0), "attack")
+		b.spawn_unit("viking", "blue", at(6, i * 2.0), "attack")
+	b.set_fighting(true)
+	check(not b.start_layout.is_empty() and not b.ui.reset_btn.disabled, "(Fight! remembers the start)")
+	b.load_map("desert")
+	check(b.start_layout.is_empty() and b.ui.reset_btn.disabled, "⏮ Reset forgets the old battle on a new map")
+	for i in 2:
+		b.spawn_unit("soldier", "red", at(-6, i * 2.0), "attack")
+		b.spawn_unit("viking", "blue", at(6, i * 2.0), "attack")
+	b.set_fighting(true)
+	b.clear_units()
+	check(b.start_layout.is_empty() and b.ui.reset_btn.disabled, "and after 🧹 Clear")
+	b.spawn_unit("soldier", "red", at(-6, 0), "attack")
+	b.spawn_unit("viking", "blue", at(6, 0), "attack")
+	b.set_fighting(true)
+	b.run_history("hastings")
+	check(b.start_layout.is_empty() and b.ui.reset_btn.disabled, "and after picking a 📜 History battle")
+	# a friend's copy of the battle: Reset asks the host, so it works while their fight is on
+	b.puppet = true
+	b.fighting = true
+	check(b.ui.can_reset(), "👥 in a friend's battle, ⏮ Reset works while their fight is on")
+	b.puppet = false
+	b.fighting = false
+	# D-Day: gunners inside the bunkers, French knights stuck in the mud at Agincourt
+	b.run_history("dday")
+	await sim(0.3)
+	var spots := {}
+	for u: B3Unit in b.units:
+		if u.kind == "gunner":
+			spots[u.get_meta("seed")] = u.position.y
+	b.set_fighting(true)
+	await sim(2.0)
+	b.reset_battle()
+	await sim(0.3)
+	var same := spots.size() > 0
+	for u: B3Unit in b.units:
+		if spots.has(u.get_meta("seed")) and absf(u.position.y - float(spots[u.get_meta("seed")])) > 0.8:
+			same = false
+	check(same, "⏮ Reset puts the D-Day gunners back inside their bunkers, not on the roof")
+	b.run_history("agincourt")
+	await sim(0.3)
+	var slow := {}
+	var hp := {}
+	for u: B3Unit in b.units:
+		if u.team == "blue" and u.kind == "knight":
+			slow[u.get_meta("seed")] = u.speed
+			hp[u.get_meta("seed")] = u.max_hp
+	b.set_fighting(true)
+	await sim(1.0)
+	b.reset_battle()
+	await sim(0.3)
+	var kept := slow.size() > 0
+	var watched := true
+	for u: B3Unit in b.units:
+		var sd = u.get_meta("seed")
+		if slow.has(sd) and (absf(u.speed - float(slow[sd])) > 0.01 or absf(u.max_hp - float(hp[sd])) > 0.5):
+			kept = false
+		if not u.has_meta("history"):
+			watched = false
+	check(kept, "📜 and the French knights are still worn out and slow in the mud")
+	check(watched, "and the battle is still watched so it can't stall")
+	# 💾 loading a battle doesn't change how much the screen shakes
+	rule("shake", "off")
+	check(B3Saves.save(b, 6), "(saved with Screen shake off)")
+	rule("shake", "lots")
+	B3Saves.load_slot(b, 6)
+	check(B3Rules.value("shake") == "lots", "📳 loading a saved battle keeps your Screen shake setting")
+	rule("shake", "little")
+
+
+# --------------------------------------------------- surprise: more room
+func _surprise_room() -> void:
+	print("surprise battle: room for everyone")
+	await fresh()
+	var dinos := 0
+	var big := 0
+	var ok_ground := true
+	var ok_room := true
+	var off_ground := ""
+	var squashed := ""
+	var big_kinds: Array = B3Defs.UNIT_ORDER.get("vehicles", []) + B3Defs.UNIT_ORDER.get("dinos", [])
+	for s in range(1, 13):
+		B3Surprise.run(b, s * 7)
+		for u: B3Unit in b.units:
+			if u.flying:
+				continue
+			if u.team == "wild":
+				dinos += 1
+				var gy: float = b.surface_y(Vector3(u.position.x, 60.0, u.position.z))
+				if absf(u.position.y - gy) > 0.4:
+					ok_ground = false
+					off_ground = "%s at %.1f m, ground %.1f m (%s)" % [u.kind, u.position.y, gy, b.map_id]
+				continue
+			if u.kind in big_kinds:
+				big += 1
+			for o: B3Unit in b.units:
+				if o == u or o.flying or o.team != u.team:
+					continue
+				var d := Vector2(o.position.x - u.position.x, o.position.z - u.position.z).length()
+				if d < (u.radius + o.radius) * 0.9:
+					ok_room = false
+					squashed = "%s and %s %.1f m apart" % [u.kind, o.kind, d]
+	check(dinos > 0 and ok_ground, "🎲 Surprise dinosaurs start on the ground, not inside a hill (%d dinos) %s" % [dinos, off_ground])
+	check(big > 0 and ok_room, "and nobody in an army starts inside anyone else, even tanks (%d big ones) %s" % [big, squashed])
+
+
+# --------------------------------------------------------------- the HUD
+func _hud() -> void:
+	print("the HUD")
+	await fresh()
+	var w: float = get_viewport().get_visible_rect().size.x
+	b.ui._show_map_menu()
+	for i in 3:
+		await get_tree().process_frame
+	var r: Rect2 = b.ui.popup.get_global_rect()
+	check(absf(r.get_center().x - w * 0.5) < 2.0, "🗺️ pop-up panels sit in the middle of the screen (%.0f vs %.0f)" % [r.get_center().x, w * 0.5])
+	b.ui._show_history()
+	for i in 3:
+		await get_tree().process_frame
+	r = b.ui.popup.get_global_rect()
+	check(absf(r.get_center().x - w * 0.5) < 2.0, "even big ones like 📜 History (%.0f)" % r.get_center().x)
+	b.ui.close_top()
+	# every team on the field, on the map with the longest name
+	b.load_map("pass")
+	var x := -12.0
+	for t in B3Defs.TEAM_ORDER:
+		b.spawn_unit("soldier", String(t), at(x, 0), "peaceful")
+		x += 5.0
+	await sim(0.6)
+	check(b.ui.top_bar.get_combined_minimum_size().x <= w - 20.0, "the top bar fits across the screen with all five teams (%.0f of %.0f)" % [b.ui.top_bar.get_combined_minimum_size().x, w - 20.0])
+	b.clear_units()
+	await sim(0.6)
+	check(b.ui.title_lbl.visible, "and the ⚔️ 3D Battle title is back when there's room")
+	# messages show under the "You're the ..." lines while you play
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me)
+	for i in 3:
+		await get_tree().process_frame
+	var pl: Rect2 = b.ui.play_lbl.get_global_rect()
+	var tr: Rect2 = b.ui.toasts.get_global_rect()
+	check(b.ui.play_lbl.visible and b.ui.toasts.get_child_count() > 0 and tr.position.y >= pl.end.y, "🎮 messages don't cover the 'You're the ...' lines (%.0f vs %.0f)" % [tr.position.y, pl.end.y])
+	b.tools.stop_playing()
+	for i in 2:
+		await get_tree().process_frame
+	check(b.ui.toasts.position.y == 80.0, "and go back up when you stop")
+
+
+# ------------------------------------------- your own shots and the Gravity rule
+## Arrows and grenades you fire yourself aim for the Gravity rule like the
+## computer's do, so they land where you point in Moon gravity too.
+func _player_gravity() -> void:
+	print("your shots in Moon gravity")
+	for kind in ["archer", "grenadier"]:
+		await fresh()
+		rule("gravity", "moon")
+		var me: B3Unit = b.spawn_unit(kind, "red", at(-6, 0), "peaceful", PI * 0.5)
+		await sim(0.3)
+		b.tools.play_as(me)
+		var aim := at(8, 0)
+		if kind == "archer":
+			B3Player._proj_at(me, me.wpn, aim)
+		else:
+			B3Player._throw_at(me, me.wpn, aim)
+		var p: B3Proj = null
+		for c in b.proj_root.get_children():
+			if c is B3Proj:
+				p = c
+		# where it first comes down (a grenade then bounces about until its fuse runs out)
+		var last := Vector3(-99, 0, -99)
+		var up := true
+		for i in 1200:
+			if not is_instance_valid(p) or p.stuck:
+				break
+			last = p.global_position
+			if p.vel.y < 0.0:
+				up = false
+			if kind == "grenadier" and not up and last.y - b.world.height_at(last.x, last.z) < 0.35:
+				break
+			await get_tree().physics_frame
+		if is_instance_valid(p) and p.stuck:
+			last = p.global_position
+		var miss := Vector2(last.x - aim.x, last.z - aim.z).length()
+		check(miss < 1.5, "🌙 your %s comes down where you aimed in Moon gravity (%.1f m off)" % ["arrow" if kind == "archer" else "grenade", miss])
+		b.tools.stop_playing()
+	rule("gravity", "normal")
+

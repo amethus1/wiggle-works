@@ -13,6 +13,8 @@ const TOOLS := [
 
 var battle = null
 var root: Control
+var top_bar: HBoxContainer
+var title_lbl: Label
 var play_btn: Button
 var slow_btn: Button
 var map_btn: Button
@@ -159,6 +161,7 @@ func _build_top() -> void:
 	top.add_theme_constant_override("separation", 10)
 	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(top)
+	top_bar = top
 	var g1 := _pill(top)
 	_btn(g1, "🏠", "Back to the title screen", func(): battle.leave(), 52)
 	var title := UI.title("⚔️ 3D Battle", 22)
@@ -166,6 +169,7 @@ func _build_top() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	g1.add_child(title)
+	title_lbl = title
 	box_btn = _btn(g1, "🧸", "Show or hide the Toy Box [Tab]", toggle_palette, 52)
 	var g2 := _pill(top)
 	play_btn = _btn(g2, "▶  Fight!", "Start the battle / pause it [Space]", func(): battle.toggle_play(), 150, Color("2f9e4f"), 20)
@@ -206,12 +210,35 @@ func refresh() -> void:
 		play_btn.text = "⏸  Pause"
 		_style(play_btn, UI.PANEL2)
 	UI.set_on(slow_btn, battle.slowmo)
-	reset_btn.disabled = (battle.start_layout as Dictionary).is_empty()
-	var md: Dictionary = B3Defs.MAPS[battle.map_id]
-	map_btn.text = "%s %s" % [md.icon, md.name]
+	reset_btn.disabled = not can_reset()
 	counts_dirty = true
 	refresh_c4()
 	_refresh_rules_btn()
+	_fit_top()
+
+
+## The top bar has to fit across the screen, even with all five teams on the
+## field and friends playing: if it's too wide, the "⚔️ 3D Battle" title
+## steps out first, then the map button shows just the map's picture.
+func _fit_top() -> void:
+	if top_bar == null or battle == null or not is_inside_tree():
+		return
+	var room := get_viewport().get_visible_rect().size.x - 20.0
+	var md: Dictionary = B3Defs.MAPS[battle.map_id]
+	title_lbl.visible = true
+	map_btn.text = "%s %s" % [md.icon, md.name]
+	if top_bar.get_combined_minimum_size().x > room:
+		title_lbl.visible = false
+	if top_bar.get_combined_minimum_size().x > room:
+		map_btn.text = String(md.icon)
+
+
+## ⏮ Reset works once Fight! has been pressed. In a friend's battle (👥) the
+## host remembers the start, so it works while their fight is on.
+func can_reset() -> bool:
+	if battle.puppet:
+		return battle.fighting or banner_lbl.visible
+	return not (battle.start_layout as Dictionary).is_empty()
 
 
 # ------------------------------------------------------------ 👥 together
@@ -231,6 +258,7 @@ func refresh_net() -> void:
 		for p in n.players:
 			names.append(String(p.get("name", "?")))
 		net_lbl.tooltip_text = "Playing together: " + ", ".join(names)
+	_fit_top()
 	if popup and is_instance_valid(popup) and popup.has_meta("net"):
 		_show_net()
 
@@ -333,6 +361,7 @@ func _style(b: Button, col: Color) -> void:
 
 func _refresh_counts() -> void:
 	for c in counts_box.get_children():
+		counts_box.remove_child(c)      # gone now, so _fit_top measures only the new ones
 		c.queue_free()
 	var counts: Dictionary = battle.team_counts()
 	if counts.is_empty():
@@ -535,7 +564,7 @@ func refresh_palette() -> void:
 		UI.set_on(item_btns[id], on)
 		var nm: Label = item_btns[id].get_child(0).get_node("Name")
 		nm.add_theme_color_override("font_color", Color("1d1b3a") if on else UI.TEXT)
-	var units := cat == "people" or cat == "animals" or cat == "dinos" or cat == "vehicles"
+	var units := cat in ["people", "animals", "dinos", "vehicles", "history"]
 	team_box.visible = units
 	for t in team_btns:
 		var col := B3Defs.team_col(t)
@@ -800,7 +829,11 @@ func _popup_panel(title: String) -> VBoxContainer:
 	var p := UI.panel(22)
 	p.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	p.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	p.position = Vector2(-200, 80)
+	# no width of its own at the middle of the screen: it grows evenly both
+	# ways to fit what's inside, so it's always centred
+	p.offset_left = 0
+	p.offset_right = 0
+	p.offset_top = 80
 	p.custom_minimum_size = Vector2(400, 0)
 	root.add_child(p)
 	popup = p
@@ -1093,7 +1126,7 @@ func banner(txt: String, col: Color) -> void:
 	banner_lbl.add_theme_color_override("font_color", col)
 	banner_lbl.visible = true
 	_banner_t = 0.0
-	again_btn.visible = not (battle.start_layout as Dictionary).is_empty()
+	again_btn.visible = can_reset()
 	refresh()
 
 
@@ -1136,6 +1169,12 @@ func refresh_play() -> void:
 			dock_holder.visible = true
 
 
+## Your shot or swing just hit someone: the first-person crosshair flashes.
+func hit_marker() -> void:
+	if crosshair:
+		(crosshair as Crosshair).hit_t = 0.15
+
+
 func flash(a: float) -> void:
 	_flash = maxf(_flash, a)
 
@@ -1151,6 +1190,10 @@ func _process(_d: float) -> void:
 			var hpk := clampf(pu.hp / maxf(1.0, pu.max_hp), 0.0, 1.0)
 			play_lbl.text = "🎮 You're the %s %s   ❤️ %d%%%s\n%s" % [pu.def.icon, pu.def.name,
 				int(round(hpk * 100.0)), "   💫 Knocked down!" if pu.down else "", controls_help(pu)]
+		# messages go just under the "You're the ..." lines, not on top of them
+		var ty := (play_lbl.position.y + play_lbl.size.y + 8.0) if play_lbl.visible else 80.0
+		if toasts.position.y != ty:
+			toasts.position.y = ty
 	if _flash > 0.0:
 		_flash = maxf(0.0, _flash - dt * 0.7)
 		flash_rect.color = Color(1, 1, 0.95, clampf(_flash * 1.3, 0.0, 1.0))
@@ -1173,6 +1216,7 @@ func _process(_d: float) -> void:
 		_count_t = 0.3
 		counts_dirty = false
 		_refresh_counts()
+		_fit_top()
 	_insp_t -= dt
 	if inspect.visible and _insp_t <= 0.0:
 		_insp_t = 0.15

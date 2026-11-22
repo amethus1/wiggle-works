@@ -19,6 +19,9 @@ static func part_def(id: String, r := 0.0) -> Dictionary:
 			return ENVELOPE
 		"sail":
 			return SAIL
+	# rockets, arrows and bombs in flight (a friend's copy, or a save) aren't toy-box toys
+	if Combat.PROJ.has(id):
+		return Combat.PROJ[id]
 	return Catalog.toy(id)
 
 
@@ -29,6 +32,7 @@ static func ride(world: World, id: String, pos: Vector2) -> Toy:
 			var body := world.spawn_toy(id, pos)
 			if body == null:
 				return null
+			pos = body.global_position   # it may have been lifted out of the ground: parts go with it
 			var wd := WHEEL.duplicate()
 			wd.r = 32 if big else 17
 			wd.mass = 2.4 if big else 0.9
@@ -44,6 +48,7 @@ static func ride(world: World, id: String, pos: Vector2) -> Toy:
 			var basket := world.spawn_toy("hot_air", pos)
 			if basket == null:
 				return null
+			pos = basket.global_position   # it may have been lifted out of the ground
 			var env := world.spawn_toy("envelope", pos + Vector2(0, -150), 0.0, 1.0, ENVELOPE)
 			if env:
 				env.parent_uid = basket.uid
@@ -55,6 +60,7 @@ static func ride(world: World, id: String, pos: Vector2) -> Toy:
 			var hull := world.spawn_toy("boat", pos)
 			if hull == null:
 				return null
+			pos = hull.global_position   # it may have been lifted out of the ground
 			var sail := world.spawn_toy("sail", pos + Vector2(4, -58), 0.0, 1.0, SAIL)
 			if sail:
 				sail.parent_uid = hull.uid
@@ -146,10 +152,15 @@ static func build(world: World, id: String, pos: Vector2) -> Toy:
 				var arm_c := pos + Vector2.from_angle(a) * 70.0
 				var arm := world.spawn_toy("plank", arm_c, a, 0.8)
 				if arm:
+					# the wheel turns in front of its post, not into it
+					if post:
+						arm.add_collision_exception_with(post)
 					world.add_link("glue", hub, arm, pos + Vector2.from_angle(a) * 20.0, pos + Vector2.from_angle(a) * 20.0)
 					var seat_p := pos + Vector2.from_angle(a) * 128.0
 					var seat := world.spawn_toy("pillow", seat_p + Vector2(0, 18), 0.0, 0.55)
 					if seat:
+						if post:
+							seat.add_collision_exception_with(post)
 						world.add_link("hinge", arm, seat, seat_p, seat_p)
 			return hub
 		"rocket_cart":

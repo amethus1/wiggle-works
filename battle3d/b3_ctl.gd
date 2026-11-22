@@ -14,6 +14,7 @@ var fire := false            # attack button held (left mouse / F)
 var fire2 := false           # second weapon held (right mouse)
 var jump := false            # Space pressed (cleared once used)
 var fp := false              # looking out of the fighter's eyes (first person)
+var windup := ""             # the wind-up a click started (sniper aim, bow, spell), until its shot goes off (B3Player)
 var peer := 0                # 0 = this computer, otherwise the friend's network id
 var who := ""                # the player's name (shown above friends' fighters)
 var color := Color.WHITE
@@ -31,6 +32,7 @@ func clear_buttons() -> void:
 	fire = false
 	fire2 = false
 	jump = false
+	windup = ""
 
 
 ## Packed for the network: friends send this to the host about 30 times a second.

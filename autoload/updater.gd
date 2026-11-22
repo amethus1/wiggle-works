@@ -5,11 +5,12 @@ extends Node
 ## The title screen asks GitHub for the newest release when the game starts
 ## (Settings.auto_update) and offers "Update now"; ⚙️ Me has "Check for updates".
 ##
-## On Windows the game updates itself: it downloads the new .exe next to the
-## old one, checks it (size and SHA-256), swaps the files (a running .exe can
-## be renamed but not overwritten, so the old one becomes "<name>.old" and is
-## deleted next time) and restarts. Elsewhere, or when run from the source
-## code, "Update now" opens the download page instead.
+## On Windows the game updates itself: it downloads the new .exe (only from
+## this game's GitHub releases) next to the old one, checks it (size and the
+## SHA-256 fingerprint GitHub gives; no fingerprint, no update), swaps the
+## files (a running .exe can be renamed but not overwritten, so the old one
+## becomes "<name>.old" and is deleted next time) and restarts. Elsewhere, or
+## when run from the source code, "Update now" opens the download page instead.
 
 signal progress(done: int, total: int)
 
@@ -17,18 +18,27 @@ const REPO := "amethus1/wiggle-works"
 const API := "https://api.github.com/repos/" + REPO + "/releases/latest"
 const PAGE := "https://github.com/" + REPO + "/releases/latest"
 const UA := "WiggleWorks-Updater"      # GitHub asks every program to name itself
+const DOWNLOADS := "https://github.com/" + REPO + "/releases/download/"   # the only place updates come from
 
 var latest := {}          # the newest release we've heard about (see parse_release)
 var raw := {}             # GitHub's whole answer about it
 var checking := false
 var installing := false
 var prompted := false     # the title screen already offered this launch's update
+var stall_sec := 30.0     # a download that gets no new bytes for this long has stopped (tests make it shorter)
 
 
 func _ready() -> void:
 	clean_up(OS.get_executable_path())
 	# the old copy may still be closing right after an update: try once more later
-	get_tree().create_timer(6.0).timeout.connect(func(): clean_up(OS.get_executable_path()))
+	get_tree().create_timer(6.0).timeout.connect(func(): later_clean_up(OS.get_executable_path()))
+
+
+## The second clean-up, a few seconds after starting. Skipped if "Update now"
+## was clicked by then: its download is the "<exe>.new" file clean_up removes.
+func later_clean_up(exe: String, always := false) -> void:
+	if not installing:
+		clean_up(exe, always)
 
 
 ## This game's version, from project.godot (application/config/version).
@@ -123,23 +133,57 @@ func check() -> Dictionary:
 	return info
 
 
+## True for downloads from this game's own GitHub releases (https only).
+static func trusted(url: String) -> bool:
+	return url.to_lower().begins_with(DOWNLOADS.to_lower())
+
+
 ## Downloads `asset` (from a release) to `path` and makes sure it arrived
 ## whole. Returns "" when it's good, or what went wrong.
 func fetch(asset: Dictionary, path: String) -> String:
 	var url := String(asset.get("browser_download_url", ""))
 	if url == "":
 		return "That version has nothing to download for this computer."
+	if not trusted(url):
+		return "That download isn't from Wiggle Works' GitHub page, so it was skipped."
+	var total := int(asset.get("size", 0))
+	var problem := await download(url, path, total)
+	if problem == "":
+		problem = verify(path, total, str(asset.get("digest", "")))
+	if problem != "" and FileAccess.file_exists(path):
+		DirAccess.remove_absolute(path)
+	else:
+		progress.emit(total, total)
+	return problem
+
+
+## Saves `url` to `path`, reporting progress. Returns "" when it all arrived,
+## or what went wrong. There's no time limit (the game is a big file and Wi-Fi
+## can be slow), but it gives up when no new bytes come for stall_sec seconds.
+func download(url: String, path: String, total: int) -> String:
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 	var h := HTTPRequest.new()
-	h.use_threads = true
+	# not use_threads: a threaded request stuck on a dead connection can't be
+	# stopped (cancelling it freezes the game until the connection closes)
 	h.download_file = path
 	h.download_chunk_size = 1 << 20
 	h.timeout = 0.0
 	add_child(h)
-	var total := int(asset.get("size", 0))
+	var seen := {"bytes": -1, "at": Time.get_ticks_msec(), "stopped": false}
 	var ticker := func() -> void:
-		progress.emit(h.get_downloaded_bytes(), maxi(total, h.get_body_size()))
+		if seen.stopped:
+			return
+		var got := h.get_downloaded_bytes()
+		progress.emit(got, maxi(total, h.get_body_size()))
+		if got != int(seen.bytes):
+			seen.bytes = got
+			seen.at = Time.get_ticks_msec()
+		elif Time.get_ticks_msec() - int(seen.at) > int(stall_sec * 1000.0):
+			# nothing new for a while: stop it and report it like a timeout
+			seen.stopped = true
+			h.cancel_request()
+			h.request_completed.emit(HTTPRequest.RESULT_TIMEOUT, 0, PackedStringArray(), PackedByteArray())
 	var t := Timer.new()
 	t.wait_time = 0.2
 	t.timeout.connect(ticker)
@@ -155,32 +199,30 @@ func fetch(asset: Dictionary, path: String) -> String:
 			problem = "Couldn't save the update next to the game. Try moving Wiggle Works to your Documents or Desktop folder."
 		elif int(r[0]) != HTTPRequest.RESULT_SUCCESS or int(r[1]) != 200:
 			problem = "The download stopped. Are you online?"
+	seen.stopped = true
+	t.stop()
 	t.queue_free()
 	h.queue_free()
-	if problem == "":
-		problem = verify(path, total, String(asset.get("digest", "")))
-	if problem != "" and FileAccess.file_exists(path):
-		DirAccess.remove_absolute(path)
-	else:
-		progress.emit(total, total)
 	return problem
 
 
-## The downloaded file must be the right size and (when GitHub tells us the
-## "sha256:..." digest) have exactly the right bytes.
+## The downloaded file must be the right size and have exactly the bytes of
+## GitHub's "sha256:..." digest. Without a digest there's nothing to check it
+## against, so it doesn't pass.
 static func verify(path: String, size: int, digest: String) -> String:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return "The download went missing."
 	if size > 0 and f.get_length() != size:
 		return "The download didn't finish (%d of %d bytes)." % [f.get_length(), size]
-	if digest.begins_with("sha256:"):
-		var ctx := HashingContext.new()
-		ctx.start(HashingContext.HASH_SHA256)
-		while f.get_position() < f.get_length():
-			ctx.update(f.get_buffer(1 << 20))
-		if ctx.finish().hex_encode() != digest.trim_prefix("sha256:").to_lower():
-			return "The download came out scrambled. Try again."
+	if not digest.begins_with("sha256:"):
+		return "GitHub didn't say what the download should look like, so it wasn't installed."
+	var ctx := HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	while f.get_position() < f.get_length():
+		ctx.update(f.get_buffer(1 << 20))
+	if ctx.finish().hex_encode() != digest.trim_prefix("sha256:").to_lower():
+		return "The download came out scrambled. Try again."
 	return ""
 
 
@@ -233,6 +275,8 @@ func install(info: Dictionary) -> String:
 	installing = false
 	if problem != "":
 		return problem
-	OS.create_process(exe, [])
+	if OS.create_process(exe, []) == -1:
+		# the new version is in place; it just couldn't start it by itself
+		return "The new version is ready, but it couldn't start. Close Wiggle Works and open it again."
 	get_tree().quit()
 	return ""

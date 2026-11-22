@@ -16,7 +16,7 @@ It stays cartoony: no blood. Knocked-out fighters get X eyes and spinning stars.
 
 ### Updates
 
-When the game starts, it asks GitHub whether there's a newer version. If there is, **✨ New version!** pops up. **⬇️ Update now** downloads it, checks it arrived whole, swaps it in and restarts the game; **Later** skips it until next time. **⚙️ Me → 🔄 Updates** has **Check for updates now** and a switch to stop checking when the game starts. The title screen shows the version in the bottom corner.
+When the game starts, it asks GitHub whether there's a newer version. If there is, **✨ New version!** pops up. **⬇️ Update now** downloads it, checks it arrived whole, swaps it in and restarts the game; **Later** skips it until next time. It only installs a file from this game's own GitHub releases whose SHA-256 fingerprint matches, and if the download stalls for 30 seconds it gives up and says so. **⚙️ Me → 🔄 Updates** has **Check for updates now** and a switch to stop checking when the game starts. The title screen shows the version in the bottom corner.
 
 On a Mac, the update button opens the download page instead.
 
@@ -313,20 +313,21 @@ The first time you host, your computer may ask whether to allow incoming network
 ### Run the tests
 
 ```bash
-tools/run_tests.sh
+tools/run_tests.sh               # every suite (about 8 minutes)
+tools/run_tests.sh b3more net    # just these
 ```
 
-The headless suites write their logs to `.test-logs/`:
-- **core** covers the worlds, Wiggly jelly physics, split and merge, power, booms, freezing, undo, saves, and every toy, Wiggly special, magic spell and gravity setting.
-- **fight** covers every fighter spawning and standing, giving weapons and armor, a red-vs-blue battle finding a winner, blasts throwing people (who then get back up), lava, platforms, personalities (defend, peaceful, coward), saving and loading, and the nuke.
-- **battle** (3D Battle) covers spawning every fighter on every map, fights, explosions, getting up, chain reactions, mines and buildings, lava and acid, every mood, the nuke, every scenario, the HUD, and a 150-fighter speed check.
-- **b3more** covers the 3D Battle extras: every Battle Rule (gravity, MEGA explosions, toughness, knockback, friendly fire, reinforcements, night, sunset, rain and snow), playing as a fighter (walking, jumping, shooting, stopping, getting knocked out), first person (the eye camera, mouse look, walking and shooting where you look, V back to overhead, jumping into a teammate when knocked out, and back overhead when nobody is left), screen shake, the follow camera, save slots, ⏮ Reset, and Surprise Battles reaching a winner with an MVP.
-- **b3net** runs a 3D host and a friend on this computer (the friend in its own 3D world) and checks joining, seeing every fighter, building and pool in the same place, a friend placing a fighter, walking a soldier and driving a tank with their own keys, knock-outs, broken walls, effects, erasing, pausing and leaving.
-- **vehicles** covers the race car, helicopter and fighter plane (spawning, the computer driving and fighting, being driven and flown in both views, staying inside the map, being shot down) and the network copies of every vehicle.
+A suite fails if it exits with an error, prints a SCRIPT ERROR or a parse error, or never prints its summary. The logs go to `.test-logs/`:
+- **core** covers the worlds, Wiggly jelly physics, split and merge, power, booms, freezing, undo, saves, and every toy, Wiggly special, magic spell and gravity setting. It also checks world pieces surviving Clear, glue and hinges holding, dragging while paused, lava not floating things, and animated toys moving.
+- **fight** covers every fighter spawning and standing, giving weapons and armor, a red-vs-blue battle finding a winner, blasts throwing people (who then get back up), lava, platforms, personalities (defend, peaceful, coward), saving and loading, and the nuke. It also checks Revive healing one fighter, armor not stacking, paused swings, gunners reloading, no spinning ragdoll limbs, and held weapons.
+- **battle** (3D Battle) covers spawning every fighter on every map, fights, explosions, getting up, chain reactions, mines and buildings, lava and acid, every mood, the nuke, every scenario, the HUD, and a 150-fighter speed check. It also checks no jumping in mid-air, melee reach (no healing hits, nothing far overhead), hazard and burn damage following the rules, shots flying past teammates, projectiles following the Gravity rule, and the effects pool.
+- **b3more** covers the 3D Battle extras: every Battle Rule (gravity, MEGA explosions, toughness, knockback, friendly fire, reinforcements, night, sunset, rain and snow), playing as a fighter (walking, jumping, shooting, stopping, getting knocked out), first person (the eye camera, mouse look, walking and shooting where you look, V back to overhead, jumping into a teammate when knocked out, and back overhead when nobody is left), screen shake, the follow camera, save slots, ⏮ Reset, and Surprise Battles reaching a winner with an MVP. It also checks the History tab's team picker, placement previews after playing, the first-person hit marker and body, saves keeping heights and History strength, Surprise Battle spacing, the top bar fitting, and your own shots landing in Moon gravity.
+- **b3net** runs a 3D host and a friend on this computer (the friend in its own 3D world) and checks joining, seeing every fighter, building and pool in the same place, a friend placing a fighter, walking a soldier and driving a tank with their own keys, knock-outs, broken walls, effects, erasing, pausing and leaving. It also checks trees knocked down before joining, vehicles facing the same way, airstrike planes, the nuke's flash, junk packets and effect names being ignored, and spam limits.
+- **vehicles** covers the race car, helicopter and fighter plane (spawning, the computer driving and fighting, being driven and flown in both views, staying inside the map, being shot down) and the network copies of every vehicle. It also checks planes shot down at the map edge, guns firing past teammates, and bombs in Moon gravity.
 - **history** sets up every History battle (two sides, nobody falling or inside the ground, nothing moving before Fight!) and plays some out to a winner.
-- **maps** loads every map, checks the ground right out to the edges, that fighters placed far out stand on it, the volcano's pools and the beach's water.
-- **modes** goes from the title menu into 3D Battle and back, then into the 2D game. It checks that the physics settings the 3D mode changes are put back and that a 2D battle still plays out.
-- **net** runs a host and a friend on this computer and checks joining, mirroring (including fighters and platforms), friend commands, the host's lock and snapshot size.
+- **maps** loads every map, checks the ground right out to the edges, that fighters placed far out stand on it, the volcano's pools and the beach's water. It also checks that knocked-over rocks keep their color.
+- **modes** goes from the title menu into 3D Battle and back, then into the 2D game. It checks that the physics settings the 3D mode changes are put back and that a 2D battle still plays out. It also checks the separate sound and music volumes, the full-length music loop and saving sticker progress.
+- **net** runs a host and a friend on this computer and checks joining, mirroring (including fighters and platforms), friend commands, the host's lock and snapshot size. It also checks for leftover copies on a friend's screen, fighter health and weapons syncing, junk packets and spam limits.
 - **update** covers the updater without the internet: comparing versions, picking the right download, checking a download is whole (size and SHA-256), swapping the game file and putting it back if that fails, cleaning up old copies, and the update pop-ups.
 
 `godot --headless --path . -- --test=update_live` asks GitHub for the newest release and downloads its Windows `.exe` the way **Update now** does. It needs the internet, so it isn't part of the suite.
@@ -347,7 +348,9 @@ This writes the Mac `.zip` and Windows `.exe` into `build/`. It needs Godot 4.7.
 tools/release.sh 1.0.1 "New dinosaurs and fewer bugs"
 ```
 
-This sets the version number, runs the tests, builds both apps, commits, tags `v1.0.1`, pushes to GitHub and makes a GitHub Release with `WiggleWorks-Windows.exe` and `WiggleWorks-Mac.zip`. Every Windows copy offers the update the next time it starts. Each version needs a bigger number than the last. Add `--skip-tests` to skip the 7-minute test run. It needs `gh` (the GitHub command-line tool) logged in.
+This sets the version number, runs the tests, builds both apps, commits the new version number, tags `v1.0.1`, pushes to GitHub and makes a GitHub Release with `WiggleWorks-Windows.exe`, `WiggleWorks-Mac.zip` and `SHA256SUMS.txt`. Every Windows copy offers the update the next time it starts. Each version needs a bigger number than the last. Add `--skip-tests` to skip the test run.
+
+Before it changes anything, it checks that `gh` (the GitHub command-line tool) is logged in and that everything else is already committed, so commit your changes first.
 
 ### Regenerate the sounds and icon
 

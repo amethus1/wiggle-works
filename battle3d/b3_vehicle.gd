@@ -168,7 +168,7 @@ func _physics_process(dt: float) -> void:
 		return
 	if burn_t > 0.0:
 		burn_t -= dt
-		hp -= dt * 6.0 * float(vdef.get("fire", 0.6))
+		hp -= dt * 6.0 * _env_share(true)
 		_burn_fx -= dt
 		if _burn_fx <= 0.0:
 			_burn_fx = 0.15
@@ -214,7 +214,8 @@ func _physics_process(dt: float) -> void:
 func _drive(dt: float) -> void:
 	var v := linear_velocity
 	var gh: float = battle.world.height_at(position.x, position.z)
-	_grounded = absf(v.y) < 1.5 or position.y - gh < 0.4
+	# on the ground or a bridge; not at the top of a jump off a ramp
+	_grounded = position.y - gh < 0.4 or (absf(v.y) < 1.5 and _feet_on_something(0.45))
 	var fwd := global_basis.z
 	fwd.y = 0.0
 	if fwd.length_squared() < 0.01:
@@ -444,7 +445,7 @@ func _aim(dt: float) -> void:
 func _lob(from: Vector3, to: Vector3) -> Vector3:
 	var flat := _flat(to - from)
 	var tt := clampf(flat.length() / 15.0, 0.9, 2.8)
-	return flat / tt + Vector3(0, (to.y - from.y + 0.5 * 9.8 * tt * tt) / tt, 0)
+	return B3Proj.lob(from, to, tt, "cannonball")
 
 
 # ------------------------------------------------------------- driving it
@@ -642,7 +643,7 @@ func _fire_shell() -> void:
 	var tt := from.distance_to(aim) / sp
 	if target and is_instance_valid(target):
 		aim += Vector3(target.linear_velocity.x, 0, target.linear_velocity.z) * tt * 0.6
-	var vel := (aim - from) / maxf(tt, 0.05) + Vector3(0, 0.5 * 2.0 * tt, 0)
+	var vel := B3Proj.lob(from, aim, maxf(tt, 0.05), "tankshell")
 	battle.spawn_proj("tankshell", from, vel, self, wpn)
 	var d := vel.normalized()
 	battle.fx.muzzle(from, d, 2.6)
@@ -703,7 +704,7 @@ func _shoot_ray(w: Dictionary, from: Vector3, dir: Vector3) -> void:
 		s *= 0.6
 	var d := (dir + Vector3(rng.randf_range(-s, s), rng.randf_range(-s, s) * 0.6, rng.randf_range(-s, s))).normalized()
 	var to := from + d * (float(w.range) * 1.4)
-	var hit: Dictionary = battle.raycast(from, to, SHOT_MASK, [get_rid()])
+	var hit := shot_ray(from, to)
 	var end := to
 	if not hit.is_empty():
 		end = hit.position
@@ -775,7 +776,7 @@ func _bump(u: B3Unit, fwd: Vector3) -> void:
 func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit") -> void:
 	if dead or wrecked:
 		return
-	dmg /= battle.r_tough      # Battle Rules: toughness and knockback
+	dmg = maxf(dmg, 0.0) / battle.r_tough      # Battle Rules: toughness and knockback (a hit never heals)
 	knock *= battle.r_knock
 	var share := 1.0
 	match how:
@@ -789,6 +790,7 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 			share = float(vdef.get("blast", 1.0))
 	var d := dmg * share * (1.0 - armor)
 	hp -= d
+	battle.player_hit(by, self)      # first-person hit marker, if it was you
 	hurt_t = 0.0
 	if rig:
 		rig.flash()
@@ -813,6 +815,14 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 		_tumble(dir * kv, kv)
 	elif kv > 0.5:
 		_nudge(dir, kv)
+
+
+## Lava, flames and burning only get through its fire share (a tank's thick
+## armour keeps most of the heat out); acid eats through anything. Toughness
+## and armour count too.
+func _env_share(fire: bool) -> float:
+	var share := float(vdef.get("fire", 0.6)) if fire else 1.0
+	return share * (1.0 - armor) / battle.r_tough
 
 
 ## A smaller knock: slides it a little.

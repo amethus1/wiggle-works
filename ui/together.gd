@@ -43,8 +43,7 @@ func _choose() -> void:
 	add_child(_list)
 	finder = LanFinder.new()
 	add_child(finder)
-	if not finder.start():
-		_list.add_child(UI.label("Couldn't listen for games (is another copy of the game open?). You can still type an address below.", 14, UI.MUTED))
+	finder.start()      # if it can't listen, _refresh_list says so
 	finder.games_changed.connect(_refresh_list)
 	_refresh_list()
 	var row := HBoxContainer.new()
@@ -66,6 +65,11 @@ func _refresh_list() -> void:
 		return
 	for c in _list.get_children():
 		c.queue_free()
+	if not finder.listening:
+		var err := UI.label("Couldn't listen for games (is another copy of the game open?). You can still type an address below.", 14, UI.MUTED)
+		err.autowrap_mode = TextServer.AUTOWRAP_WORD
+		_list.add_child(err)
+		return
 	if finder.games.is_empty():
 		_list.add_child(UI.label("Looking for games on your Wi-Fi…", 15, UI.MUTED))
 		return

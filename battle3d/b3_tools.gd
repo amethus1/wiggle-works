@@ -10,7 +10,7 @@ var battle = null
 var tool := "place"
 var place_id := "soldier"
 var team := "red"
-var team_by_cat := {"people": "red", "animals": "wild", "dinos": "wild"}
+var team_by_cat := {"people": "red", "animals": "wild", "dinos": "wild", "history": "red"}
 var pers := "auto"
 var place_size := 1.0      # Toy Box size for new fighters
 var struct_yaw := 0.0
@@ -412,7 +412,12 @@ func _key(e: InputEventKey) -> void:
 				set_tool("select")
 		KEY_DELETE, KEY_BACKSPACE, KEY_X:
 			if selected and is_instance_valid(selected):
-				battle.remove_unit(selected)
+				if battle.net and battle.net.is_client():
+					# in a friend's battle: ask the host to remove it (like the Eraser does)
+					if selected.has_meta("nid"):
+						battle.net.send_cmd({"c": "erase", "nid": int(selected.get_meta("nid"))})
+				else:
+					battle.remove_unit(selected)
 				select(null)
 		KEY_EQUAL, KEY_KP_ADD:
 			battle.cam.zoom_at(get_viewport().get_visible_rect().size * 0.5, 1.2)
@@ -815,6 +820,7 @@ func _update_ghost() -> void:
 		return
 	_ghost_ring.visible = false
 	_ghost_box.visible = false
+	_line.visible = true      # (hidden while playing a fighter)
 	var mm := _line.multimesh
 	mm.visible_instance_count = 0
 	if get_viewport().gui_get_hovered_control() != null and drag.is_empty():

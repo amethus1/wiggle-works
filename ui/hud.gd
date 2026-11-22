@@ -230,6 +230,8 @@ func refresh_selection() -> void:
 		return
 	var sig := "%d|%d|%s|%s|%s|%s|%s" % [t.uid, game.playing_uid, str(t.get("nailed")), str(t.get("team")), str(t.get("pers")), str(t.get("weapon_id")), str(t.get("state"))]
 	if sig == _sel_sig and selbar.visible:
+		if t is Fighter and sel_name:
+			sel_name.text = _fighter_info(t)   # health changes all the time: keep it live
 		return
 	_sel_sig = sig
 	selbar.visible = true
@@ -238,6 +240,7 @@ func refresh_selection() -> void:
 	var name := UI.title(t.display_name(), 20)
 	name.custom_minimum_size.x = 120
 	sel_box.add_child(name)
+	sel_name = name
 	var uid: int = t.uid
 	var add := func(txt: String, tip: String, fn: Callable, col := UI.PANEL2) -> void:
 		var b := UI.button(txt, col, 16)
@@ -270,12 +273,17 @@ func refresh_selection() -> void:
 		game.select(-1), UI.BAD.darkened(0.35))
 
 
-func _fighter_bar(t: Fighter) -> void:
-	var uid := t.uid
+func _fighter_info(t: Fighter) -> String:
 	var info := "%s  ·  %s" % [t.display_name(), "KO'd" if not t.alive() else ("%d/%d ❤️" % [int(t.hp), int(t.max_hp)])]
 	if t.weapon_id != "":
-		info += "  ·  " + Catalog.toy(t.weapon_id).get("name", "")
-	(sel_box.get_child(0) as Label).text = info
+		info += "  ·  " + String(Catalog.toy(t.weapon_id).get("name", ""))
+	return info
+
+
+func _fighter_bar(t: Fighter) -> void:
+	var uid := t.uid
+	# (the old buttons are still children until the end of the frame, so not get_child(0))
+	sel_name.text = _fighter_info(t)
 	var add := func(txt: String, tip: String, fn: Callable, col := UI.PANEL2) -> Button:
 		var b := UI.button(txt, col, 15)
 		b.tooltip_text = tip
@@ -289,7 +297,7 @@ func _fighter_bar(t: Fighter) -> void:
 			add.call("🎮 Play", "Control this one [C]", func(): game.play_as(uid), UI.GOOD.darkened(0.25))
 		add.call("⚔️ Attack", "Attack now [F]", func(): game.send({"cmd": "use", "uid": uid}))
 	else:
-		add.call("💖 Revive", "Get back up", func(): game.send({"cmd": "magic", "id": "heal_all"}), UI.GOOD.darkened(0.25))
+		add.call("💖 Revive", "Get back up", func(): game.send({"cmd": "revive", "uid": uid}), UI.GOOD.darkened(0.25))
 	var tb: Button = add.call("  Team  ", "Change team", func():
 		var i := Catalog.TEAM_ORDER.find(t.team)
 		game.send({"cmd": "team", "uid": uid, "team": Catalog.TEAM_ORDER[(i + 1) % Catalog.TEAM_ORDER.size()]}))
@@ -466,7 +474,8 @@ func _card(id: String) -> Control:
 func card_released(id: String, dragged_out: bool) -> void:
 	if dragged_out:
 		var wp := game.local_pos()
-		game.send({"cmd": "spawn", "id": id, "x": wp.x, "y": wp.y})
+		# fighters dragged in get the team and personality picked above, like clicked ones
+		game.send({"cmd": "spawn", "id": id, "x": wp.x, "y": wp.y, "team": game.spawn_team, "pers": game.spawn_pers})
 		Settings.add_recent(id)
 		refresh_toybox_recent()
 	else:
@@ -700,11 +709,16 @@ func toggle_help() -> void:
 
 func show_stickers() -> void:
 	var v := _open_modal("📒 Sticker Book  (%d / %d)" % [Settings.stickers.size(), Catalog.STICKERS.size()], 760)
+	# all the stickers are taller than the window, so they scroll
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sc.custom_minimum_size.y = clampf(get_viewport().get_visible_rect().size.y - 220.0, 240.0, 640.0)
+	v.add_child(sc)
 	var g := GridContainer.new()
 	g.columns = 4
 	g.add_theme_constant_override("h_separation", 10)
 	g.add_theme_constant_override("v_separation", 10)
-	v.add_child(g)
+	sc.add_child(g)
 	for s in Catalog.STICKERS:
 		var got: bool = Settings.stickers.has(s.id)
 		var p := PanelContainer.new()

@@ -44,6 +44,25 @@ func _ready() -> void:
 				print("        %s at %s" % [f.type, f.center()])
 		check(ok, "%s loads and settles (%d Wigglies, %d fighters, %d toys)" % [wd.id, w.count_wigglies(), w.fighters().size(), w.count_toys()])
 
+	print("world pieces")
+	w.load_world("meadow", false)
+	w.load_world("battle", false)
+	check(_water_area() > 10000.0, "switching worlds doesn't cut holes in the new world's water (%.0f px² of river)" % _water_area())
+	w.load_world("clouds", false)
+	var bridge_top := _ground_top(-125.0)
+	check(absf(bridge_top - 60.0) < 15.0, "the Cloud Kingdom rainbow bridge reaches the middle island (its end is at y %.0f)" % bridge_top)
+	w.load_world("battle")
+	await frames(2)
+	var forts := w.platforms.size()
+	w.next_group = 1   # like a new game
+	w.apply_command(0, {"cmd": "platform", "x0": -300, "y0": -300, "x1": -200, "y1": -280})
+	w.apply_command(0, {"cmd": "unplatform", "x": -250, "y": -290})
+	await frames(2)
+	check(w.platforms.size() == forts, "erasing a platform you built leaves the forts alone (%d of %d left)" % [w.platforms.size(), forts])
+	w.apply_command(0, {"cmd": "clear"})
+	await frames(2)
+	check(w.platforms.size() == forts, "🧹 Clear leaves Battle Valley's forts standing (%d of %d left)" % [w.platforms.size(), forts])
+
 	print("jelly")
 	w.load_world("canvas", false)
 	var b := w.spawn_wiggly("bloop", Vector2(0, -150))
@@ -62,12 +81,21 @@ func _ready() -> void:
 	await frames(60)
 	w.apply_command(5, {"cmd": "grab", "uid": s.uid, "x": s.pts[0].x, "y": s.pts[0].y})
 	for i in 90:
-		var tgt := s.com + Vector2(500, -200) if is_instance_valid(s) else Vector2(500, -200)
+		if w.wigglies().size() > 1:
+			break
+		var tgt := s.com + Vector2(500, -200)
 		w.apply_command(5, {"cmd": "drag", "x": tgt.x, "y": tgt.y})
 		await get_tree().physics_frame
+	await frames(10)   # still holding the mouse button down
 	var gummies := w.wigglies().filter(func(g): return g.kind == "gummy")
 	check(gummies.size() == 2, "pulling a Wiggly hard pops it into two (%d now)" % gummies.size())
+	var held = w.get_thing(int(w.grabs[5].uid)) if w.grabs.has(5) else null
+	check(held is Wiggly and gummies.has(held), "and you keep hold of one half")
 	w.apply_command(5, {"cmd": "release"})
+	await frames(5)
+	check(w.wigglies().size() == 2, "letting go straight away doesn't stick the halves back together")
+	await frames(120)
+	gummies = w.wigglies().filter(func(g): return g.kind == "gummy")
 	if gummies.size() == 2:
 		var g1: Wiggly = gummies[0]
 		var g2: Wiggly = gummies[1]
@@ -139,6 +167,75 @@ func _ready() -> void:
 	await frames(8)
 	check([w.count_toys(), w.count_wigglies(), w.links.size()] == counts, "a saved playground loads back the same (%s)" % str(counts))
 
+	print("glue, hinges and pausing")
+	w._clear_all()
+	var b1 := w.spawn_toy("wood_block", Vector2(-220, 270))
+	var b2 := w.spawn_toy("wood_block", Vector2(-180, 270))
+	var b3 := w.spawn_toy("wood_block", Vector2(180, 270))
+	var b4 := w.spawn_toy("wood_block", Vector2(220, 270))
+	await frames(30)
+	# dragged from the middle of one block to the middle of the next, like you do with the mouse
+	var gl := w.add_link("glue", b1, b2, b1.global_position, b2.global_position)
+	var hg := w.add_link("hinge", b3, b4, b3.global_position, b4.global_position)
+	await frames(30)
+	check(not gl.broken and not hg.broken, "glue and a hinge dragged from one block to the next hold (they don't snap straight away)")
+	var box := w.spawn_toy("wood_block", Vector2(-500, 270))
+	var jel := w.spawn_wiggly("bloop", Vector2(500, 220))
+	jel.player_id = 99   # keeps still
+	await frames(60)
+	w.apply_command(0, {"cmd": "pause", "on": true})
+	var bx0 := box.global_position
+	w.apply_command(0, {"cmd": "grab", "uid": box.uid, "x": bx0.x, "y": bx0.y})
+	for i in 20:
+		w.apply_command(0, {"cmd": "drag", "x": bx0.x + 150.0, "y": bx0.y - 100.0})
+		await get_tree().physics_frame
+	w.apply_command(0, {"cmd": "release"})
+	check(box.global_position.distance_to(bx0 + Vector2(150, -100)) < 5.0, "while paused you can still drag a toy around")
+	var jc0 := jel.com
+	w.apply_command(0, {"cmd": "grab", "uid": jel.uid, "x": jc0.x, "y": jc0.y})
+	for i in 20:
+		w.apply_command(0, {"cmd": "drag", "x": jc0.x - 120.0, "y": jc0.y - 80.0})
+		await get_tree().physics_frame
+	w.apply_command(0, {"cmd": "release"})
+	await get_tree().process_frame
+	check(jel.com.distance_to(jc0 + Vector2(-120, -80)) < 10.0, "and a Wiggly (moved to %s)" % str(jel.com - jc0))
+	w.apply_command(0, {"cmd": "pause", "on": false})
+
+	print("toys, water and lava")
+	w._clear_all()
+	var gum := w.spawn_wiggly("gummy", Vector2(-600, 200))
+	gum.stuck_links = 3   # it already stuck to 3 things last time
+	gum.use_special()
+	check(gum.stuck_links == 0, "Gummy's Sticky Mode sticks again every time it starts (not just the first 3 times)")
+	var fan := w.spawn_toy("fan", Vector2(-400, 250))
+	w.apply_command(0, {"cmd": "use", "uid": fan.uid})
+	var draws := [0]
+	fan.draw.connect(func(): draws[0] += 1)
+	for i in 20:
+		await get_tree().process_frame
+	check(draws[0] >= 10, "a switched-on fan keeps redrawing, so its blades spin (%d redraws in 20 frames)" % draws[0])
+	check(bool(Builders.part_def("rocket", 12.0).get("part", false)), "a copy of a flying bazooka rocket (a friend's, or a save) is a rocket, not a Rocket Booster")
+	var hub = w.spawn("build:ferris", Vector2(0, 0))
+	await frames(30)
+	var turned := 0.0
+	var last_a: float = hub.rotation
+	for i in 240:
+		await get_tree().physics_frame
+		turned += wrapf(hub.rotation - last_a, -PI, PI)
+		last_a = hub.rotation
+	check(absf(turned) > 2.0, "the Spinny Wheel spins (its arms don't jam on its post) (%.1f rad in 2 s)" % absf(turned))
+	# a narrow pillar: the kart's body is lifted on top of it, so its wheels must come too
+	w.apply_command(0, {"cmd": "platform", "x0": -720, "y0": 0, "x1": -680, "y1": 300})
+	var kart = w.spawn("go_kart", Vector2(-700, 100))
+	var wheels := w.toys().filter(func(o): return o.parent_uid == kart.uid)
+	check(wheels.size() == 2 and wheels.all(func(o): return absf(o.global_position.y - kart.global_position.y) < 40.0), "a go-kart dropped onto a pillar keeps its wheels under it")
+	w.apply_command(0, {"cmd": "spawn", "id": "lava_tub", "x": 500, "y": 300})
+	w.apply_command(0, {"cmd": "spawn", "id": "water_tub", "x": 900, "y": 300})
+	check(w.in_water(Vector2(500, 260)) == Rect2() and w.in_water(Vector2(900, 260)) != Rect2(), "lava doesn't float toys or splash like water does")
+	var shapes := w.water_shapes.size()
+	w.apply_command(0, {"cmd": "platform", "x0": 860, "y0": 250, "x1": 940, "y1": 270})
+	check(w.water_shapes.size() == shapes, "a platform sunk in the water tank doesn't get water drawn over it twice")
+
 	print("everything")
 	w.load_world("canvas", false)
 	var x := -1300.0
@@ -178,3 +275,26 @@ func _ready() -> void:
 
 	print("test_core: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+## How much water (and lava and acid) is showing, in square pixels.
+func _water_area() -> float:
+	var a := 0.0
+	for ws in w.water_shapes:
+		var p: PackedVector2Array = ws.poly
+		var s := 0.0
+		for i in p.size():
+			s += p[i].cross(p[(i + 1) % p.size()])
+		a += absf(s) * 0.5
+	return a
+
+
+## The height of the first solid ground at `x`, coming down from the sky.
+func _ground_top(x: float) -> float:
+	var y := -400.0
+	while y < 800.0:
+		for g in w.terrain.get_children():
+			if g is Ground and not g.is_queued_for_deletion() and Geometry2D.is_point_in_polygon(Vector2(x, y), g.poly):
+				return y
+		y += 2.0
+	return INF

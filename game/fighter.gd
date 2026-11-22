@@ -6,6 +6,7 @@ extends Node2D
 ## if it's only knocked down.
 
 const LAYER := 16
+const MAX_BEND_SPEED := 14.0  # rad/s: the fastest a ragdoll joint is pushed back inside its limits
 const RAG_PARTS := ["head", "torso", "uarm_b", "larm_b", "thigh_b", "shin_b", "thigh_f", "shin_f", "uarm_f", "larm_f"]
 
 var uid := 0
@@ -66,6 +67,8 @@ var held_by := {}               # player id -> true while grabbed
 var dead_t := 0.0
 var hair := Color("3b2a1a")
 var _voice_t := 0.0
+var hit_t := 0.0               # melee: time until the swing lands
+var _hit_wd := {}              # melee: the weapon that swing is with
 
 
 func setup(w: Node, fighter_type: String, pos: Vector2, team_id := "", personality := "", s := 1.0) -> void:
@@ -301,6 +304,7 @@ func ragdoll(impulse := Vector2.ZERO) -> void:
 	state = "ragdoll" if hp > 0.0 else "dead"
 	down_t = 0.0
 	swing = 0.0
+	hit_t = 0.0
 
 
 func _part(name: String, pos: Vector2, rot: float, half: Vector2, round_p: bool, m: float, vel: Vector2) -> FighterPart:
@@ -320,6 +324,7 @@ func _part(name: String, pos: Vector2, rot: float, half: Vector2, round_p: bool,
 		cs.shape = r
 	p.add_child(cs)
 	p.mass = m
+	p.angular_damp = 1.0       # a little joint friction, so limbs settle instead of spinning on
 	p.physics_material_override = _mat(0.8, 0.05)
 	p.collision_layer = LAYER
 	p.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | LAYER
@@ -364,7 +369,9 @@ func _person_ragdoll(c: Vector2, v: Vector2, imp: Vector2) -> void:
 		p.angular_velocity = spin
 	_join("torso", "head", c + flipped(o.neck), -0.7, 0.7)
 	for side in ["f", "b"]:
-		_join("torso", "uarm_" + side, c + flipped(o.shoulder), -3.1, 3.1)
+		# arms flail almost all the way round, but not quite: with no gap at
+		# all, nothing ever slowed a spinning arm and it whirled like a helicopter
+		_join("torso", "uarm_" + side, c + flipped(o.shoulder), -2.7, 2.7)
 		_join("uarm_" + side, "larm_" + side, c + flipped(o["elbow_" + side]), -2.4, 0.2)
 		_join("torso", "thigh_" + side, c + flipped(o.hip), -1.6, 1.6)
 		_join("thigh_" + side, "shin_" + side, c + flipped(o["knee_" + side]), -0.1, 2.4)
@@ -427,14 +434,18 @@ func _solve_limits(dt: float) -> void:
 		var b: FighterPart = l[1]
 		if not is_instance_valid(a) or not is_instance_valid(b):
 			continue
-		var rel := wrapf(b.rotation - a.rotation, -PI, PI)
+		# Measure the bend from the middle of the allowed range. Measured from
+		# zero, an angle that wraps past ±PI looked like a huge error and the
+		# fix-up spun the limb round and round like a helicopter.
 		var lo: float = l[2]
 		var hi: float = l[3]
+		var half := (hi - lo) * 0.5
+		var rel := wrapf(b.rotation - a.rotation - (lo + hi) * 0.5, -PI, PI)
 		var err := 0.0
-		if rel < lo:
-			err = rel - lo
-		elif rel > hi:
-			err = rel - hi
+		if rel < -half:
+			err = rel + half
+		elif rel > half:
+			err = rel - half
 		if err == 0.0:
 			continue
 		var sa := PhysicsServer2D.body_get_direct_state(a.get_rid())
@@ -446,7 +457,10 @@ func _solve_limits(dt: float) -> void:
 		if ia + ib <= 0.0:
 			continue
 		var wrel := sb.angular_velocity - sa.angular_velocity
-		var desired := -err * 0.3 / dt
+		# Bend back towards the limit, but not too hard: a limb far past its
+		# limit used to be flung back at 100+ rad/s, overshoot, and whirl
+		# round like a helicopter.
+		var desired := clampf(-err * 0.3 / dt, -MAX_BEND_SPEED, MAX_BEND_SPEED)
 		if (err > 0.0 and wrel > desired) or (err < 0.0 and wrel < desired):
 			var imp := (desired - wrel) / (ia + ib)
 			sa.angular_velocity -= imp * ia
@@ -506,13 +520,19 @@ func equip(toy: Toy) -> bool:
 		return false
 	if toy.def.has("armor"):
 		var a: Dictionary = toy.def.armor
+		# one of each: a second helmet, vest or shield doesn't add more armor
 		match String(a.slot):
 			"helmet":
-				if helmet == "":
-					helmet = "army"
+				if helmet != "":
+					return false
+				helmet = "army"
 			"body":
+				if body_armor:
+					return false
 				body_armor = true
 			"shield":
+				if shield:
+					return false
 				shield = true
 		armor = minf(0.7, armor + float(a.value))
 		world.remove(toy.uid, false)
@@ -668,6 +688,7 @@ func physics_step(dt: float) -> void:
 	flash = maxf(0.0, flash - dt * 4.0)
 	cool = maxf(0.0, cool - dt)
 	swing = maxf(0.0, swing - dt)
+	reload_t = maxf(0.0, reload_t - dt)   # reloading goes on between fights too
 	if burning > 0.0:
 		burning -= dt
 		hurt(12.0 * dt)
@@ -693,6 +714,13 @@ func physics_step(dt: float) -> void:
 			return
 	if not is_instance_valid(body):
 		return
+	if hit_t > 0.0:
+		hit_t -= dt
+		if hit_t <= 0.0:
+			_melee_hit(_hit_wd)
+			# the blow can knock ourselves over (a barrel right next to us)
+			if state != "stand" or not is_instance_valid(body):
+				return
 	_ground_check()
 	if weapon_toy and is_instance_valid(weapon_toy):
 		var hand := _hand_world()
@@ -936,12 +964,13 @@ func _attack(tc: Vector2, wt: String) -> void:
 			if beast and String(def.get("voice", "")) != "" and randf() < 0.4:
 				world.fx_event("voice", {"p": center(), "v": String(def.voice)})
 			world.fx_event("swing", {"p": center(), "fists": wd.get("fists", false), "beast": beast})
-			_melee_hit.call_deferred(wd)
+			# the blow lands halfway through the swing (counted in physics steps, so ⏸ pause stops it)
+			hit_t = _swing_time() * 0.5
+			_hit_wd = wd
 		"gun":
 			if int(wd.get("burst", 0)) > 0:
 				if reload_t > 0.0:
-					reload_t -= _rate()
-					cool = _rate()
+					cool = reload_t   # still reloading: try again when it's done
 					return
 				ammo -= 1
 				if ammo <= 0:
@@ -980,12 +1009,14 @@ func _muzzle() -> Vector2:
 
 
 func _melee_hit(wd: Dictionary) -> void:
-	await get_tree().create_timer(_swing_time() * 0.5, false).timeout
-	if not is_instance_valid(self) or state != "stand" or puppet:
+	if state != "stand" or puppet:
 		return
 	var reach := float(wd.get("reach", 40.0)) * (size if not beast else 1.0)
+	# A beast decides to attack counting its own body (see _act), so it hits
+	# from there too. Otherwise big or resized beasts swung at thin air.
+	var body_x := radius() * 0.6 if beast else 0.0
 	var c := center()
-	var front := c + Vector2(facing * reach * 0.6, -10.0 * size)
+	var front := c + Vector2(facing * (reach * 0.6 + body_x), -10.0 * size)
 	var kind := String(def.get("attack", "bite")) if beast else "melee"
 	var hit_any := false
 	for o in world.fighters():
@@ -994,12 +1025,12 @@ func _melee_hit(wd: Dictionary) -> void:
 		var oc: Vector2 = o.center()
 		var d := oc - c
 		var in_front: bool = signf(d.x) == facing or absf(d.x) < o.radius()
-		var area: bool = absf(d.x) < reach + o.radius() * 0.8 and absf(d.y) < reach * 0.7 + o.radius()
+		var area: bool = absf(d.x) < reach + body_x + o.radius() * 0.8 and absf(d.y) < reach * 0.7 + o.radius()
 		if kind == "stomp":
-			area = d.length() < reach + o.radius() * 0.5
+			area = d.length() < reach + body_x + o.radius() * 0.5
 			in_front = true
 		elif kind == "tail":
-			area = absf(d.x) < reach + o.radius() * 0.8 and absf(d.y) < reach * 0.6 + o.radius()
+			area = absf(d.x) < reach + body_x + o.radius() * 0.8 and absf(d.y) < reach * 0.6 + o.radius()
 			in_front = true
 		if area and in_front:
 			var knock_dir := Vector2(signf(d.x) if d.x != 0.0 else facing, -0.55).normalized()

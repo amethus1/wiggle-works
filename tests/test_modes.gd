@@ -1,7 +1,8 @@
 extends Node
 ## Switching between the title menu, the 3D battle and the 2D sandbox, the way
 ## a player does it: the 3D mode changes physics settings while it's open, and
-## the 2D game must get them back.
+## the 2D game must get them back. Then what carries on across every mode:
+## the sound and music levels, the music loop, and sticker progress being saved.
 ## godot --headless --path . -- --test=modes
 
 var fails := 0
@@ -91,7 +92,62 @@ func _ready() -> void:
 	main.start_game({"world": "canvas", "mode": "solo"})
 	await frames(30)
 	check(Engine.physics_ticks_per_second == tps and Engine.time_scale == 1.0, "and leaving puts the settings back again")
+	await _sound_and_settings()
 	_done()
+
+
+func _sound_and_settings() -> void:
+	print("sound, music and saved progress")
+	var sfx_bus := AudioServer.get_bus_index(Sfx.SFX_BUS)
+	var music_bus := AudioServer.get_bus_index(Sfx.MUSIC_BUS)
+	check(sfx_bus > 0 and music_bus > 0 and AudioServer.get_bus_send(sfx_bus) == &"Master" and AudioServer.get_bus_send(music_bus) == &"Master",
+		"sound effects and music each have their own bus")
+	Sfx.set_volume(1.0)
+	Sfx.set_music(1.0)
+	var music_db := AudioServer.get_bus_volume_db(music_bus)
+	Sfx.set_volume(0.1)
+	check(AudioServer.get_bus_volume_db(sfx_bus) < -15.0 and is_equal_approx(AudioServer.get_bus_volume_db(music_bus), music_db) and is_equal_approx(AudioServer.get_bus_volume_db(0), 0.0),
+		"turning 🔊 Sound down leaves the music as loud as it was")
+	Sfx.set_music(0.1)
+	check(AudioServer.get_bus_volume_db(music_bus) < music_db - 15.0 and AudioServer.get_bus_volume_db(sfx_bus) < -15.0 and AudioServer.get_bus_volume_db(sfx_bus) > -25.0,
+		"and turning 🎵 Music down leaves the sound effects alone")
+	Sfx.set_volume(Settings.volume)
+	Sfx.set_music(Settings.music)
+	var m: AudioStreamWAV = load("res://audio/music/wiggle_loop.wav")
+	Sfx.loop_whole(m)
+	var loop_sec := (m.loop_end - m.loop_begin) / float(m.mix_rate)
+	check(m.loop_mode == AudioStreamWAV.LOOP_FORWARD and m.get_length() > 30.0 and absf(loop_sec - m.get_length()) < 0.01,
+		"the music loops all the way through (%.1f s of %.1f s)" % [loop_sec, m.get_length()])
+	check(not Sfx.too_soon("thud", 100000) and Sfx.too_soon("thud", 100010) and not Sfx.too_soon("thud", 100050) and not Sfx.too_soon("clink", 100051),
+		"a bumping pile plays each thud at most every 35 ms (other bumps aren't held up)")
+	check(not Sfx.too_soon("boom", 100000) and not Sfx.too_soon("boom", 100001), "other sounds aren't held back")
+
+	# a sticker half-way done is still half-way done next time
+	var keep_testing := Settings.testing
+	var keep_counter = Settings.counters.get("test_jumps")
+	var path := "user://test_settings.cfg"
+	Settings.file = path
+	Settings.testing = false
+	Settings.count("test_jumps", "test_sticker", 10)
+	check(Settings.unsaved(), "counting toward a sticker asks for a save")
+	await get_tree().create_timer(Settings.SAVE_DELAY + 0.5).timeout
+	var c := ConfigFile.new()
+	var saved: Dictionary = c.get_value("play", "counters", {}) if c.load(path) == OK else {}
+	check(not Settings.unsaved() and int(saved.get("test_jumps", 0)) == int(Settings.counters.test_jumps),
+		"and the count is saved a moment later, before the sticker is earned (%s)" % saved.get("test_jumps", "not saved"))
+	Settings.count("test_jumps", "test_sticker", 10)
+	Settings._exit_tree()    # as if the game closed right away
+	c = ConfigFile.new()
+	saved = c.get_value("play", "counters", {}) if c.load(path) == OK else {}
+	check(not Settings.unsaved() and int(saved.get("test_jumps", 0)) == int(Settings.counters.test_jumps),
+		"and when the game closes before that, it's saved on the way out")
+	Settings.testing = keep_testing
+	Settings.file = Settings.PATH
+	if keep_counter == null:
+		Settings.counters.erase("test_jumps")
+	else:
+		Settings.counters.test_jumps = keep_counter
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 
 
 func _done() -> void:

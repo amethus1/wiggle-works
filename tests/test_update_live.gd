@@ -26,6 +26,7 @@ func _ready() -> void:
 		var mac := Updater.parse_release(Updater.raw, "macOS")
 		check(not win.asset.is_empty() and not mac.asset.is_empty(), "the release has a Windows .exe and a Mac .zip")
 		check(String(win.asset.get("digest", "")).begins_with("sha256:"), "GitHub gives the .exe's fingerprint (sha256)")
+		check(Updater.trusted(String(win.asset.get("browser_download_url", ""))), "and its download link is one the updater accepts (this game's GitHub releases)")
 		DirAccess.make_dir_recursive_absolute(DIR)
 		var path := ProjectSettings.globalize_path(DIR + "/WiggleWorks.exe")
 		var t0 := Time.get_ticks_msec()

@@ -1,7 +1,9 @@
 extends Node
 ## 🔄 Updater checks that don't need the internet: comparing versions, picking
-## the right download, checking a download arrived whole, swapping the game
-## file (and putting it back if that fails), cleaning up, and the pop-ups.
+## the right download, only downloading from this game's GitHub releases,
+## downloading (from a tiny web server on this computer, including one that
+## stops answering), checking a download arrived whole, swapping the game file
+## (and putting it back if that fails), cleaning up, and the pop-ups.
 ## godot --headless --path . -- --test=update
 ## (tests/test_update_live.gd checks the real GitHub release, online.)
 
@@ -32,6 +34,27 @@ func sha(txt: String) -> String:
 	return c.finish().hex_encode()
 
 
+## A tiny web server for one download: answers the first request with `body`.
+func _serve(srv: TCPServer, body: String) -> void:
+	var until := Time.get_ticks_msec() + 5000
+	while not srv.is_connection_available():
+		if Time.get_ticks_msec() > until:
+			return
+		await get_tree().process_frame
+	var c := srv.take_connection()
+	var req := ""
+	while not req.contains("\r\n\r\n") and Time.get_ticks_msec() < until:
+		c.poll()
+		var n := c.get_available_bytes()
+		if n > 0:
+			req += c.get_utf8_string(n)
+		else:
+			await get_tree().process_frame
+	c.put_data(("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % [body.length(), body]).to_utf8_buffer())
+	await get_tree().create_timer(1.0).timeout
+	c.disconnect_from_host()
+
+
 func _ready() -> void:
 	await get_tree().process_frame
 	# versions
@@ -59,8 +82,37 @@ func _ready() -> void:
 	write(dl, "the new game")
 	check(Updater.verify(dl, 12, "sha256:" + sha("the new game")) == "", "a complete download with the right fingerprint passes")
 	check(Updater.verify(dl, 12, "sha256:" + sha("something else")) != "", "a scrambled one doesn't")
-	check(Updater.verify(dl, 99, "") != "", "nor a half-finished one")
+	check(Updater.verify(dl, 99, "sha256:" + sha("the new game")) != "", "nor a half-finished one")
 	check(Updater.verify(DIR + "/nope.bin", 1, "") != "", "nor a missing one")
+	check(Updater.verify(dl, 12, "") != "" and Updater.verify(dl, 12, str(null)) != "", "nor one GitHub gave no fingerprint for (nothing to check it against)")
+
+	# only from this game's GitHub releases
+	var gh := "https://github.com/" + Updater.REPO + "/releases/download/"
+	check(Updater.trusted(gh + "v1.0.1/WiggleWorks-Windows.exe"), "updates download from this game's GitHub releases")
+	check(not Updater.trusted("http://github.com/" + Updater.REPO + "/releases/download/v1.0.1/WiggleWorks-Windows.exe")
+		and not Updater.trusted("https://github.com.evil.example/" + Updater.REPO + "/releases/download/v1/x.exe")
+		and not Updater.trusted("https://evil.example/?" + gh + "v1/x.exe")
+		and not Updater.trusted("https://github.com/someone/else/releases/download/v1/x.exe"), "and from nowhere else (not plain http, look-alike sites or other projects)")
+	var dl2 := ProjectSettings.globalize_path(DIR + "/elsewhere.exe")
+	var refused: String = await Updater.fetch({"browser_download_url": "https://evil.example/WiggleWorks-Windows.exe", "size": 5, "digest": "sha256:" + sha("hello")}, dl2)
+	check(refused != "" and not FileAccess.file_exists(dl2), "a download from anywhere else is refused before it starts")
+
+	# downloading, from a tiny web server on this computer
+	var srv := TCPServer.new()
+	check(srv.listen(0, "127.0.0.1") == OK, "a test web server starts")
+	var url := "http://127.0.0.1:%d/WiggleWorks-Windows.exe" % srv.get_local_port()
+	var got := ProjectSettings.globalize_path(DIR + "/got.exe")
+	_serve(srv, "the new game")
+	var problem: String = await Updater.download(url, got, 12)
+	check(problem == "" and read(got) == "the new game", "a download arrives whole (%s)" % (problem if problem != "" else "ok"))
+	var keep_stall := Updater.stall_sec
+	Updater.stall_sec = 1.0
+	var t0 := Time.get_ticks_msec()
+	problem = await Updater.download(url, got, 12)    # nobody answers this time
+	var waited := (Time.get_ticks_msec() - t0) / 1000.0
+	check(problem != "" and waited < 6.0, "a download that stops coming gives up instead of waiting forever (%.1f s: %s)" % [waited, problem])
+	Updater.stall_sec = keep_stall
+	srv.stop()
 
 	# swapping the game file
 	var exe := ProjectSettings.globalize_path(DIR + "/Wiggle Works.exe")
@@ -73,6 +125,13 @@ func _ready() -> void:
 	Updater.clean_up(exe, true)
 	var left := Array(DirAccess.get_files_at(DIR)).filter(func(f): return String(f).ends_with(".old"))
 	check(left.is_empty() and read(exe) == "newer game", "old copies are cleaned up next time, and the game stays")
+	write(exe + ".new", "half a download")
+	Updater.installing = true    # as if Update now were downloading
+	Updater.later_clean_up(exe, true)
+	check(read(exe + ".new") == "half a download", "the second clean-up (a few seconds after starting) leaves an update that's downloading alone")
+	Updater.installing = false
+	Updater.later_clean_up(exe, true)
+	check(not FileAccess.file_exists(exe + ".new") and read(exe) == "newer game", "and tidies up when no update is running")
 
 	# the pop-ups
 	var m = load("res://ui/menu.gd").new()
@@ -87,11 +146,24 @@ func _ready() -> void:
 			b.pressed.emit()
 	await get_tree().process_frame
 	check(m.modal == null, "Later closes it")
+	Updater.installing = true    # as if Update now were downloading
+	m._update_modal({"version": "9.0.0", "notes": "", "page": "https://page", "asset": {}, "newer": true, "ok": true})
+	m.modal_x.pressed.emit()
+	await get_tree().process_frame
+	check(m.modal != null and is_instance_valid(m.modal), "while an update downloads, ✕ doesn't close its pop-up (it shows how it went)")
+	Updater.installing = false
+	m.modal_x.pressed.emit()
+	await get_tree().process_frame
+	check(m.modal == null, "afterwards ✕ closes it")
 	m._settings()
 	var boxes: Array = m.modal.find_children("*", "CheckBox", true, false)
 	check(boxes.size() == 1 and (boxes[0] as CheckBox).button_pressed == Settings.auto_update, "⚙️ Me has the 'look for a new version' switch")
 	check(m.modal.find_children("*", "Button", true, false).any(func(b): return (b as Button).text.begins_with("🔄 Check")), "and a Check for updates button")
 	m.queue_free()
+
+	# settings: test runs never write the player's settings file
+	check(Settings.test_run(PackedStringArray(["--test=perf"])) and Settings.test_run(PackedStringArray(["--shot=a.png"]))
+		and not Settings.test_run(PackedStringArray(["--world=meadow"])), "test suites (even windowed ones like perf) and screenshots never save settings")
 
 	for f in DirAccess.get_files_at(DIR):
 		DirAccess.remove_absolute(DIR + "/" + f)

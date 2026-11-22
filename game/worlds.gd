@@ -251,14 +251,14 @@ static func build(world: World, id: String) -> void:
 				_ground(world, pts, grass, 10 + k)
 				_decor(world, "cloud_fluff", c + Vector2(0, 30), wdt / 300.0)
 				k += 1
-			# rainbow bridge
+			# rainbow bridge: arches from the left island (top y 200) up onto the middle one (top y 60)
 			var bridge := PackedVector2Array()
 			for i in 21:
 				var a := float(i) / 20.0
-				bridge.append(Vector2(lerpf(-380, -120, a), 200.0 - 140.0 * sin(a * PI)))
+				bridge.append(Vector2(lerpf(-380, -100, a), lerpf(200.0, 60.0, a) - 60.0 * sin(a * PI)))
 			for i in 21:
 				var a := 1.0 - float(i) / 20.0
-				bridge.append(Vector2(lerpf(-380, -120, a), 214.0 - 140.0 * sin(a * PI)))
+				bridge.append(Vector2(lerpf(-380, -100, a), lerpf(214.0, 74.0, a) - 60.0 * sin(a * PI)))
 			_ground(world, bridge, {"fill": Color("ff6b6b"), "fill2": Color("8c6cff"), "top": Color("ffd43b"), "top_w": 5.0, "dot": Color(0, 0, 0, 0)}, 20)
 			_decor(world, "tree", Vector2(-800, 206), 0.9)
 			_decor(world, "tree", Vector2(980, 246), 1.0)
@@ -277,15 +277,16 @@ static func build(world: World, id: String) -> void:
 			_ground(world, _strip(-1900, 1900, 1000, land), st)
 			world.water.append(Rect2(-160, 320, 320, 200))
 			# forts: a wall, a tower and a bunker on each side
+			# (groups below 0 are part of the world: 🧹 Clear leaves them, the eraser can still take them)
 			for side in [-1.0, 1.0]:
 				var fx: float = side * 900.0
 				# chest-high cover: tall enough to hide behind, low enough to jump over
 				var wall_x: float = fx - 20 * side
 				var wall_top: float = land.call(wall_x) - 95.0
-				world.add_platform(World.rect_poly(Rect2(wall_x - 13, wall_top, 26, 120)), "stone", 1 if side < 0 else 2)
-				world.add_platform(World.rect_poly(Rect2(fx + side * 220 - 50, 20, 100, 280)), "stone", 3 if side < 0 else 4)
-				world.add_platform(World.rect_poly(Rect2(fx + side * 220 - 70, 6, 140, 18)), "wood", 3 if side < 0 else 4)
-			world.add_platform(World.rect_poly(Rect2(-200, 280, 400, 14)), "wood", 5)
+				world.add_platform(World.rect_poly(Rect2(wall_x - 13, wall_top, 26, 120)), "stone", -1 if side < 0 else -2)
+				world.add_platform(World.rect_poly(Rect2(fx + side * 220 - 50, 20, 100, 280)), "stone", -3 if side < 0 else -4)
+				world.add_platform(World.rect_poly(Rect2(fx + side * 220 - 70, 6, 140, 18)), "wood", -3 if side < 0 else -4)
+			world.add_platform(World.rect_poly(Rect2(-200, 280, 400, 14)), "wood", -5)
 			_decor(world, "tree", Vector2(-1350, land.call(-1350.0) + 6), 1.1)
 			_decor(world, "tree", Vector2(1350, land.call(1350.0) + 6), 1.0)
 			world.view_rect = Rect2(-1300, -500, 2600, 1000)
@@ -298,7 +299,7 @@ static func build(world: World, id: String) -> void:
 			_ground(world, _rect(Rect2(1460, -1300, 140, 1700)), st, 3)
 			# catwalks
 			for r in [Rect2(-1300, 40, 500, 18), Rect2(-200, -120, 420, 18), Rect2(700, 60, 500, 18)]:
-				world.add_platform(World.rect_poly(r), "metal", 10)
+				world.add_platform(World.rect_poly(r), "metal", -10)
 			world.view_rect = Rect2(-1200, -560, 2400, 1000)
 			world.spawn_points = [Vector2(-600, 100), Vector2(600, 100)]
 			world.bounds = Rect2(-2000, -2400, 4000, 3600)

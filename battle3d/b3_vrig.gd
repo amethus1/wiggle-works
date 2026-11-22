@@ -30,6 +30,7 @@ var cleats: Array = []          # [node, base_z, dir] tank tread cleats
 var shapes: Array = []          # [{shape, xf}]
 var wreck: Array = []           # [{node, size, offset, mass, up, main}]
 var crew: Array[Node3D] = []
+var _crew_y := PackedFloat32Array()     # where each crew member sits (cheering bobs about it)
 var rotors: Array = []          # [node, axis (0 x, 1 y, 2 z), turns per second at full speed]
 var blurs: Array[Node3D] = []   # see-through discs shown while rotors spin fast
 var gun_muzzles: Array[Node3D] = []     # plane wing guns
@@ -160,6 +161,7 @@ func _person(parent: Node3D, pos: Vector3, arms_fwd := true, hat := "army") -> N
 		var at := Vector3(0.22 * sx, 0.24, 0.12) if arms_fwd else Vector3(0.22 * sx, 0.2, 0)
 		_m(p, B3Mats.capsule(0.055, 0.4), _c(shirt), at, rot)
 	crew.append(p)
+	_crew_y.append(pos.y)
 	return p
 
 
@@ -665,8 +667,7 @@ func animate(dt: float, spd: float, act: String, k: float, aiming: bool, mood: S
 	for i in crew.size():
 		var c2: Node3D = crew[i]
 		c2.rotation.z = sin(t * (2.0 + i) + i) * 0.04
-		if mood == "cheer":
-			c2.position.y += sin(t * 12.0 + i) * 0.004
+		c2.position.y = _crew_y[i] + (sin(t * 12.0 + i) * 0.02 if mood == "cheer" else 0.0)
 
 
 func flash() -> void:

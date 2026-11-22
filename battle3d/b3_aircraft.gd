@@ -130,7 +130,10 @@ func _physics_process(dt: float) -> void:
 	_mode_t -= dt
 	var p := position
 	if p.y < -20.0 or absf(p.x) > B3Defs.BOUNDS + 10.0 or absf(p.z) > B3Defs.BOUNDS + 10.0:
-		battle.remove_unit(self, false)
+		if falling:
+			_crash()      # shot down: still knocked out (the shooter gets it, a player moves on)
+		else:
+			battle.remove_unit(self, false)
 		return
 	if falling:
 		_fall_tick(dt)
@@ -140,7 +143,7 @@ func _physics_process(dt: float) -> void:
 		return
 	if burn_t > 0.0:
 		burn_t -= dt
-		hp -= dt * 6.0 * float(vdef.get("fire", 0.6))
+		hp -= dt * 6.0 * _env_share(true)
 		_burn_fx -= dt
 		if _burn_fx <= 0.0:
 			_burn_fx = 0.15
@@ -467,15 +470,17 @@ func _plane_ai() -> void:
 			_want_dir = Vector3(fl.x, dy, fl.z).normalized()
 			if _mode_t <= 0.0:
 				var bomb_run := _next_bomb and not air and pers != "berserk"
-				if bomb_run and fd < 45.0:
+				# far enough away to line up (in low gravity bombs fall slowly,
+				# so they're let go much further out)
+				var lead := _flat(linear_velocity).length() * _bomb_fall_t(position.y - target.position.y)
+				if bomb_run and fd < maxf(45.0, lead + 6.0):
 					_mode_t = 0.5      # a bit further away first, to line up
 				else:
 					_mode = "bomb" if bomb_run else ""
 					_mode_t = 12.0
 		"bomb":
 			# a level run over it; let go when the bomb will land on it
-			var h := maxf(1.0, position.y - target.position.y)
-			var tf := sqrt(2.0 * h / 9.8)
+			var tf := _bomb_fall_t(position.y - target.position.y)
 			var aimp := target.position + _flat(target.linear_velocity) * tf
 			var fl2 := _flat(aimp - position)
 			var hv := _flat(linear_velocity)
@@ -483,7 +488,7 @@ func _plane_ai() -> void:
 			var hdir := hv / hs
 			var along := fl2.dot(hdir)
 			var across := (fl2 - hdir * along).length()
-			var drop := hs * tf
+			var drop := hs * 0.95 * tf      # the bomb keeps most of the plane's speed
 			var dy2 := clampf((gh + maxf(alt, 12.0) - position.y) * 0.06, -0.25, 0.3)
 			var fn := fl2.normalized()
 			_want_dir = Vector3(fn.x, dy2, fn.z).normalized()
@@ -519,6 +524,14 @@ func _plane_ai() -> void:
 			elif fd < turn_r * 1.3 and absf(angle_difference(facing, atan2(flat.x, flat.z))) > 1.3:
 				# it's inside our turning circle: fly on a bit and come round
 				_extend(1.5)
+
+
+## How long a bomb let go now takes to fall `h` metres (🌍 Gravity rule). It
+## leaves already moving down a little (see _drop_bomb).
+func _bomb_fall_t(h: float) -> float:
+	var g := maxf(0.5, B3Proj.gravity("bomb"))
+	var v0 := 1.0 - linear_velocity.y * 0.95
+	return (sqrt(v0 * v0 + 2.0 * g * maxf(1.0, h)) - v0) / g
 
 
 ## Break off: fly on and climb for `t` seconds, then come round again
@@ -642,7 +655,7 @@ func _rockets(vr: B3VRig) -> void:
 		var from := mz.global_position
 		var pt := aimp + Vector3(rng.randf_range(-0.6, 0.6), 0, rng.randf_range(-0.6, 0.6))
 		var tt := from.distance_to(pt) / sp
-		var vel := (pt - from) / maxf(tt, 0.05) + Vector3(0, 0.5 * 1.2 * tt, 0)
+		var vel := B3Proj.lob(from, pt, maxf(tt, 0.05), "rocket")
 		battle.spawn_proj("rocket", from, vel, self, rw)
 		battle.fx.muzzle(from, vel.normalized(), 1.5)
 	battle.snd("rocket", position, 0.8)
@@ -723,7 +736,7 @@ func _fall_tick(dt: float) -> void:
 		pitch = move_toward(pitch, -0.95, dt * 0.55)
 		bank += dt * 2.4 * _orbit
 		air_spd = clampf(air_spd + dt * 3.0, speed * 0.6, speed * 1.4)
-		linear_velocity = _nose() * air_spd + Vector3(0, -_fall_t * 1.5, 0)
+		linear_velocity = _wall(_nose() * air_spd + Vector3(0, -_fall_t * 1.5, 0))      # it comes down inside the map
 		angular_velocity = Vector3(0, 0.7 * _orbit, 0)
 		rotor = maxf(0.2, rotor - dt * 0.3)
 		if rig:
@@ -731,10 +744,10 @@ func _fall_tick(dt: float) -> void:
 	else:
 		_spin_v = minf(_spin_v + dt * 5.0, 7.0)
 		var v := linear_velocity
-		v.y -= 9.8 * dt * 0.7
+		v.y -= 9.8 * B3Rules.gravity_k() * dt * 0.7
 		v.x = move_toward(v.x, 0.0, dt * 2.0)
 		v.z = move_toward(v.z, 0.0, dt * 2.0)
-		linear_velocity = v
+		linear_velocity = _wall(v)
 		angular_velocity = Vector3(0, _spin_v * _orbit, 0)
 		rotor = maxf(0.3, rotor - dt * 0.3)
 		if rig:

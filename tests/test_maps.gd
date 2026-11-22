@@ -68,6 +68,7 @@ func _ready() -> void:
 	await _beach_water()
 	await _pass()
 	await _scenery_numbers()
+	await _uproot_tint()
 	if b and is_instance_valid(b):
 		b.queue_free()
 	Engine.time_scale = 1.0
@@ -238,6 +239,31 @@ func _scenery_numbers() -> void:
 	w.uproot_index(-1, Vector3.ZERO, b)
 	w.uproot_index(12345678, Vector3.ZERO, b)
 	check(b.chunks.size() == before + 1, "and doing it again (or a bad number) does nothing")
+
+
+## A rock blown over keeps its colour (volcano rocks are dark, desert rocks
+## sandy) instead of turning plain grey.
+func _uproot_tint() -> void:
+	print("uprooted rocks")
+	await fresh("volcano")
+	var w: B3World = b.world
+	var sb: StaticBody3D = null
+	for o in w._bodies:
+		if is_instance_valid(o) and String(o.get_meta("scenery", "")) == "rock" and o.has_meta("mm"):
+			sb = o
+			break
+	check(sb != null, "the volcano has rocks that can be blown over")
+	if sb == null:
+		return
+	var before: int = b.chunks.size()
+	w.uproot(sb, Vector3(0, 6, 2), b)
+	var tint := Color.WHITE
+	if b.chunks.size() == before + 1:
+		var rb: RigidBody3D = b.chunks[b.chunks.size() - 1]
+		for c in rb.get_children():
+			if c is MeshInstance3D and (c as MeshInstance3D).material_override is StandardMaterial3D:
+				tint = ((c as MeshInstance3D).material_override as StandardMaterial3D).albedo_color
+	check(tint.r < 0.5 and tint.g < 0.5 and tint.b < 0.5, "a blown-over volcano rock stays dark (%s)" % tint.to_html(false))
 
 
 # ------------------------------------------------------------- screenshots

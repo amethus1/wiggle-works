@@ -199,6 +199,8 @@ func _process(_d: float) -> void:
 	if key != _art_key:
 		_art_key = key
 		queue_redraw()
+	elif Art.animates(self):
+		queue_redraw()   # spinning fans and propellers, flames, blinking lights, sparks
 
 
 func _draw() -> void:

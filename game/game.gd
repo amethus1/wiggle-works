@@ -168,8 +168,10 @@ func _on_fx(name: String, args: Dictionary) -> void:
 		net.queue_fx(name, args)
 
 
-func _on_world_changed() -> void:
-	effects.clear()
+func _on_world_changed(rebuilt: bool) -> void:
+	# only a new, undone or cleared playground wipes the effects (not ⚔️, pause or night)
+	if rebuilt:
+		effects.clear()
 	if hud:
 		hud.refresh()
 
@@ -446,7 +448,8 @@ func _key(e: InputEventKey) -> void:
 			if selected_uid >= 0:
 				send({"cmd": "use", "uid": selected_uid})
 		KEY_C:
-			if selected() is Wiggly:
+			var s = selected()
+			if s is Wiggly or (s is Fighter and s.alive()):
 				play_as(selected_uid)
 		KEY_R:
 			if selected_uid >= 0:
