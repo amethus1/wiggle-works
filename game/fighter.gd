@@ -220,7 +220,10 @@ func make_standing(at: Vector2, vel := Vector2.ZERO) -> void:
 	body.physics_material_override = _mat(0.3, 0.0)
 	body.collision_layer = LAYER
 	body.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS   # (Wigglies: see World._wigglies_vs_fighters)
-	body.contact_monitor = true
+	# FighterPart._integrate_forces reads the contacts straight from the physics
+	# state, which only needs max_contacts_reported. (contact_monitor would also
+	# keep a list of touching bodies and hook up to each one's signals as it
+	# comes and goes: nothing here uses it, and with piles of ragdolls it's slow.)
 	body.max_contacts_reported = 4
 	body.can_sleep = false
 	body.global_position = world.lift_out_of_ground(at, minf(hs.x, hs.y) * 0.9) if not puppet else at
@@ -355,8 +358,7 @@ func _part(name: String, pos: Vector2, rot: float, half: Vector2, round_p: bool,
 	p.physics_material_override = _mat(0.8, 0.05)
 	p.collision_layer = LAYER
 	p.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | LAYER
-	p.contact_monitor = true
-	p.max_contacts_reported = 3
+	p.max_contacts_reported = 3   # (no contact_monitor: see make_standing)
 	p.angular_damp = 1.2
 	p.linear_damp = 0.1
 	p.global_position = pos

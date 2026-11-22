@@ -81,9 +81,11 @@ static func tub(world: World, id: String, pos: Vector2) -> Node:
 	# the click is the middle of the tub's floor top
 	var top := pos.y - h
 	var wall := 16.0
+	world._water_hold += 1   # (the water is cut once, below)
 	world.add_platform(World.rect_poly(Rect2(pos.x - w * 0.5, pos.y, w, 18)), style, g)
 	world.add_platform(World.rect_poly(Rect2(pos.x - w * 0.5 - wall, top, wall, h + 18)), style, g)
 	world.add_platform(World.rect_poly(Rect2(pos.x + w * 0.5, top, wall, h + 18)), style, g)
+	world._water_hold -= 1
 	world.add_liquid(Rect2(pos.x - w * 0.5, top + h * 0.25, w, h * 0.75), kind, g)
 	world._cut_water()
 	world.fx_event("build", {"p": pos})

@@ -187,25 +187,27 @@ static func _swing_landed(u: B3Unit, dt: float) -> void:
 
 
 ## The enemy under the cursor or crosshair, or (for melee) whoever is right in front.
+## (Only fighters close enough are looked at, from the fighters' map; equal
+## distances go to the one first in battle.units, as if all were looked at.)
 static func _pick_target(u: B3Unit, c: B3Ctl) -> B3Unit:
 	var best: B3Unit = null
 	var bd := 1e9
-	for o: B3Unit in u.battle.units:
-		if o == u or o.down or not u.is_enemy(o):
+	for o: B3Unit in u.battle.units_near(c.aim, 2.2 if not c.fp else 1.2, 1.0):
+		if o == u or o.down or o.dead or not u.is_enemy(o):
 			continue
 		var d := u._flat(o.position - c.aim).length()
-		if d < maxf(2.2 if not c.fp else 1.2, o.radius + (1.6 if not c.fp else 0.6)) and d < bd:
+		if d < maxf(2.2 if not c.fp else 1.2, o.radius + (1.6 if not c.fp else 0.6)) and (d < bd or (d == bd and o.grid_i < best.grid_i)):
 			bd = d
 			best = o
 	if best != null or String(u.wpn.type) != "melee":
 		return best
 	var fwd := u.forward()
-	for o: B3Unit in u.battle.units:
-		if o == u or o.down or not u.is_enemy(o):
+	for o: B3Unit in u.battle.units_near(u.position, (u.radius + float(u.wpn.range) * u.size * 0.6) * 1.3, 1.3):
+		if o == u or o.down or o.dead or not u.is_enemy(o):
 			continue
 		var off := u._flat(o.position - u.position)
 		var d2 := off.length()
-		if d2 < u._reach(u.wpn, o) * 1.3 and fwd.dot(off / maxf(d2, 0.01)) > 0.2 and d2 < bd:
+		if d2 < u._reach(u.wpn, o) * 1.3 and fwd.dot(off / maxf(d2, 0.01)) > 0.2 and (d2 < bd or (d2 == bd and o.grid_i < best.grid_i)):
 			bd = d2
 			best = o
 	return best
@@ -536,10 +538,13 @@ static func _swoop_tick(u: B3Unit, dt: float) -> void:
 	if d > 0.8:
 		u.want = to / d * u.speed * 1.6
 		u.look = to / d
-	for o: B3Unit in u.battle.units:
-		if o != u and not o.down and u.is_enemy(o) and u.center().distance_to(o.center()) < u.radius + o.radius + 1.0:
-			_swoop_bite(u, o)
-			return
+	var bite: B3Unit = null      # (the first in battle.units it reaches)
+	for o: B3Unit in u.battle.units_near(u.position, u.radius + 1.0, 1.0):
+		if o != u and not o.down and not o.dead and u.is_enemy(o) and u.center().distance_to(o.center()) < u.radius + o.radius + 1.0 and (bite == null or o.grid_i < bite.grid_i):
+			bite = o
+	if bite:
+		_swoop_bite(u, bite)
+		return
 	if u.power_t <= 0.0 or d < 1.0:
 		_end_swoop(u)
 

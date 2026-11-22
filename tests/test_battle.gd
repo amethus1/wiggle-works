@@ -91,6 +91,7 @@ func _ready() -> void:
 	await _fx_pool()
 	await _model_bits()
 	await _ui_smoke()
+	await _fighters_map()
 	await _performance()
 	if b and is_instance_valid(b):
 		b.queue_free()
@@ -1160,3 +1161,140 @@ func _model_bits() -> void:
 	var spread := legs.max() - legs.min() as float
 	check(spread > 0.01, "a dragon's dangling legs don't all swing together (%.3f)" % spread)
 	check(B3Mats.HPBAR_SHADER.contains("length(MODEL_MATRIX[0].xyz)") and tk.bar.scale.x > 1.0, "health bars face the camera but keep their size (bigger for big fighters)")
+
+
+# ------------------------------------------------- the fighters' map (speed)
+## B3Battle's fighters' map only makes "who's near?" faster: every fighter
+## still picks the same enemy, keeps away from the same neighbours and heals
+## the same friend as if it had looked at every fighter on the field in turn
+## (_think_the_long_way), and the hits that look nearby find everyone in reach.
+func _fighters_map() -> void:
+	print("fighters' map")
+	await fresh()
+	var kinds := ["soldier", "knight", "archer", "medic", "ptero", "raptor", "gunner", "giant", "wolf", "tank", "heli", "dragon", "elephant", "chicken", "sniper"]
+	var teams := ["red", "blue", "green", "wild"]
+	var moods := ["auto", "auto", "defend", "berserk", "auto", "coward"]
+	var r := RandomNumberGenerator.new()
+	r.seed = 99
+	for i in 170:
+		b.spawn_unit(kinds[i % kinds.size()], teams[i % teams.size()], at(r.randf_range(-45, 45), r.randf_range(-45, 45)), moods[i % moods.size()])
+	b.spawn_unit("archer", "green", at(150, -120))      # one far away from everyone
+	b.set_fighting(true)
+	var looked := 0
+	var bad_t := 0
+	var bad_s := 0
+	var bad_a := 0
+	var hurt_some := false
+	for round_i in 8:
+		b.grid_min = 0 if round_i % 2 == 0 else 100000      # (with the map and without)
+		await sim(1.2)        # (carries on inside a physics step, before anyone has moved)
+		for u: B3Unit in b.units:
+			if u.down or u.dead:
+				continue
+			if not hurt_some and u.team == "red" and not (u is B3Vehicle):
+				u.hp = u.max_hp * 0.5      # someone for the medics
+				hurt_some = true
+			var want: Array = _think_the_long_way(u)
+			var old_target = u.target
+			var old_sep: Vector3 = u.sep
+			var old_ally = u.ally
+			var old_voice: float = u.voice_t
+			u.voice_t = 99.0         # (no roars from this test)
+			# (helicopters and planes then pick their own way, the same as before)
+			if u._nearest_enemy(u.position) != want[0]:
+				bad_t += 1
+			u._think()
+			looked += 1
+			if u.sep.distance_to(want[1]) > 1e-5:
+				bad_s += 1
+			if u.ally != want[2]:
+				bad_a += 1
+			u.target = old_target if is_instance_valid(old_target) else null
+			u.sep = old_sep
+			u.ally = old_ally if is_instance_valid(old_ally) else null
+			u.voice_t = old_voice
+	check(looked > 600 and bad_t == 0, "every fighter picks the same enemy as looking at everyone (%d looks, %d different)" % [looked, bad_t])
+	check(bad_s == 0 and bad_a == 0, "and keeps away from the same neighbours and heals the same friend (%d, %d different)" % [bad_s, bad_a])
+	# fighters exactly as far away: the first one in battle.units, as before
+	await fresh()
+	b.grid_min = 0       # (the map even for these few)
+	await get_tree().physics_frame
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful")
+	me.global_position = Vector3(0, me.position.y, 0)
+	var ties: Array[B3Unit] = []
+	# (the first one in a square looked at after the others)
+	for o in [Vector2(-4, 0), Vector2(4, 0), Vector2(0, 4), Vector2(0, -4)]:
+		var e: B3Unit = b.spawn_unit("soldier", "blue", at(o.x, o.y), "peaceful")
+		e.global_position = Vector3(o.x, e.position.y, o.y)
+		ties.append(e)
+	b.set_fighting(true)
+	var first: B3Unit = _think_the_long_way(me)[0]
+	me._think()
+	check(me.target == ties[0] and first == ties[0], "of enemies exactly as far away, it goes for the first one placed")
+	# nobody left to fight, then someone changing sides in the same step
+	var mate: B3Unit = b.spawn_unit("knight", "red", at(30, 0), "peaceful")
+	await get_tree().physics_frame
+	for e in ties:
+		b.remove_unit(e, false)
+	var none_left: bool = me._nearest_enemy(me.position) == null and _think_the_long_way(me)[0] == null
+	mate.set_team("blue")
+	check(none_left and me._nearest_enemy(me.position) == mate, "with no enemies left it finds nobody, and a fighter changing sides is found at once")
+	b.set_fighting(false)
+	# everyone within reach of a spot is found, wherever the squares fall
+	await fresh("", "big")
+	await sim(1.0)
+	var missed := 0
+	for i in 300:
+		var c := Vector3(r.randf_range(-30, 30), 0, r.randf_range(-30, 30))
+		var rad := r.randf_range(0.2, 9.0)
+		var near: Array[B3Unit] = b.units_near(c, rad)
+		for u: B3Unit in b.units:
+			if not u.down and Vector2(u.position.x - c.x, u.position.z - c.z).length() < rad and not near.has(u):
+				missed += 1
+	check(missed == 0, "looking near a spot finds every fighter within reach (%d missed)" % missed)
+
+
+## What B3Unit._think worked out before the fighters' map: [enemy, push
+## away from neighbours, friend to heal], looking at every fighter in turn.
+func _think_the_long_way(me: B3Unit) -> Array:
+	var my := me.position
+	var best: B3Unit = null
+	var bd := 1e18
+	var hurt_u: B3Unit = null
+	var hd := 1e18
+	var sx := 0.0
+	var sz := 0.0
+	var guard := me.pers == "defend"
+	var guard_r := me.guard_radius()
+	var melee_only := String(me.wpn.type) == "melee" or me.pers == "berserk"
+	for u: B3Unit in b.units:
+		if u == me or u.down:
+			continue
+		var dx := u.position.x - my.x
+		var dz := u.position.z - my.z
+		var d2 := dx * dx + dz * dz
+		var rr := me.radius + u.radius + 0.45
+		if d2 < rr * rr and d2 > 0.0001:
+			var d := sqrt(d2)
+			var push := (rr - d) / rr
+			sx -= dx / d * push
+			sz -= dz / d * push
+		if me.is_enemy(u):
+			if guard:
+				var hx := u.position.x - me.home.x
+				var hz := u.position.z - me.home.z
+				if hx * hx + hz * hz > guard_r * guard_r:
+					continue
+			var score := d2
+			if u == me.target:
+				score *= 0.55
+			if u.flying and melee_only and not me.flying:
+				score = score * 4.0 + 400.0
+			if score < bd:
+				bd = score
+				best = u
+		elif me.heals and u.team == me.team and u.hp < u.max_hp * 0.92:
+			if d2 < hd:
+				hd = d2
+				hurt_u = u
+	return [best, Vector3(sx, 0.0, sz), hurt_u if hd < 22.0 * 22.0 else null]

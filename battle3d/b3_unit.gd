@@ -83,6 +83,7 @@ var power_t := 0.0               # a charge or swoop you started still going
 var power_at := Vector3.ZERO     # where a swoop dives to
 var power_alt := 6.0             # the height to climb back to after a swoop
 var king := false                # 👑 a team's King (B3Modes, Defend the King): wears a crown
+var grid_i := 0                  # its place in battle.units (B3Battle's fighters' map)
 var rng := RandomNumberGenerator.new()
 var _hz_t := 0.0
 var _spd := 0.0
@@ -97,6 +98,7 @@ var _turn := 9.0
 var _power_fx := 0.0
 var _block_t := 0.0
 var _steady := false
+var _world: B3World = null       # battle.world (typed, for speed)
 
 
 static func unit_pmat() -> PhysicsMaterial:
@@ -109,6 +111,7 @@ static func unit_pmat() -> PhysicsMaterial:
 
 func setup(b, k: String, t: String, p: String, seed_: int) -> void:
 	battle = b
+	_world = b.world
 	kind = k
 	team = t
 	rng.seed = seed_
@@ -219,6 +222,7 @@ func set_team(t: String) -> void:
 		return
 	team = t
 	target = null
+	battle.foes_changed()
 	disc.material_override = B3Mats.flat(Color(B3Defs.team_col(team), 0.42))
 	bar.set_instance_shader_parameter("team", B3Defs.team_col(team))
 	if rig and not down:
@@ -307,9 +311,11 @@ func _physics_process(dt: float) -> void:
 
 func _move(dt: float) -> void:
 	var v := linear_velocity
+	var p := position
+	var gh := _world.height_at(p.x, p.z)
 	# on the ground, or standing still on something (a tower, a crate). Just
 	# moving slowly up or down isn't enough: that's the top of every jump.
-	var gap: float = position.y - battle.world.height_at(position.x, position.z)
+	var gap: float = p.y - gh
 	_grounded = flying or gap < 0.2 or (absf(v.y) < 0.9 and _feet_on_something(0.25))
 	var ctrl := 1.0 if _grounded else 0.12
 	if stun_t > 0.0:
@@ -321,8 +327,7 @@ func _move(dt: float) -> void:
 	hv = hv.move_toward(want * battle.r_speed, accel * ctrl * dt)
 	var vy := v.y
 	if flying:
-		var gh: float = battle.world.height_at(position.x, position.z)
-		vy = lerpf(vy, clampf((gh + _alt - position.y) * 2.2, -10.0, 7.0), minf(1.0, dt * 4.0))
+		vy = lerpf(vy, clampf((gh + _alt - p.y) * 2.2, -10.0, 7.0), minf(1.0, dt * 4.0))
 	linear_velocity = Vector3(hv.x, vy, hv.z)
 	_spd = hv.length()
 	var f := look
@@ -330,8 +335,8 @@ func _move(dt: float) -> void:
 		f = want
 	if f != Vector3.ZERO:
 		facing = rotate_toward(facing, atan2(f.x, f.z), dt * _turn)
-	if rig:
-		rig.rotation.y = facing
+	if rig and rig.rotation.y != facing:
+		rig.rotation.y = facing      # (setting it moves every part of the model: only when it changed)
 
 
 func _is_grounded_now() -> bool:
@@ -347,6 +352,122 @@ func _feet_on_something(below: float) -> bool:
 
 # -------------------------------------------------------------------- brain
 func _think() -> void:
+	if not battle.grid_on():
+		_think_everyone()
+		return
+	var my := position
+	# keep a little apart from anyone standing right next to us
+	var sx := 0.0
+	var sz := 0.0
+	for u: B3Unit in battle.units_near(my, radius + 0.45, 1.0):
+		if u == self or u.down or u.dead:
+			continue
+		var dx := u.position.x - my.x
+		var dz := u.position.z - my.z
+		var d2 := dx * dx + dz * dz
+		var rr := radius + u.radius + 0.45
+		if d2 < rr * rr and d2 > 0.0001:
+			var d := sqrt(d2)
+			var push := (rr - d) / rr
+			sx -= dx / d * push
+			sz -= dz / d * push
+	sep = Vector3(sx, 0.0, sz)
+	# a medic: the nearest hurt teammate (closer than 22 m)
+	var hurt_u: B3Unit = null
+	if heals:
+		var hd := 22.0 * 22.0
+		for u: B3Unit in battle.units_near(my, 22.0):
+			if u == self or u.down or u.dead or is_enemy(u) or u.team != team or u.hp >= u.max_hp * 0.92:
+				continue
+			var dx := u.position.x - my.x
+			var dz := u.position.z - my.z
+			var d2 := dx * dx + dz * dz
+			if d2 < hd or (d2 == hd and hurt_u != null and u.grid_i < hurt_u.grid_i):
+				hd = d2
+				hurt_u = u
+	var best := _nearest_enemy(my)
+	if best != target:
+		target = best
+		if target and voice_t <= 0.0 and pers != "peaceful":
+			_voice()
+	ally = hurt_u
+
+
+## The enemy to go after: the nearest one anywhere on the field (or, for a
+## guard, near its post), with the one we've already got counting a bit
+## closer and, for fighters that can't reach up, ones in the air a lot further
+## (see _enemy_score). Searches the fighters' map outwards from `my` square
+## by square and stops as soon as nobody further out could beat the best so
+## far. Equal scores go to the fighter first in `battle.units`, as if every
+## fighter had been looked at in turn.
+func _nearest_enemy(my: Vector3) -> B3Unit:
+	var guard := pers == "defend"
+	var guard_r := guard_radius()
+	var melee_only := String(wpn.type) == "melee" or pers == "berserk"
+	var best: B3Unit = null
+	var bd := 1e18
+	var rings: int = battle.grid_rings(my)
+	var pool: Array[B3Unit]
+	if guard or rings < 0:
+		pool = battle.units_near(home, guard_r) if guard else battle.everyone()
+		for u in pool:
+			var s := _enemy_score(u, my, guard, guard_r, melee_only)
+			if s >= 0.0 and (s < bd or (s == bd and u.grid_i < best.grid_i)):
+				bd = s
+				best = u
+		return best
+	# start from the enemy we've got: only someone closer can beat it
+	if target != null and is_instance_valid(target):
+		var s0 := _enemy_score(target, my, false, 0.0, melee_only)
+		if s0 >= 0.0:
+			bd = s0
+			best = target
+	if best == null and not battle.foes_standing(self):
+		return null       # (nobody to find)
+	var cap: int = battle.grid_ring_cap()
+	var ring := 0
+	while ring <= rings:
+		if ring > 0:
+			var lb := (ring - 1) * B3Battle.GRID
+			if lb * lb > bd:
+				break      # (only the one we've got scores lower than its distance)
+		var all := ring > cap
+		pool = battle.units if all else battle.grid_ring(my, ring)
+		for u in pool:
+			var s := _enemy_score(u, my, false, 0.0, melee_only)
+			if s >= 0.0 and (s < bd or (s == bd and u.grid_i < best.grid_i)):
+				bd = s
+				best = u
+		if all:
+			break
+		ring += 1
+	return best
+
+
+## How much `u` is worth going after (lower is better: its distance squared,
+## less for the enemy we've got, more for one in the air we can't reach), or
+## -1 if it isn't an enemy we'd go after.
+func _enemy_score(u: B3Unit, my: Vector3, guard: bool, guard_r: float, melee_only: bool) -> float:
+	if u == self or u.down or u.dead or not is_enemy(u):
+		return -1.0
+	if guard:
+		var hx := u.position.x - home.x
+		var hz := u.position.z - home.z
+		if hx * hx + hz * hz > guard_r * guard_r:
+			return -1.0
+	var dx := u.position.x - my.x
+	var dz := u.position.z - my.z
+	var score := dx * dx + dz * dz
+	if u == target:
+		score *= 0.55
+	if u.flying and melee_only and not flying:
+		score = score * 4.0 + 400.0
+	return score
+
+
+## _think when there's no fighters' map (a small battle): one look at every
+## fighter for all three (neighbours, enemy, friend to heal).
+func _think_everyone() -> void:
 	var my := position
 	var best: B3Unit = null
 	var bd := 1e18
@@ -555,8 +676,8 @@ func _bayonet_wall(u: B3Unit) -> bool:
 	if not bool(u.def.get("bayonet", false)):
 		return false
 	var n := 0
-	for o: B3Unit in battle.units:
-		if o != u and o.team == u.team and not o.down and bool(o.def.get("bayonet", false)) and o.position.distance_squared_to(u.position) < 6.25:
+	for o: B3Unit in battle.units_near(u.position, 2.5):
+		if o != u and not o.dead and o.team == u.team and not o.down and bool(o.def.get("bayonet", false)) and o.position.distance_squared_to(u.position) < 6.25:
 			n += 1
 			if n >= 2:
 				return true
@@ -687,12 +808,12 @@ func _safe(w: Vector3) -> Vector3:
 				tan = -tan
 			return (tan + out * 0.6).normalized() * w.length()
 	# walk along the shore rather than into deep water (B3World)
-	if not battle.world.waters.is_empty():
-		var dry: Vector3 = battle.world.steer_dry(position, w, radius)
+	if not _world.waters.is_empty():
+		var dry: Vector3 = _world.steer_dry(position, w, radius)
 		if dry != w:
 			return dry
 	if pers != "attack" and _grounded:
-		var gh: float = battle.world.height_at(position.x, position.z)
+		var gh := _world.height_at(position.x, position.z)
 		if position.y - gh > 1.2:
 			var ahead2 := position + n * (radius + 0.8)
 			var sy: float = battle.surface_y(ahead2 + Vector3(0, 0.5, 0))
@@ -821,16 +942,19 @@ func _melee_hit(w: Dictionary) -> void:
 		if String(w.anim) == "tail":
 			c = position
 			r = float(w.aoe) + radius
-		for u: B3Unit in battle.units.duplicate():
-			if u == self or u.down or not is_enemy(u) or _height_gap(u) > MELEE_UP:
-				continue
+		var hits: Array[B3Unit] = []
+		for u: B3Unit in battle.units_near(c, r, 1.0):
+			if _aoe_reaches(u, c, r):
+				hits.append(u)
+		for u: B3Unit in _in_order(hits):
+			if not _aoe_reaches(u, c, r):
+				continue      # (knocked down by an earlier hit: a tank blowing up...)
 			var d := _flat(u.position - c).length()
-			if d < r + u.radius:
-				# weaker towards the edge, but never less than that (a big tank
-				# whose middle is past the edge still gets hit, not healed)
-				var f := clampf(d / r, 0.0, 1.0)
-				var dir := (_flat(u.position - position).normalized() + Vector3.UP * 0.7).normalized()
-				u.hurt(dmg * (1.0 - 0.35 * f), dir, knock * (1.0 - 0.3 * f), self)
+			# weaker towards the edge, but never less than that (a big tank
+			# whose middle is past the edge still gets hit, not healed)
+			var f := clampf(d / r, 0.0, 1.0)
+			var dir := (_flat(u.position - position).normalized() + Vector3.UP * 0.7).normalized()
+			u.hurt(dmg * (1.0 - 0.35 * f), dir, knock * (1.0 - 0.3 * f), self)
 		battle.blast_props(c, r, knock * 0.5)
 		battle.fx.dust(c, r)
 		battle.shake(float(w.get("shake", 0.1)), c)
@@ -849,6 +973,23 @@ func _melee_hit(w: Dictionary) -> void:
 		battle.shake(float(w.shake), position)
 
 
+## A stomp or tail swipe centred on `c` with radius `r` reaches `u`.
+func _aoe_reaches(u: B3Unit, c: Vector3, r: float) -> bool:
+	if u == self or u.down or u.dead or not is_enemy(u) or _height_gap(u) > MELEE_UP:
+		return false
+	return _flat(u.position - c).length() < r + u.radius
+
+
+## Fighters found on the fighters' map put in `battle.units` order, so hits
+## land in the same order as if every fighter had been looked at in turn.
+## (Callers test each one again just before hitting it: an earlier hit can
+## knock others down, never the other way round.)
+func _in_order(near: Array[B3Unit]) -> Array[B3Unit]:
+	if near.size() > 1:
+		near.sort_custom(func(a: B3Unit, b: B3Unit) -> bool: return a.grid_i < b.grid_i)
+	return near
+
+
 ## Who a pounce lands on: its enemy, or (when a person is playing it and
 ## pounced at a spot) any enemy it reaches.
 func _pounce_victim() -> B3Unit:
@@ -856,10 +997,11 @@ func _pounce_victim() -> B3Unit:
 		return target
 	if not player:
 		return null
-	for u: B3Unit in battle.units:
-		if u != self and not u.down and is_enemy(u) and _pounce_reaches(u):
-			return u
-	return null
+	var best: B3Unit = null
+	for u: B3Unit in battle.units_near(position, radius + 1.0, 1.0):
+		if u != self and not u.dead and not u.down and is_enemy(u) and _pounce_reaches(u) and (best == null or u.grid_i < best.grid_i):
+			best = u
+	return best
 
 
 func _pounce_reaches(u: B3Unit) -> bool:
@@ -873,12 +1015,14 @@ func power_hit(w: Dictionary) -> void:
 	var fwd := forward()
 	var best: B3Unit = null
 	var bd := INF
-	for u: B3Unit in battle.units:
-		if u == self or u.down or not is_enemy(u) or _height_gap(u) > MELEE_UP:
+	var melee_w := String(w.type) == "melee"
+	var far := (radius + float(w.range) * size * 0.6) * 1.2 if melee_w else float(w.range) * 1.2
+	for u: B3Unit in battle.units_near(position, far, 1.2 if melee_w else 0.0):
+		if u == self or u.down or u.dead or not is_enemy(u) or _height_gap(u) > MELEE_UP:
 			continue
 		var off := _flat(u.position - position)
 		var d := off.length()
-		if d < bd and d < _reach(w, u) * 1.2 and fwd.dot(off / maxf(d, 0.01)) > 0.25:
+		if (d < bd or (d == bd and u.grid_i < best.grid_i)) and d < _reach(w, u) * 1.2 and fwd.dot(off / maxf(d, 0.01)) > 0.25:
 			bd = d
 			best = u
 	battle.blast_props(position + fwd * (radius + 0.7 * size) + Vector3(0, 0.4, 0), 0.9 * size, 4.0)
@@ -1041,22 +1185,31 @@ func _charging(dt: float) -> void:
 	want = charge_dir * speed * 2.6
 	look = charge_dir
 	var w := wpn
-	for u: B3Unit in battle.units.duplicate():
-		if u == self or u.down or not is_enemy(u) or charge_hit.has(u.uid) or _height_gap(u) > MELEE_UP:
+	var hits: Array[B3Unit] = []
+	for u: B3Unit in battle.units_near(position, radius + 0.5, 1.0):
+		if _charge_hits(u):
+			hits.append(u)
+	for u: B3Unit in _in_order(hits):
+		if not _charge_hits(u):
 			continue
-		var d := _flat(u.position - position).length()
-		if d < radius + u.radius + 0.5:
-			charge_hit[u.uid] = true
-			var dir := (charge_dir + Vector3.UP * 0.8).normalized()
-			u.hurt(float(w.get("charge_dmg", 30.0)), dir, float(w.get("charge_knock", 15.0)), self)
-			battle.shake(0.15, position)
-			battle.snd("thud", position, 0.9)
+		charge_hit[u.uid] = true
+		var dir := (charge_dir + Vector3.UP * 0.8).normalized()
+		u.hurt(float(w.get("charge_dmg", 30.0)), dir, float(w.get("charge_knock", 15.0)), self)
+		battle.shake(0.15, position)
+		battle.snd("thud", position, 0.9)
 	battle.blast_props(position + charge_dir * radius, radius + 0.5, 6.0)
 	if charge_t <= 0.0 or (charge_t < 1.8 and _spd < 1.0):
 		charge_t = 0.0
 		act = ""
 		charge_cd = rng.randf_range(3.5, 5.5)
 		stun_t = 0.25
+
+
+## A charge runs into `u` (not hit by this charge yet).
+func _charge_hits(u: B3Unit) -> bool:
+	if u == self or u.down or u.dead or not is_enemy(u) or charge_hit.has(u.uid) or _height_gap(u) > MELEE_UP:
+		return false
+	return _flat(u.position - position).length() < radius + u.radius + 0.5
 
 
 func _pounce(dir: Vector3) -> void:
@@ -1256,6 +1409,7 @@ func get_up() -> void:
 	ragdoll.queue_free()
 	ragdoll = null
 	down = false
+	battle.grid_add(self, false)
 	stun_t = 0.35
 	disc.visible = true
 	reset_physics_interpolation()

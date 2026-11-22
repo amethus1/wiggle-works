@@ -415,7 +415,7 @@ static func _status(f) -> void:
 	if st == "dead":
 		for i in 3:
 			var a := tm * 3.0 + TAU * i / 3.0
-			Art._star(ci, top + Vector2(cos(a) * 14.0, sin(a) * 4.0), 5.0, Color(2.0, 1.8, 0.6))
+			_ko_star(ci, top + Vector2(cos(a) * 14.0, sin(a) * 4.0))
 		return
 	if hp_ratio < 0.999:
 		var w := 34.0
@@ -432,10 +432,32 @@ static func _status(f) -> void:
 		Art._star(ci, top + Vector2(0, -22), 6.0, Color(2.0, 1.8, 0.5))
 
 
+## A spinning KO star: Art._star(ci, c, 5.0, Color(2.0, 1.8, 0.6)), with its
+## points worked out once instead of for every star in every frame.
+static var _ko_pts := PackedVector2Array()
+
+
+static func _ko_star(ci: CanvasItem, c: Vector2) -> void:
+	if _ko_pts.is_empty():
+		var rad := 5.0
+		var rot := -PI * 0.5
+		for i in 10:
+			var a := rot + TAU * i / 10.0
+			_ko_pts.append(Vector2.from_angle(a) * (rad if i % 2 == 0 else rad * 0.45))
+	var p := PackedVector2Array()
+	p.resize(10)
+	for i in 10:
+		p[i] = c + _ko_pts[i]
+	ci.draw_colored_polygon(p, Color(2.0, 1.8, 0.6))
+
+
 ## What toys and Wiggly powers are doing to a fighter: an ice block, a bubble,
 ## sparks, gooey feet, drips. Drawn from the mood flags, so a friend's copy
 ## over Wi-Fi shows them too.
 static func _overlays(f, ci: CanvasItem, c: Vector2, st: String, tm: float) -> void:
+	var m: String = String(f.net.get("mood", f.mood)) if f.puppet else f.mood
+	if not m.contains("+"):
+		return   # no ice, bubble, sparks, goo or drips (see Fighter.shows)
 	var hs: Vector2 = f.half_size()
 	var s: float = f.size
 	if st != "stand":

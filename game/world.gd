@@ -13,7 +13,15 @@ signal world_changed(rebuilt: bool)
 const UNDO_MAX := 15
 const MAX_TOYS := 420
 const MAX_WIGGLIES := 40
+const MAX_FIGHTERS := 120
 const SPLIT_STRETCH := 2.35
+
+## Speed checks (tests/test_bench2d.gd): more fighters than the game allows,
+## and how long each part of a physics step takes (microseconds, in `prof`).
+var max_fighters := MAX_FIGHTERS
+static var profiling := false
+var prof := {}
+var _prof_t := 0
 
 var world_id := "meadow"
 var gravity_id := "normal"
@@ -40,7 +48,9 @@ var bounds := Rect2(-2000, -1800, 4000, 3200)
 var view_rect := Rect2(-900, -650, 1800, 1100)
 var spawn_points: Array = [Vector2(0, -200)]
 var next_uid := 1
-var things := {}             # uid -> Toy | Wiggly
+## uid -> Toy | Wiggly | Fighter. Change it only through _put_thing, _drop_thing,
+## renumber and forget (or _clear_all), which keep the lists below up to date.
+var things := {}
 var links: Array = []
 var grabs := {}              # player id -> grab dict
 var magic := {}              # magic id -> seconds left
@@ -69,7 +79,25 @@ var _battle_t := 0.0
 var _strikes: Array = []       # bombs and shells still to drop: {t, p, kind}
 var _impacts: Array = []       # collisions waiting to be handled (see queue_impact)
 var cars_on := 0               # go-karts and monster trucks driving (last step)
+var _water_hold := 0           # above 0: adding several platforms, cut the water once at the end
 var _jelly_q: PhysicsShapeQueryParameters2D = null
+# fighters(), toys() and wigglies(), rebuilt only after `things` (or the
+# fighter layer) changes. Read-only: they're handed out, never changed in place,
+# so anyone looping over one while things come and go keeps a steady list.
+var _fighter_list: Array = []
+var _toy_list: Array = []
+var _wiggly_list: Array = []
+var _fighters_ok := false
+var _toys_ok := false
+var _wigglies_ok := false
+var _lists_n := [-1, -1, -1]   # things.size() each list was made from (a safety net)
+# ride_parts(): which toys belong to which ride, worked out again when the toy
+# list or anyone's parent_uid changes
+var parent_changes := 0
+var _parts_of := {}
+var _parts_src: Array = []
+var _parts_stamp := -1
+const _NO_PARTS: Array = []
 
 
 func _ready() -> void:
@@ -97,6 +125,8 @@ func _ready() -> void:
 	fighter_layer.name = "Fighters"
 	for n in [decor, terrain, bodies, pin_parent, link_view, fighter_layer, wiggly_layer, water_view]:
 		add_child(n)
+	fighter_layer.child_entered_tree.connect(func(_n: Node) -> void: _fighters_ok = false)
+	fighter_layer.child_exiting_tree.connect(func(_n: Node) -> void: _fighters_ok = false)
 
 
 # ------------------------------------------------------------------ worlds
@@ -111,7 +141,9 @@ func load_world(id: String, with_starters := true) -> void:
 	liquid_kinds.clear()
 	liquid_groups.clear()
 	platforms.clear()
+	_water_hold += 1
 	Worlds.build(self, id)
+	_water_hold -= 1
 	while liquid_kinds.size() < water.size():
 		liquid_kinds.append("water")
 		liquid_groups.append(0)
@@ -127,6 +159,8 @@ func load_world(id: String, with_starters := true) -> void:
 
 ## Water areas are rectangles; cut away the ground so only the pond shows.
 func _cut_water() -> void:
+	if _water_hold > 0:
+		return   # (whoever is adding platforms cuts it once they're all there)
 	water_shapes.clear()
 	for wi in water.size():
 		var rect: Rect2 = water[wi]
@@ -295,7 +329,7 @@ func spawn(id: String, pos: Vector2, team := "", pers := "") -> Node:
 
 ## People, animals and dinosaurs. They come with their usual weapon.
 func spawn_fighter(type: String, pos: Vector2, team := "", pers := "", s := 1.0, armed := true) -> Fighter:
-	if Catalog.fighter(type).is_empty() or fighters().size() >= 120:
+	if Catalog.fighter(type).is_empty() or fighters().size() >= max_fighters:
 		return null
 	var f := Fighter.new()
 	f.uid = _uid()
@@ -303,7 +337,7 @@ func spawn_fighter(type: String, pos: Vector2, team := "", pers := "", s := 1.0,
 	if puppet:
 		f.puppet = true
 	fighter_layer.add_child(f)
-	things[f.uid] = f
+	_put_thing(f.uid, f)
 	if not puppet:
 		f.make_standing(pos)
 		f.home = f.center()
@@ -317,8 +351,15 @@ func spawn_fighter(type: String, pos: Vector2, team := "", pers := "", s := 1.0,
 	return f
 
 
+## Everyone on the fighter layer that's still in the world, in the order they
+## were added. Don't change the list you get (it's shared and read-only).
 func fighters() -> Array:
-	return fighter_layer.get_children().filter(func(f): return f is Fighter and things.get(f.uid) == f)
+	if not _fighters_ok or int(_lists_n[0]) != things.size():
+		_fighter_list = fighter_layer.get_children().filter(func(f): return f is Fighter and things.get(f.uid) == f)
+		_fighter_list.make_read_only()
+		_fighters_ok = true
+		_lists_n[0] = things.size()
+	return _fighter_list
 
 
 ## Moves a spawn point up until a circle of radius `r` there is clear of the ground.
@@ -356,7 +397,7 @@ func spawn_toy(id: String, pos: Vector2, rot := 0.0, s := 1.0, def_override := {
 	if id == "conveyor":
 		t.on = true
 	bodies.add_child(t)
-	things[t.uid] = t
+	_put_thing(t.uid, t)
 	ToyLogic.on_spawn(self, t)
 	if puppet:
 		t.make_puppet()
@@ -376,39 +417,99 @@ func spawn_wiggly(kind: String, pos: Vector2, s := 1.0) -> Wiggly:
 	else:
 		w.make_bodies(bodies)
 	wiggly_layer.add_child(w)
-	things[w.uid] = w
+	_put_thing(w.uid, w)
 	return w
 
 
 func count_toys() -> int:
-	var n := 0
-	for t in things.values():
-		if t is Toy:
-			n += 1
-	return n
+	return toys().size()
 
 
 func count_wigglies() -> int:
-	var n := 0
-	for t in things.values():
-		if t is Wiggly:
-			n += 1
-	return n
+	return wigglies().size()
 
 
+## Every Wiggly, in `things` order. Shared and read-only, like fighters().
 func wigglies() -> Array:
-	return things.values().filter(func(t): return t is Wiggly)
+	if not _wigglies_ok or int(_lists_n[2]) != things.size():
+		_wiggly_list = things.values().filter(func(t): return t is Wiggly)
+		_wiggly_list.make_read_only()
+		_wigglies_ok = true
+		_lists_n[2] = things.size()
+	return _wiggly_list
 
 
+## Every toy (ride parts, weapons and flying rockets too), in `things` order.
+## Shared and read-only, like fighters().
 func toys() -> Array:
-	return things.values().filter(func(t): return t is Toy)
+	if not _toys_ok or int(_lists_n[1]) != things.size():
+		_toy_list = things.values().filter(func(t): return t is Toy)
+		_toy_list.make_read_only()
+		_toys_ok = true
+		_lists_n[1] = things.size()
+	return _toy_list
+
+
+## A ride's parts (wheels, its balloon or sail): the toys whose parent_uid is
+## `uid`, in `things` order. Shared: don't change the list.
+func ride_parts(uid: int) -> Array:
+	var ts := toys()
+	if not is_same(ts, _parts_src) or _parts_stamp != parent_changes:
+		_parts_of.clear()
+		for t in ts:
+			if t.parent_uid != 0:
+				if not _parts_of.has(t.parent_uid):
+					_parts_of[t.parent_uid] = []
+				_parts_of[t.parent_uid].append(t)
+		_parts_src = ts
+		_parts_stamp = parent_changes
+	return _parts_of.get(uid, _NO_PARTS)
+
+
+func _put_thing(uid: int, t) -> void:
+	if things.has(uid):
+		_list_changed(things[uid])
+	things[uid] = t
+	_list_changed(t)
+
+
+func _drop_thing(uid: int) -> void:
+	if things.has(uid):
+		_list_changed(things[uid])
+		things.erase(uid)
+
+
+## Gives a toy, Wiggly or fighter another number (loading a save, or a friend's
+## copy taking the host's number). Whatever already had that number is dropped.
+func renumber(t, uid: int) -> void:
+	_drop_thing(t.uid)
+	t.uid = uid
+	_put_thing(uid, t)
+
+
+## Takes `uid` out of the world's lists without freeing anything (Wi-Fi puppets).
+func forget(uid: int) -> void:
+	_drop_thing(uid)
+
+
+func _list_changed(t) -> void:
+	if not is_instance_valid(t):
+		_fighters_ok = false
+		_toys_ok = false
+		_wigglies_ok = false
+	elif t is Fighter:
+		_fighters_ok = false
+	elif t is Toy:
+		_toys_ok = false
+	elif t is Wiggly:
+		_wigglies_ok = false
 
 
 func remove(uid: int, effect := true) -> void:
 	var t = things.get(uid)
 	if t == null:
 		return
-	things.erase(uid)
+	_drop_thing(uid)
 	var p := _pos_of(t)
 	if t is Wiggly:
 		for pid in grabs.keys():
@@ -454,6 +555,9 @@ func _clear_all() -> void:
 			t.free_bodies()
 		t.queue_free()
 	things.clear()
+	_fighters_ok = false
+	_toys_ok = false
+	_wigglies_ok = false
 	fires.clear()
 	_strikes.clear()
 	last_winner = ""
@@ -1272,15 +1376,27 @@ func _physics_process(dt: float) -> void:
 	if paused:
 		_drive_grabs(dt)   # everything is stopped, but you can still move things around
 		return
+	if profiling:
+		_prof_t = Time.get_ticks_usec()
 	_handle_impacts()
+	if profiling:
+		_lap("impacts")
 	for w in wiggly_layer.get_children():
 		# a Wiggly being removed can share its id with its replacement (undo, loads)
 		if w is Wiggly and things.get(w.uid) == w and not w.points.is_empty():
 			w.physics_step(dt)
+	if profiling:
+		_lap("wigglies")
 	_wigglies_vs_fighters()
+	if profiling:
+		_lap("wigglies_vs_fighters")
 	for f in fighters():
 		f.physics_step(dt)
+	if profiling:
+		_lap("fighters")
 	Combat.hazards(self, dt)
+	if profiling:
+		_lap("hazards")
 	Worlds.tick(self, dt)
 	_step_strikes(dt)
 	_battle_t -= dt
@@ -1296,6 +1412,8 @@ func _physics_process(dt: float) -> void:
 		quiet_t = 0.0
 		brave = false
 	_drive_grabs(dt)
+	if profiling:
+		_lap("battle_check")
 	for l in links:
 		if not l.broken and not l.step(dt):
 			fx_event("snap", {"p": l.world_b() if is_instance_valid(l.b) else Vector2.ZERO})
@@ -1308,36 +1426,55 @@ func _physics_process(dt: float) -> void:
 				l.destroy()
 	if links.any(func(l): return l.broken):
 		links = links.filter(func(l): return not l.broken)
+	if profiling:
+		_lap("links")
 	_step_power()
+	if profiling:
+		_lap("power")
 	cars_on = 0
-	for t in things.values():
-		if t is Toy:
-			ToyLogic.step(self, t, dt)
+	for t in toys():
+		ToyLogic.step(self, t, dt)
+	if profiling:
+		_lap("toys")
 	_step_water(dt)
 	_step_magic(dt)
+	if profiling:
+		_lap("water_magic")
 	_cleanup()
 	_sticker_t -= dt
 	if _sticker_t <= 0.0:
 		_sticker_t = 0.5
 		_check_stickers()
+	if profiling:
+		_lap("cleanup_stickers")
+
+
+func _lap(part: String) -> void:
+	var now := Time.get_ticks_usec()
+	prof[part] = int(prof.get(part, 0)) + now - _prof_t
+	_prof_t = now
 
 
 ## Power flows from active sources through wires to everything connected.
 ## A switch, button or timer that is off blocks the flow.
 func _step_power() -> void:
-	for t in things.values():
-		if t is Toy:
-			t.powered = false
+	var ts := toys()
+	for t in ts:
+		t.powered = false
 	var adj := {}
 	for l in links:
 		if l.kind != "wire" or l.broken:
 			l.signal_on = false
 			continue
-		adj[l.uid_a] = adj.get(l.uid_a, []) + [l.uid_b]
-		adj[l.uid_b] = adj.get(l.uid_b, []) + [l.uid_a]
+		if not adj.has(l.uid_a):
+			adj[l.uid_a] = []
+		adj[l.uid_a].append(l.uid_b)
+		if not adj.has(l.uid_b):
+			adj[l.uid_b] = []
+		adj[l.uid_b].append(l.uid_a)
 	var queue: Array = []
-	for t in things.values():
-		if t is Toy and ToyLogic.emits(t):
+	for t in ts:
+		if ToyLogic.emits(t):
 			queue.append(t.uid)
 	var seen := {}
 	while not queue.is_empty():
@@ -1446,7 +1583,7 @@ func cast_magic(id: String) -> void:
 				f.revive()
 		"rainbow":
 			var i := 0
-			var sorted := toys()
+			var sorted := toys().duplicate()
 			sorted.sort_custom(func(a, b): return a.global_position.x < b.global_position.x)
 			for t in sorted:
 				if t.parent_uid == 0 or true:
@@ -1666,6 +1803,7 @@ func restore(d: Dictionary) -> void:
 			water.remove_at(i)
 			liquid_kinds.remove_at(i)
 			liquid_groups.remove_at(i)
+	_water_hold += 1
 	for e in d.get("platforms", []):
 		var poly := PackedVector2Array()
 		for v in e.poly:
@@ -1674,6 +1812,7 @@ func restore(d: Dictionary) -> void:
 		next_group = maxi(next_group, int(e.group))
 	for e in d.get("liquids", []):
 		add_liquid(Rect2(e.r[0], e.r[1], e.r[2], e.r[3]), String(e.kind), int(e.group))
+	_water_hold -= 1
 	_cut_water()
 	battle_on = bool(d.get("battle", true))
 	set_gravity(String(d.get("gravity", "normal")))
@@ -1683,9 +1822,7 @@ func restore(d: Dictionary) -> void:
 		var t := spawn_toy(String(e.id), Vector2(e.x, e.y), float(e.a), float(e.get("s", 1.0)), def_o)
 		if t == null:
 			continue
-		things.erase(t.uid)
-		t.uid = int(e.uid)
-		things[t.uid] = t
+		renumber(t, int(e.uid))
 		t.linear_velocity = Vector2(e.vx, e.vy)
 		t.angular_velocity = float(e.va)
 		if String(e.get("paint", "")) != "":
@@ -1702,9 +1839,7 @@ func restore(d: Dictionary) -> void:
 		var w := spawn_wiggly(String(e.kind), Vector2(e.x, e.y), float(e.get("s", 1.0)))
 		if w == null:
 			continue
-		things.erase(w.uid)
-		w.uid = int(e.uid)
-		things[w.uid] = w
+		renumber(w, int(e.uid))
 		if String(e.get("paint", "")) != "":
 			w.paint = Color(String(e.paint))
 		var pp: Array = e.get("pts", [])
@@ -1715,9 +1850,7 @@ func restore(d: Dictionary) -> void:
 		var f := spawn_fighter(String(e.type), Vector2(e.x, e.y), String(e.team), String(e.pers), float(e.get("s", 1.0)), false)
 		if f == null:
 			continue
-		things.erase(f.uid)
-		f.uid = int(e.uid)
-		things[f.uid] = f
+		renumber(f, int(e.uid))
 		f.hp = float(e.get("hp", f.max_hp))
 		f.armor = float(e.get("armor", f.armor))
 		f.helmet = String(e.get("helmet", f.helmet))

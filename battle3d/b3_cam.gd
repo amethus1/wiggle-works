@@ -48,6 +48,10 @@ func _ready() -> void:
 	add_child(cam)
 	cam.make_current()
 	_last_us = Time.get_ticks_usec()
+	# the scope's edge, made now (hidden) so its shader is compiled before the first look through it
+	_scope = _make_scope()
+	_scope.visible = false
+	cam.add_child(_scope)
 	apply()
 
 

@@ -68,6 +68,7 @@ var rng := RandomNumberGenerator.new()
 var _events: Array = []
 var _waves: Array = []
 var _sinking: Array = []
+var _settling := {}               # buildings (instance ids) with a settle() waiting (_settle_soon)
 var _ray := PhysicsRayQueryParameters3D.new()
 var _shape_q := PhysicsShapeQueryParameters3D.new()
 var _sphere := SphereShape3D.new()
@@ -476,6 +477,7 @@ func spawn_unit(kind: String, team: String, pos: Vector3, pers := "auto", yaw :=
 		u.rig.rotation.y = u.facing
 	u.reset_physics_interpolation()
 	units.append(u)
+	grid_add(u, true)
 	if fighting and not _respawning and not puppet:
 		fight_teams[team] = int(fight_teams.get(team, 0)) + 1     # joined the fight (for the scoreboard)
 	think_period = 0.2 + units.size() * 0.0016
@@ -774,7 +776,7 @@ func _blast_bodies(pos: Vector3, r: float, power: float, dmg: float, up: float, 
 				world.uproot(c, dir * power * f * 0.7, self)
 	for s in touched:
 		if is_instance_valid(s):
-			later(0.0, (s as B3Struct).settle)
+			_settle_soon(s as B3Struct)
 
 
 ## Pushes props and ragdolls around without damage (stomps, charges).
@@ -919,8 +921,23 @@ func break_piece(p: B3Piece, vel: Vector3, whole := false) -> void:
 		structs.erase(s)
 		s.queue_free()
 	elif s and not whole:
-		later(0.0, s.settle)
+		_settle_soon(s)
 	_trim_chunks()
+
+
+## Anything left floating after pieces of `s` break falls, at the next go of
+## the `later` list. One blast can break a dozen pieces of one building: it
+## only needs checking once for all of them (settle() looks at every pair of
+## pieces), so while one check is waiting no more are added.
+func _settle_soon(s: B3Struct) -> void:
+	var id := s.get_instance_id()
+	if _settling.has(id):
+		return
+	_settling[id] = true
+	later(0.0, func():
+		_settling.erase(id)
+		if is_instance_valid(s):
+			s.settle())
 
 
 func _chunk_body(xf: Transform3D, size: Vector3, _k: float) -> RigidBody3D:
@@ -1288,6 +1305,7 @@ func clear_battlefield() -> void:
 	hazards.clear()
 	_recount_spent()
 	_events.clear()
+	_settling.clear()
 	_waves.clear()
 	_sinking.clear()
 	fx.clear()
@@ -1359,6 +1377,259 @@ func unit_by_rid(rid: RID) -> B3Unit:
 		if u.get_rid() == rid:
 			return u
 	return null
+
+
+# ------------------------------------------------ the fighters' map (speed)
+## Standing fighters sorted into GRID-metre squares, so "who's near here?"
+## only looks at a few squares instead of every fighter on the field. It's
+## made once per physics step, the first time something asks: fighters only
+## move in the physics engine's step after all the scripts, so it stays right
+## all step long (ones placed or getting up during the step are added as they
+## come). It's only a first sort: callers still check the real distances, and
+## knocked-out or knocked-down fighters in it are skipped.
+## With only a few fighters on the field, outside the physics step and on a
+## friend's copy it isn't made: everyone is simply looked at, in `units` order.
+const GRID := 6.0
+const GRID_FAR := 2000.0           # further out than this (about to be removed): always looked at
+var grid_min := 120                # fewer fighters than this: not worth making (tests set 0)
+var grid_r := 0.0                  # the biggest radius of a fighter in it
+var _grid := {}                    # square (cell_x * 4096 + cell_z) -> Array[B3Unit]
+var _grid_far: Array[B3Unit] = []
+var _grid_step := -1               # the physics step it was made (or not made) for
+var _grid_on := false              # it's made for this step
+var _num_step := -1                # the physics step everyone was numbered for without it
+var _grid_n := 0                   # the next order number (B3Unit.grid_i, the order of `units`)
+var _grid_count := 0
+var _grid_x0 := 0                  # the squares anyone is in
+var _grid_x1 := -1
+var _grid_z0 := 0
+var _grid_z1 := -1
+var _foes_step := -1               # the physics step _side_n was counted for (foes_standing)
+var _side_n := {}                  # side ("red", or "wild:wolf" for wild ones) -> fighters standing on it
+var _standing_n := 0
+
+
+## True if the map is made and good for this physics step (making it if
+## it's worth it: B3Unit._think looks at everyone in one go if not).
+func grid_on() -> bool:
+	if puppet or not Engine.is_in_physics_frame():
+		return false
+	var f := Engine.get_physics_frames()
+	if _grid_step != f:
+		_grid_step = f
+		_grid_on = units.size() >= grid_min
+		if _grid_on:
+			_grid_build()
+	return _grid_on
+
+
+## Every fighter, numbered in order (B3Unit.grid_i), for when there's no map.
+func everyone() -> Array[B3Unit]:
+	if not grid_on():
+		var f := Engine.get_physics_frames() if Engine.is_in_physics_frame() else -1
+		if f < 0 or f != _num_step:
+			_num_step = f
+			_grid_number()
+	return units
+
+
+func _grid_build() -> void:
+	_grid.clear()
+	_grid_far.clear()
+	# (_grid_put, written out here: this runs for every fighter every step)
+	var i := 0
+	var x0 := 1 << 30
+	var x1 := -(1 << 30)
+	var z0 := 1 << 30
+	var z1 := -(1 << 30)
+	var rmax := 0.0
+	var n := 0
+	for u in units:
+		u.grid_i = i
+		i += 1
+		if u.down:
+			continue
+		var p := u.position
+		if u.radius > rmax:
+			rmax = u.radius
+		n += 1
+		if absf(p.x) > GRID_FAR or absf(p.z) > GRID_FAR:
+			_grid_far.append(u)
+			continue
+		var cx := floori(p.x / GRID)
+		var cz := floori(p.z / GRID)
+		if cx < x0:
+			x0 = cx
+		if cx > x1:
+			x1 = cx
+		if cz < z0:
+			z0 = cz
+		if cz > z1:
+			z1 = cz
+		var k := cx * 4096 + cz
+		var a = _grid.get(k)
+		if a == null:
+			var na: Array[B3Unit] = [u]
+			_grid[k] = na
+		else:
+			(a as Array[B3Unit]).append(u)
+	_grid_n = i
+	_grid_count = n
+	grid_r = rmax
+	_grid_x0 = x0
+	_grid_x1 = x1
+	_grid_z0 = z0
+	_grid_z1 = z1
+
+
+## Without the map: just numbers everyone in order (B3Unit.grid_i).
+func _grid_number() -> void:
+	for i in units.size():
+		units[i].grid_i = i
+	_grid_n = units.size()
+
+
+func _grid_put(u: B3Unit) -> void:
+	var p := u.position
+	if u.radius > grid_r:
+		grid_r = u.radius
+	_grid_count += 1
+	if absf(p.x) > GRID_FAR or absf(p.z) > GRID_FAR:
+		_grid_far.append(u)
+		return
+	var cx := floori(p.x / GRID)
+	var cz := floori(p.z / GRID)
+	if cx < _grid_x0:
+		_grid_x0 = cx
+	if cx > _grid_x1:
+		_grid_x1 = cx
+	if cz < _grid_z0:
+		_grid_z0 = cz
+	if cz > _grid_z1:
+		_grid_z1 = cz
+	var k := cx * 4096 + cz
+	var a = _grid.get(k)
+	if a == null:
+		var na: Array[B3Unit] = [u]
+		_grid[k] = na
+	else:
+		(a as Array[B3Unit]).append(u)
+
+
+## A fighter placed (or getting up) in the middle of a physics step goes on
+## the map too, if it's already been made for this step.
+func grid_add(u: B3Unit, new_unit: bool) -> void:
+	if _grid_step != Engine.get_physics_frames() or not Engine.is_in_physics_frame() or puppet:
+		return
+	if new_unit:
+		u.grid_i = _grid_n      # (or numbered with everyone, if that's still to come)
+		_grid_n += 1
+	if _grid_on:
+		_grid_put(u)
+	_foes_step = -1
+
+
+## False only if nobody standing could be `u`'s enemy (B3Unit.is_enemy) this
+## physics step: then there's no point searching the whole field for one (a
+## battle that's been won, or one side alone on the field).
+func foes_standing(u: B3Unit) -> bool:
+	if not grid_on():
+		return true
+	if _foes_step != _grid_step:
+		_foes_step = _grid_step
+		_side_n.clear()
+		_standing_n = 0
+		for o in units:
+			if not o.down:
+				var side: String = o.team if o.team != "wild" else "wild:" + o.kind
+				_side_n[side] = int(_side_n.get(side, 0)) + 1
+				_standing_n += 1
+	var mine: String = u.team if u.team != "wild" else "wild:" + u.kind
+	return _standing_n > int(_side_n.get(mine, 0))
+
+
+## Someone changed sides in the middle of a step: count again.
+func foes_changed() -> void:
+	_foes_step = -1
+
+
+## Every fighter that could be within `r` metres of `p` (across the ground:
+## x and z), in no particular order. Check the real distance, and skip the
+## knocked-down (`down`) and knocked-out (`dead`) ones. `r` grows by
+## `biggest` times the biggest fighter's radius (1.0 for "touching": my
+## reach plus their radius). It may be `units` itself: don't add or remove
+## fighters while going through it (collect who to hit first).
+func units_near(p: Vector3, r: float, biggest := 0.0) -> Array[B3Unit]:
+	if not grid_on():
+		return everyone()
+	r += biggest * grid_r
+	var out: Array[B3Unit] = []
+	var x0 := maxi(floori((p.x - r) / GRID), _grid_x0)
+	var x1 := mini(floori((p.x + r) / GRID), _grid_x1)
+	var z0 := maxi(floori((p.z - r) / GRID), _grid_z0)
+	var z1 := mini(floori((p.z + r) / GRID), _grid_z1)
+	for cx in range(x0, x1 + 1):
+		for cz in range(z0, z1 + 1):
+			var a = _grid.get(cx * 4096 + cz)
+			if a != null:
+				out.append_array(a)
+	if not _grid_far.is_empty():
+		out.append_array(_grid_far)
+	return out
+
+
+## For searching outwards from `p` square by square (see B3Unit._think):
+## the fighters in the squares `ring` steps out (0: the square `p` is in).
+## Everyone in ring r is at least (r - 1) * GRID metres away. Past
+## grid_rings(p) there's nobody. Searching out that far would mean looking at
+## more squares than there are fighters, so past grid_ring_cap() it's better
+## to just look at everyone (`units`).
+func grid_ring(p: Vector3, ring: int) -> Array[B3Unit]:
+	var out: Array[B3Unit] = []
+	var cx := floori(p.x / GRID)
+	var cz := floori(p.z / GRID)
+	if ring == 0:
+		var a = _grid.get(cx * 4096 + cz)
+		if a != null:
+			out.append_array(a)
+		if not _grid_far.is_empty():
+			out.append_array(_grid_far)
+		return out
+	# the top and bottom rows, then the two sides between them
+	for zz in [cz - ring, cz + ring]:
+		var z: int = zz
+		if z < _grid_z0 or z > _grid_z1:
+			continue
+		for x in range(maxi(cx - ring, _grid_x0), mini(cx + ring, _grid_x1) + 1):
+			var a = _grid.get(x * 4096 + z)
+			if a != null:
+				out.append_array(a)
+	for xx in [cx - ring, cx + ring]:
+		var x: int = xx
+		if x < _grid_x0 or x > _grid_x1:
+			continue
+		for z in range(maxi(cz - ring + 1, _grid_z0), mini(cz + ring - 1, _grid_z1) + 1):
+			var a = _grid.get(x * 4096 + z)
+			if a != null:
+				out.append_array(a)
+	return out
+
+
+## How many rings out from `p` anyone could be (-1: nobody, or no map now).
+func grid_rings(p: Vector3) -> int:
+	if not grid_on():
+		return -1
+	if _grid_count == 0:
+		return -1
+	if _grid_x1 < _grid_x0:
+		return 0      # (only far-off ones, in ring 0)
+	var cx := floori(p.x / GRID)
+	var cz := floori(p.z / GRID)
+	return maxi(maxi(cx - _grid_x0, _grid_x1 - cx), maxi(cz - _grid_z0, _grid_z1 - cz))
+
+
+func grid_ring_cap() -> int:
+	return int(sqrt(float(_grid_count)) * 0.5) + 1
 
 
 func enemies_left(_u: B3Unit) -> bool:

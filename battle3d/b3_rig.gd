@@ -3,6 +3,9 @@ extends Node3D
 ## A unit's toy-like model, built from primitive meshes and animated by code.
 ## Pivots (Node3Ds with meta "pivot") are the joints; `parts` describes how
 ## to turn the model into a physics ragdoll (see B3Ragdoll). Forward is +Z.
+## Once built, the plain painted pieces under each node are merged into one
+## mesh (see _merge), so a fighter draws as a handful of meshes, and
+## look-alike fighters share them (the renderer draws shared meshes together).
 
 const SKINS := [Color("f7d2b4"), Color("eab68e"), Color("c98d62"), Color("8f5b3c"), Color("ffe0c8"), Color("b07850")]
 const BOOT := Color("3a2f2a")
@@ -35,6 +38,8 @@ const BIPED := {
 }
 
 static var _shapes := {}
+static var _merged := {}        # hash -> [[pieces, merged ArrayMesh], ...] (_cached)
+static var _arrays := {}        # primitive mesh key -> its mesh arrays
 
 var kind := ""
 var body := ""
@@ -69,7 +74,11 @@ var thrust := false           # spears and lances stab forward instead of swingi
 var spear_hand: Node3D = null # the hand holding a spear or lance (kept level)
 var musket_hand: Node3D = null # a musket's hand: shouldered upright when not aiming
 var no_collide: Array = []    # [part, part] pairs whose ragdoll bodies don't bump (a rider and its horse)
+var pieces := 0               # how many primitive pieces the model was built from (before merging)
 var _hrng: RandomNumberGenerator = null
+var skin_col := Color(0, 0, 0, 0)  # a fighter's skin: merged pieces get it (and the team colour) per mesh (B3Mats.rig_mat)
+var _crown_box := AABB()      # the head's size before merging (add_crown)
+var _crown_ok := false
 
 
 func build(unit_kind: String, team_id: String, rng: RandomNumberGenerator) -> void:
@@ -101,6 +110,8 @@ func build(unit_kind: String, team_id: String, rng: RandomNumberGenerator) -> vo
 				_build_chicken()
 		"dragon":
 			_build_dragon()
+	_crown_prep()
+	_merge()
 	scale = Vector3.ONE * size
 	radius *= size
 	height *= size
@@ -195,21 +206,7 @@ func add_crown() -> Node3D:
 	if old:
 		return old as Node3D
 	# how big the head (with its helmet or hat) is, and where its top is
-	var box := AABB()
-	var first := true
-	for c in head.get_children():
-		var group: Array = [c]
-		if c is Node3D and not (c is MeshInstance3D) and not c.has_meta("pivot"):
-			group = (c as Node3D).get_children()      # eyes and the like
-		for m in group:
-			if m is MeshInstance3D and (m as MeshInstance3D).mesh:
-				var mi := m as MeshInstance3D
-				var xf := mi.transform if mi.get_parent() == head else (mi.get_parent() as Node3D).transform * mi.transform
-				var bb: AABB = xf * mi.mesh.get_aabb()
-				box = bb if first else box.merge(bb)
-				first = false
-	if first:
-		box = AABB(Vector3(-0.2, 0, -0.2), Vector3(0.4, 0.4, 0.4))
+	var box := _crown_box if _crown_ok else _head_box(head)
 	var r := clampf(maxf(box.size.x, box.size.z) * 0.42, 0.18, 0.75)
 	var h := r * 0.95
 	var gold := B3Mats.mat(H_GOLD, 0.28, 0.55)
@@ -232,9 +229,300 @@ func add_crown() -> Node3D:
 		var a := TAU * (i + 0.5) / 5.0
 		var p := Vector3(sin(a), 0, cos(a)) * r * 0.97
 		B3Mats.add(crown, B3Mats.sphere(r * 0.13, 8), B3Mats.glow(jewels[i], 1.4), p + Vector3(0, h * 0.21, 0), Vector3.ZERO, Vector3.ONE, false)
-	for mi in parts:
-		meshes.append(mi)      # flashes white when the King is hit, like the rest of it
+	meshes.append_array(_merge_group(crown, parts, false))      # (it flashes white when the King is hit, like the rest of it)
 	return crown
+
+
+## The box round the head and its helmet or hat (in the head's space), for
+## sitting a crown on top. Worked out before the pieces get merged.
+func _head_box(head: Node3D) -> AABB:
+	var box := AABB()
+	var first := true
+	for c in head.get_children():
+		var group: Array = [c]
+		if c is Node3D and not (c is MeshInstance3D) and not c.has_meta("pivot"):
+			group = (c as Node3D).get_children()      # eyes and the like
+		for m in group:
+			if m is MeshInstance3D and (m as MeshInstance3D).mesh:
+				var mi := m as MeshInstance3D
+				var xf := mi.transform if mi.get_parent() == head else (mi.get_parent() as Node3D).transform * mi.transform
+				var bb: AABB = xf * mi.mesh.get_aabb()
+				box = bb if first else box.merge(bb)
+				first = false
+	if first:
+		box = AABB(Vector3(-0.2, 0, -0.2), Vector3(0.4, 0.4, 0.4))
+	return box
+
+
+func _crown_prep() -> void:
+	var head: Node3D = pv.get("head")
+	_crown_ok = head != null
+	if head:
+		_crown_box = _head_box(head)
+
+
+# ------------------------------------------------------------------ merging
+## Drops the merged meshes (with B3Mats.clear_cache, when leaving 3D Battle).
+static func clear_cache() -> void:
+	_merged.clear()
+	_arrays.clear()
+	_shapes.clear()
+
+
+## Merges the model's plain painted pieces: every node's pieces become one
+## mesh (two when only some of them cast a shadow: one to see, one that only
+## casts the shadow). Pieces that move or hide by themselves are already on
+## their own node (pivots, hands, eyes, wheels), so animation, ragdolls,
+## wrecks, first person ("fp_keep" pieces stay apart) and hit flashes work
+## as before. Single pieces, see-through or glowing ones and anything with
+## meta "no_merge" stay as they are. Pieces in the team colour (or a shade
+## of it) and in the skin colour get those colours per mesh (_paint_code), so
+## every team and skin shares the same meshes.
+func _merge() -> void:
+	pieces = meshes.size()
+	var groups := {}
+	for mi in meshes:
+		if not _mergeable(mi):
+			continue
+		var fp := mi.has_meta("fp_keep")
+		var key := [mi.get_parent(), fp]
+		if not groups.has(key):
+			groups[key] = [mi.get_parent(), fp, [] as Array[MeshInstance3D]]
+		(groups[key][2] as Array[MeshInstance3D]).append(mi)
+	var gone := {}
+	var made: Array[MeshInstance3D] = []
+	for key in groups:
+		var g: Array = groups[key]
+		var list: Array[MeshInstance3D] = g[2]
+		if list.size() >= 2:
+			for mi in list:
+				gone[mi] = true
+			made.append_array(_merge_group(g[0] as Node3D, list, bool(g[1])))
+	if gone.is_empty():
+		return
+	var keep: Array[MeshInstance3D] = []
+	for m in meshes:
+		if not gone.has(m):
+			keep.append(m)
+	keep.append_array(made)
+	meshes = keep
+
+
+func _mergeable(mi: MeshInstance3D) -> bool:
+	if not is_instance_valid(mi) or not mi.visible or mi.mesh == null or not mi.mesh.has_meta("k"):
+		return false
+	if mi.has_meta("no_merge") or mi.material_overlay != null or mi.get_child_count() > 0 or mi.layers != 1:
+		return false
+	if mi.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_ON and mi.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+		return false
+	var mt := mi.material_override as StandardMaterial3D
+	return mt != null and mt.has_meta("plain")
+
+
+## How a piece's colour `c` goes into a merged mesh: Vector3(0, 0, 0) as it
+## is, (1, 0, 0) the skin, (2, a, b) team colour * a + b (that covers the
+## team colour, darkened, lightened, and any mix of those). Checked against
+## this model's own colours, so a colour that only happens to fit is still
+## drawn right (it just isn't shared with other teams).
+func _paint_code(c: Color) -> Vector3:
+	if skin_col.a > 0.0 and c == skin_col:
+		return Vector3(1, 0, 0)
+	var t := team_col
+	# solve c = t * a + b on the two channels where the team colour differs most
+	var dt := t.r - t.g
+	var dc := c.r - c.g
+	var ta := t.r
+	var ca := c.r
+	if absf(t.g - t.b) > absf(dt):
+		dt = t.g - t.b
+		dc = c.g - c.b
+		ta = t.g
+		ca = c.g
+	if absf(t.r - t.b) > absf(dt):
+		dt = t.r - t.b
+		dc = c.r - c.b
+		ta = t.r
+		ca = c.r
+	if absf(dt) < 0.05:
+		return Vector3.ZERO
+	var a := dc / dt
+	var b := ca - a * ta
+	if a < 0.02 or a > 1.0001 or b < -0.0001 or b > 1.0001:
+		return Vector3.ZERO
+	# (rounded, so the same shade of every team's colour comes out the same)
+	a = snappedf(a, 0.00001)
+	b = snappedf(b, 0.00001)
+	if absf(t.r * a + b - c.r) > 0.0002 or absf(t.g * a + b - c.g) > 0.0002 or absf(t.b * a + b - c.b) > 0.0002:
+		return Vector3.ZERO
+	return Vector3(2, a, b)
+
+
+## Replaces `list` (pieces of `par`) with merged meshes and returns them.
+func _merge_group(par: Node3D, list: Array[MeshInstance3D], fp: bool) -> Array[MeshInstance3D]:
+	var sig := []
+	var geo := ["shadow"]      # the shadow casters' shapes (a shadow has no colour)
+	var paints: Array[Vector3] = []
+	var casts := 0
+	var skin := false
+	var team := false
+	for mi in list:
+		var mt := mi.material_override as StandardMaterial3D
+		var c := mt.albedo_color
+		var cast := mi.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		casts += int(cast)
+		var pt := _paint_code(c)
+		paints.append(pt)
+		skin = skin or pt.x == 1.0
+		team = team or pt.x == 2.0
+		var k: Variant = mi.mesh.get_meta("k")
+		sig.append_array([k, mi.transform, pt if pt.x > 0.0 else Vector3(c.r, c.g, c.b), pt.x, mt.roughness, mt.metallic, cast])
+		if cast:
+			geo.append_array([k, mi.transform])
+	var mesh := _cached(sig)
+	if mesh == null:
+		mesh = _merged_mesh(list, paints, false)
+		_cache(sig, mesh)
+	var shadow: ArrayMesh = null
+	if casts > 0 and casts < list.size():
+		shadow = _cached(geo)
+		if shadow == null:
+			shadow = _merged_mesh(list, paints, true)
+			_cache(geo, shadow)
+	var made: Array[MeshInstance3D] = []
+	var all := MeshInstance3D.new()
+	all.mesh = mesh
+	all.material_override = B3Mats.rig_mat("", skin or team)
+	# (as Vector4s: Colors would be turned into linear colour on the way)
+	if skin:
+		all.set_instance_shader_parameter("skin", Vector4(skin_col.r, skin_col.g, skin_col.b, 1.0))
+	if team:
+		all.set_instance_shader_parameter("team", Vector4(team_col.r, team_col.g, team_col.b, 1.0))
+	if casts < list.size():
+		all.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	made.append(all)
+	if shadow != null:
+		var sh := MeshInstance3D.new()
+		sh.mesh = shadow
+		sh.material_override = B3Mats.rig_mat()
+		sh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		made.append(sh)
+	for mi in list:
+		mi.free()
+	for m in made:
+		if fp:
+			m.set_meta("fp_keep", true)
+		par.add_child(m)
+	return made
+
+
+## The merged mesh made before from pieces `sig` (their shapes, places and
+## paint), or null. Looked up by hash, then checked piece by piece.
+static func _cached(sig: Array) -> ArrayMesh:
+	for e in (_merged.get(hash(sig), []) as Array):
+		if (e as Array)[0] == sig:
+			return (e as Array)[1]
+	return null
+
+
+static func _cache(sig: Array, mesh: ArrayMesh) -> void:
+	var h := hash(sig)
+	if not _merged.has(h):
+		_merged[h] = []
+	(_merged[h] as Array).append([sig, mesh])
+
+
+## One mesh of `list`'s pieces (where they sit on their node). Each vertex
+## carries its piece's colour, roughness and metalness for B3Mats.rig_mat:
+## COLOR is the colour (alpha 1), or alpha 0 for the skin and 0.5 for a team
+## colour (team * UV2.x + UV2.y, see `paints`); UV is roughness, metalness.
+## shadow: only the shapes of the pieces that cast a shadow.
+static func _merged_mesh(list: Array[MeshInstance3D], paints: Array[Vector3], shadow: bool) -> ArrayMesh:
+	var v := PackedVector3Array()
+	var n := PackedVector3Array()
+	var col := PackedColorArray()
+	var uv := PackedVector2Array()
+	var uv2 := PackedVector2Array()
+	var ix := PackedInt32Array()
+	for j in list.size():
+		var mi := list[j]
+		if shadow and mi.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_ON:
+			continue
+		var a := _prim_arrays(mi.mesh)
+		var pv: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+		var pn: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
+		var pi: PackedInt32Array = a[Mesh.ARRAY_INDEX]
+		var xf := mi.transform
+		var base := v.size()
+		v.append_array(xf * pv)
+		# normals like the renderer turns them (it handles squashed pieces this way too)
+		n.append_array(Transform3D(xf.basis.inverse().transposed(), Vector3.ZERO) * pn)
+		if not shadow:
+			var mt := mi.material_override as StandardMaterial3D
+			var c := mt.albedo_color
+			var pt := paints[j]
+			# vertex colours are stored as bytes, cut down rather than rounded: round them first
+			var q := Color((roundf(c.r * 255.0) + 0.5) / 255.0, (roundf(c.g * 255.0) + 0.5) / 255.0, (roundf(c.b * 255.0) + 0.5) / 255.0, 1.0)
+			if pt.x == 1.0:
+				q = Color(1, 1, 1, 0)
+			elif pt.x == 2.0:
+				q = Color(1, 1, 1, 0.5)
+			var cc := PackedColorArray()
+			cc.resize(pv.size())
+			cc.fill(q)
+			col.append_array(cc)
+			var uu := PackedVector2Array()
+			uu.resize(pv.size())
+			uu.fill(Vector2(mt.roughness, mt.metallic))
+			uv.append_array(uu)
+			uu.fill(Vector2(pt.y, pt.z) if pt.x == 2.0 else Vector2.ZERO)
+			uv2.append_array(uu)
+		if xf.basis.determinant() < 0.0:
+			# a mirrored piece: turn its triangles round so the right faces show
+			var t := 0
+			while t + 2 < pi.size():
+				ix.append(base + pi[t])
+				ix.append(base + pi[t + 2])
+				ix.append(base + pi[t + 1])
+				t += 3
+		else:
+			for k in pi:
+				ix.append(base + k)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = v
+	arr[Mesh.ARRAY_NORMAL] = n
+	if not shadow:
+		arr[Mesh.ARRAY_COLOR] = col
+		arr[Mesh.ARRAY_TEX_UV] = uv
+		arr[Mesh.ARRAY_TEX_UV2] = uv2
+	arr[Mesh.ARRAY_INDEX] = ix
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return m
+
+
+static func _prim_arrays(mesh: Mesh) -> Array:
+	var key := String(mesh.get_meta("k"))
+	var a: Array = _arrays.get(key, [])
+	if a.is_empty():
+		a = mesh.surface_get_arrays(0)
+		if a[Mesh.ARRAY_INDEX] == null:
+			var pi := PackedInt32Array()
+			for i in (a[Mesh.ARRAY_VERTEX] as PackedVector3Array).size():
+				pi.append(i)
+			a[Mesh.ARRAY_INDEX] = pi
+		_arrays[key] = a
+	return a
+
+
+## An animal's colour with a slight random tint, one of eight, so a herd
+## isn't all exactly alike but look-alikes still share their merged meshes
+## (and materials). Takes three random numbers, like a free tint did.
+static func _tint(base: Color, w: float, rng: RandomNumberGenerator) -> Color:
+	var r := rng.randf()
+	var g := rng.randf()
+	var b := rng.randf()
+	return base.lerp(Color(0.25 if r < 0.5 else 0.75, 0.25 if g < 0.5 else 0.75, 0.25 if b < 0.5 else 0.75), w)
 
 
 func _eye(parent: Node3D, pos: Vector3, r: float, white := false) -> void:
@@ -334,6 +622,7 @@ func _build_human(def: Dictionary, rng: RandomNumberGenerator) -> void:
 	height = 1.85
 	top = 1.95
 	reach_y = 1.15
+	skin_col = skin
 	var hips := _pivot("hips", self, Vector3(0, 0.78, 0))
 	var torso := _pivot("torso", hips, Vector3.ZERO)
 	var head := _pivot("head", torso, Vector3(0, 0.62, 0))
@@ -964,7 +1253,7 @@ func _build_quad(rng: RandomNumberGenerator) -> void:
 	var leg: float = q.leg
 	var lr: float = q.lr
 	var hr: float = q.head
-	var col := Color(String(q.col)).lerp(Color(rng.randf(), rng.randf(), rng.randf()), 0.06)
+	var col := _tint(Color(String(q.col)), 0.06, rng)
 	var belly := Color(String(q.belly))
 	var tc := team_col
 	var wild := team == "wild"
@@ -1136,7 +1425,7 @@ func _build_biped(rng: RandomNumberGenerator) -> void:
 	var leg: float = q.leg
 	var lr: float = q.lr
 	var hd: Vector3 = q.head
-	var col := Color(String(q.col)).lerp(Color(rng.randf(), rng.randf(), rng.randf()), 0.06)
+	var col := _tint(Color(String(q.col)), 0.06, rng)
 	var belly := Color(String(q.belly))
 	var tc := team_col
 	var wild := team == "wild"
@@ -1315,7 +1604,8 @@ func _build_robot() -> void:
 		_m(a, B3Mats.box(Vector3(0.17, 0.3, 0.17)), mt, Vector3(0, -0.54, 0))
 	for sx in [-1.0, 1.0]:
 		_m(arm_l, B3Mats.prism(Vector3(0.07, 0.16, 0.08)), dk, Vector3(0.045 * sx, -0.76, 0), Vector3(0, 0, 180), Vector3.ONE, false)
-	_m(arm_r, B3Mats.cyl(0.1, 0.12, 0.26, 12), dk, Vector3(0, -0.8, 0))
+	# (kept apart: B3FPView copies what's on the end of the arm for first person)
+	_m(arm_r, B3Mats.cyl(0.1, 0.12, 0.26, 12), dk, Vector3(0, -0.8, 0)).set_meta("no_merge", true)
 	_m(arm_r, B3Mats.torus(0.07, 0.11), B3Mats.glow(Color(1.0, 0.3, 0.25), 2.4), Vector3(0, -0.93, 0), Vector3.ZERO, Vector3.ONE, false)
 	muzzle = _marker(arm_r, Vector3(0, -0.97, 0))
 	# legs: boxy thighs and shins, knee balls, big flat feet
@@ -1338,7 +1628,7 @@ func _build_robot() -> void:
 func _build_ape(rng: RandomNumberGenerator) -> void:
 	var tc := team_col
 	var wild := team == "wild"
-	var fur := Color("34302f").lerp(Color(rng.randf(), rng.randf(), rng.randf()), 0.04)
+	var fur := _tint(Color("34302f"), 0.04, rng)
 	var chest := Color("5d5354")
 	var face := Color("5a4842")
 	var silver := Color("a3a0a6")

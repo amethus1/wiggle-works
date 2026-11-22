@@ -496,11 +496,11 @@ func _player_aim(c: B3Ctl) -> void:
 		return
 	var best: B3Unit = null
 	var bd := 1e9
-	for o: B3Unit in battle.units:
-		if o == self or o.down or not is_enemy(o):
+	for o: B3Unit in battle.units_near(c.aim, 2.2, 1.0):
+		if o == self or o.down or o.dead or not is_enemy(o):
 			continue
 		var d := _flat(o.position - c.aim).length()
-		if d < maxf(2.2, o.radius + 1.6) and d < bd:
+		if d < maxf(2.2, o.radius + 1.6) and (d < bd or (d == bd and o.grid_i < best.grid_i)):
 			bd = d
 			best = o
 	_paim_unit = best
@@ -733,14 +733,12 @@ func _ram_tick() -> void:
 	var fwd := forward() * signf(fwd_spd)
 	var now: float = battle.time
 	var car := style_is("car")
-	for u: B3Unit in battle.units.duplicate():
-		if u == self or u.down or u.dead or not is_enemy(u) or u.flying:
-			continue
-		var off := _flat(u.position - position)
-		var d := off.length()
-		if d > radius + u.radius + (0.95 if car else 0.35) or off.dot(fwd) < 0.3 * d:
-			continue
-		if float(_ram.get(u.uid, -9.0)) > now - 1.0:
+	var hits: Array[B3Unit] = []
+	for u: B3Unit in battle.units_near(position, radius + (0.95 if car else 0.35), 1.0):
+		if _rams(u, fwd, car, now):
+			hits.append(u)
+	for u: B3Unit in _in_order(hits):
+		if not _rams(u, fwd, car, now):
 			continue
 		_ram[u.uid] = now
 		if car:
@@ -750,6 +748,17 @@ func _ram_tick() -> void:
 		u.hurt(_spd * 1.6 * heavy, (fwd + Vector3.UP * 0.6).normalized(), _spd * 1.7, self, "hit")
 		battle.snd("thud", position, 0.8)
 		battle.shake(0.1, position)
+
+
+## Driving along `fwd` runs into `u` (not bumped in the last second).
+func _rams(u: B3Unit, fwd: Vector3, car: bool, now: float) -> bool:
+	if u == self or u.down or u.dead or not is_enemy(u) or u.flying:
+		return false
+	var off := _flat(u.position - position)
+	var d := off.length()
+	if d > radius + u.radius + (0.95 if car else 0.35) or off.dot(fwd) < 0.3 * d:
+		return false
+	return float(_ram.get(u.uid, -9.0)) <= now - 1.0
 
 
 ## The race car's cartoon BONK: whoever it hits goes flying up in the air

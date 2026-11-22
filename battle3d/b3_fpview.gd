@@ -42,13 +42,7 @@ func setup(u: B3Unit) -> void:
 			return
 	model.transform = Transform3D.IDENTITY
 	add_child(model)
-	for c in model.find_children("*", "VisualInstance3D", true, false):
-		var vi := c as VisualInstance3D
-		vi.layers = 1
-		if vi.has_meta("fp_layers"):
-			vi.remove_meta("fp_layers")
-		if vi is GeometryInstance3D:
-			(vi as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_in_view(model)
 	# camera space: x right, y up, -z forward. The weapon's own forward is +z.
 	match hold:
 		"gun":
@@ -78,14 +72,23 @@ func _add_shield(rig: B3Rig) -> void:
 		return
 	shield = src.duplicate() as Node3D
 	add_child(shield)
-	for c in shield.find_children("*", "VisualInstance3D", true, false):
+	_in_view(shield)
+	shield.visible = false
+
+
+## A copy of part of the model, drawn by the first-person camera without
+## shadows. The model's shadow-only meshes (see B3Rig._merge) aren't needed.
+func _in_view(n: Node3D) -> void:
+	for c in n.find_children("*", "VisualInstance3D", true, false):
 		var vi := c as VisualInstance3D
+		if vi is GeometryInstance3D and (vi as GeometryInstance3D).cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY:
+			vi.free()
+			continue
 		vi.layers = 1
 		if vi.has_meta("fp_layers"):
 			vi.remove_meta("fp_layers")
 		if vi is GeometryInstance3D:
 			(vi as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	shield.visible = false
 
 
 ## A copy of what's built onto the end of an arm (past the forearm), turned
@@ -96,7 +99,7 @@ func _arm_end(arm: Node3D) -> Node3D:
 	# the arm hangs down its -y; a held weapon points along +z
 	var turn := Transform3D(Basis(Vector3.RIGHT, -PI * 0.5), Vector3(0, 0, -0.7))
 	for c in arm.get_children():
-		if c is VisualInstance3D and (c as Node3D).position.y < -0.65:
+		if c is VisualInstance3D and (c as Node3D).position.y < -0.65 and not (c is GeometryInstance3D and (c as GeometryInstance3D).cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY):
 			var m := (c as Node3D).duplicate() as Node3D
 			m.transform = turn * (c as Node3D).transform
 			n.add_child(m)

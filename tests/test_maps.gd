@@ -3,7 +3,10 @@ extends Node
 ## height field matches height_at() out to the edges, fighters placed far
 ## out (±150 m) stand on the ground, the volcano has its pools, beach water
 ## stops walkers, the pass is a narrow gap between cliffs, uprootable
-## scenery is numbered, and a map is the same every time it's built.
+## scenery is numbered, and a map is the same every time it's built. Also
+## how they're drawn: ground detail fading out in first person, and the
+## fighters' and vehicles' merged models (B3Rig: shared by every team and
+## skin, greying when knocked out, crowns, wrecks, team changes).
 ## godot --headless --path . -- --test=maps
 
 const SPEED := 4.0
@@ -69,6 +72,8 @@ func _ready() -> void:
 	await _pass()
 	await _scenery_numbers()
 	await _uproot_tint()
+	await _detail_fp()
+	await _models()
 	if b and is_instance_valid(b):
 		b.queue_free()
 	Engine.time_scale = 1.0
@@ -264,6 +269,135 @@ func _uproot_tint() -> void:
 			if c is MeshInstance3D and (c as MeshInstance3D).material_override is StandardMaterial3D:
 				tint = ((c as MeshInstance3D).material_override as StandardMaterial3D).albedo_color
 	check(tint.r < 0.5 and tint.g < 0.5 and tint.b < 0.5, "a blown-over volcano rock stays dark (%s)" % tint.to_html(false))
+
+
+# --------------------------------------------------------------- drawing
+## First person cuts the ground detail into finer pieces that fade out far
+## away; back overhead it's the big chunks again, all of it.
+func _detail_fp() -> void:
+	print("ground detail in first person")
+	await fresh("farmland")
+	var w: B3World = b.world
+	await get_tree().process_frame
+	var coarse := 0
+	for m in w._detail:
+		coarse += m.multimesh.instance_count
+	check(coarse > 3000 and w._detail_fp.is_empty(), "overhead: %d tufts and crops in big chunks" % coarse)
+	b.cam.cam.projection = Camera3D.PROJECTION_PERSPECTIVE
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var fine := 0
+	var fades := true
+	for m in w._detail_fp:
+		fine += m.multimesh.instance_count
+		fades = fades and m.visibility_range_end > 0.0 and m.visible
+	var hidden := true
+	for m in w._detail:
+		hidden = hidden and not m.visible
+	check(fine == coarse and fades and hidden and w._detail_fp.size() > w._detail.size(), "first person: the same %d in %d finer pieces that fade out far away" % [fine, w._detail_fp.size()])
+	b.cam.cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var shown := true
+	for m in w._detail:
+		shown = shown and m.visible
+	check(shown and w._detail_fp.is_empty(), "and back overhead, the big chunks again")
+
+
+## The fighters' and vehicles' models are merged into a few meshes each,
+## which every team and skin shares, and still do everything they did.
+func _models() -> void:
+	print("merged models")
+	await fresh("grassland")
+	var x := -30.0
+	var ok := true
+	var shared := true
+	for cat in ["people", "history", "animals", "dinos", "vehicles"]:
+		for id in B3Defs.UNIT_ORDER[cat]:
+			var red: B3Unit = b.spawn_unit(String(id), "red", at(x, 6), "peaceful")
+			var blue: B3Unit = b.spawn_unit(String(id), "blue", at(x, 14), "peaceful")
+			x += 3.0
+			if red == null or red.rig == null or red.rig.meshes.size() >= red.rig.pieces:
+				ok = false
+				print("    %s isn't merged (%d meshes from %d pieces)" % [id, red.rig.meshes.size() if red and red.rig else 0, red.rig.pieces if red and red.rig else 0])
+				continue
+			# the same kind on two teams: the same merged meshes, each with its own team colour
+			var mr := {}
+			for m in red.rig.meshes:
+				mr[m.mesh] = true
+			var same := 0
+			for m in blue.rig.meshes:
+				if mr.has(m.mesh) and m.material_override is ShaderMaterial:
+					same += 1
+			if same == 0 and String(id) != "dragon":      # (a dragon is all in its team's colour)
+				shared = false
+				print("    %s: red and blue share no merged meshes" % id)
+	await sim(0.3)
+	check(ok, "every fighter and vehicle is merged into fewer meshes than it has pieces")
+	check(shared, "the same kind on two teams shares its merged meshes")
+	var pieces := 0
+	var meshes := 0
+	for u in b.units:
+		pieces += u.rig.pieces
+		meshes += u.rig.meshes.size()
+	check(meshes * 2 < pieces, "%d pieces drawn as %d meshes" % [pieces, meshes])
+	# knocked out: the merged pieces go grey like the rest (the body parts'
+	# own pieces; a held weapon, on its hand, keeps its colours as it always did)
+	var ko: B3Unit = null
+	for u in b.units:
+		if u.kind == "soldier":
+			ko = u
+	ko._ko(Vector3(0, 3, 1), null)
+	await sim(0.2)
+	var rd: B3Ragdoll = null
+	for r in b.ragdolls:
+		if is_instance_valid(r) and r.dead and r.kind == "soldier":
+			rd = r
+	var grey := 0
+	var merged := 0
+	if rd:
+		for c in rd.find_children("*", "MeshInstance3D", true, false):
+			var m := (c as MeshInstance3D).material_override
+			if m is ShaderMaterial and m.has_meta("rig_pm") and c.get_parent() is RigidBody3D:
+				merged += 1
+				if m == B3Mats.rig_mat("ko", true) or m == B3Mats.rig_mat("ko", false):
+					grey += 1
+	check(rd != null and merged > 3 and grey == merged, "a knocked-out soldier's merged pieces go grey (%d of %d)" % [grey, merged])
+	# a King's crown sits on top of the head, helmet and all
+	var k: B3Unit = null
+	for u in b.units:
+		if u.kind == "knight" and not u.down:
+			k = u
+	k.make_king()
+	var head: Node3D = k.rig.pv.head
+	var crown := head.get_node_or_null("Crown") as Node3D
+	check(crown != null and crown.position.y > 0.5 and crown.get_child_count() >= 2, "a King's crown sits on the helmet (%.2f m up)" % (crown.position.y if crown else 0.0))
+	# changing team: a new model in the new team's colour, still merged
+	k.set_team("green")
+	var tm := Color()
+	for m in k.rig.meshes:
+		if m.material_override is ShaderMaterial and m.get_instance_shader_parameter("team") != null:
+			var v: Vector4 = m.get_instance_shader_parameter("team")
+			tm = Color(v.x, v.y, v.z)
+	check(tm.is_equal_approx(B3Defs.team_col("green")), "a knight that changes team is drawn in the new colour")
+	# a tank blown up: its merged pieces fly apart scorched, the treads too
+	var tank: B3Unit = null
+	for u in b.units:
+		if u.kind == "tank":
+			tank = u
+	var n_chunks: int = b.chunks.size()
+	tank._wreck_visual(Vector3(0, 3, 0))
+	await sim(0.1)
+	var scorched := 0
+	for i in range(n_chunks, b.chunks.size()):
+		var rb: Node = b.chunks[i]
+		if not is_instance_valid(rb):
+			continue
+		for c in rb.find_children("*", "MeshInstance3D", true, false):
+			var m := (c as MeshInstance3D).material_override
+			if m == B3Mats.rig_mat("char", true) or m == B3Mats.rig_mat("char", false):
+				scorched += 1
+	check(scorched >= 6, "a wrecked tank's pieces fly off scorched (%d merged meshes)" % scorched)
 
 
 # ------------------------------------------------------------- screenshots

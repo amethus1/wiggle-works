@@ -76,8 +76,8 @@ func _gorilla_moves() -> bool:
 	var d := _flat(target.position - position).length()
 	if _pound_cd <= 0.0:
 		var near := 0
-		for u: B3Unit in battle.units:
-			if u != self and not u.down and is_enemy(u) and _flat(u.position - position).length() < 3.2 + u.radius:
+		for u: B3Unit in battle.units_near(position, 3.2, 1.0):
+			if u != self and not u.down and not u.dead and is_enemy(u) and _flat(u.position - position).length() < 3.2 + u.radius:
 				near += 1
 		if near >= 2 or (near >= 1 and rng.randf() < 0.3):
 			_start_act("pound", 0.95, B3Defs.weapon("gorilla_pound"))

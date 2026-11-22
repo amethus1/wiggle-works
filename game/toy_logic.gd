@@ -404,8 +404,8 @@ static func _drive(world: World, t: Toy, on: bool, dt: float) -> void:
 	if on:
 		world.cars_on += 1
 	var speed := 26.0 if t.id == "go_kart" else 15.0
-	for o in world.things.values():
-		if o is Toy and o.parent_uid == t.uid and o.id == "wheel":
+	for o in world.ride_parts(t.uid):
+		if o.id == "wheel":
 			var target := speed * t.facing if on else 0.0
 			var accel := 40.0 if on else 12.0
 			o.angular_velocity = move_toward(o.angular_velocity, target, accel * dt)

@@ -136,7 +136,7 @@ func _fighters() -> void:
 	for id in B3Defs.UNIT_ORDER.get("history", []):
 		var u: B3Unit = b.spawn_unit(String(id), "red", Vector3(x, b.world.height_at(x, 8.0), 8.0), "peaceful")
 		x += 2.5
-		if u == null or u.rig == null or u.rig.meshes.size() < 10:
+		if u == null or u.rig == null or u.rig.pieces < 10:
 			ok = false
 			print("    %s has no proper model" % id)
 	await sim(1.0)

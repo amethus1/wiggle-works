@@ -179,9 +179,7 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 			t = w.spawn_toy(id, e[2], e[3], float(e[4]), d)
 			if t == null:
 				continue
-			w.things.erase(t.uid)
-			t.uid = uid
-			w.things[uid] = t
+			w.renumber(t, uid)
 			t.global_position = e[2]
 			t.rotation = e[3]
 		t.set_meta("net_pos", e[2])
@@ -222,9 +220,7 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 			wg = w.spawn_wiggly(String(e[1]), c, float(e[2]))
 			if wg == null:
 				continue
-			w.things.erase(wg.uid)
-			wg.uid = uid
-			w.things[uid] = wg
+			w.renumber(wg, uid)
 			wg.pts = pts
 		wg.set_meta("net_pts", pts)
 		wg.paint = Color(String(e[3])) if String(e[3]) != "" else Color(0, 0, 0, 0)
@@ -249,9 +245,7 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 			f = w.spawn_fighter(String(e[1]), e[5], String(e[2]), "", 1.0, false)
 			if f == null:
 				continue
-			w.things.erase(f.uid)
-			f.uid = uid
-			w.things[uid] = f
+			w.renumber(f, uid)
 			f.net = {"c": e[5]}
 		f.team = String(e[2])
 		f.size = float(e[13])
@@ -309,7 +303,7 @@ static func apply_snapshot(game, s: Dictionary) -> void:
 ## Removes a puppet the host no longer has (node and all).
 static func _drop_puppet(w: World, uid: int) -> void:
 	var t = w.things.get(uid)
-	w.things.erase(uid)
+	w.forget(uid)
 	if t != null and is_instance_valid(t):
 		(t as Node).queue_free()
 

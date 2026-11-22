@@ -31,7 +31,11 @@ var electric := 0.0
 var wet := 0.0
 var nailed := false           # pinned in place with the Nail tool
 var facing := 1.0
-var parent_uid := 0           # multi-part rides: the main part
+var parent_uid := 0:          # multi-part rides: the main part
+	set(v):
+		parent_uid = v
+		if world is World:
+			world.parent_changes += 1   # (see World.ride_parts)
 var puppet := false           # network client copy: no physics, just drawn
 var extra := {}
 var _prev_contacts := {}

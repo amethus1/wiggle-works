@@ -163,12 +163,13 @@ func _physics_process(dt: float) -> void:
 		_trig_t -= dt
 		if _trig_t <= 0.0 and age > 1.0:
 			_trig_t = 0.1
-			for u: B3Unit in battle.units:
-				if u.down or u.flying:
+			var at := global_position
+			for u: B3Unit in battle.units_near(at, 1.1):
+				if u.down or u.dead or u.flying:
 					continue
-				var dx := u.position.x - global_position.x
-				var dz := u.position.z - global_position.z
-				if dx * dx + dz * dz < 1.2 and absf(u.position.y - global_position.y) < 1.2:
+				var dx := u.position.x - at.x
+				var dz := u.position.z - at.z
+				if dx * dx + dz * dz < 1.2 and absf(u.position.y - at.y) < 1.2:
 					trigger(0.25)
 					break
 	if absf(global_position.x) > B3Defs.BOUNDS + 10.0 or absf(global_position.z) > B3Defs.BOUNDS + 10.0 or global_position.y < -20.0:

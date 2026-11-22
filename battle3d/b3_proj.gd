@@ -13,6 +13,7 @@ var vel := Vector3.ZERO
 var g := 9.8
 var team := ""
 var shooter_rid := RID()
+var shooter_id := 0             # the shooter's instance id (B3Battle.unit_by_id: no search)
 var dmg := 20.0
 var radius := 3.0
 var power := 10.0
@@ -112,6 +113,7 @@ func set_shooter(u) -> void:
 	if u == null or not is_instance_valid(u):
 		return
 	shooter_rid = (u as RigidBody3D).get_rid()
+	shooter_id = u.get_instance_id()
 	team = String(u.team)
 
 
@@ -186,7 +188,7 @@ func _physics_process(dt: float) -> void:
 		"arrow":
 			var c = hit.collider
 			if c is B3Unit:
-				(c as B3Unit).hurt(dmg, (vel.normalized() + Vector3.UP * 0.2).normalized(), knock, battle.unit_by_rid(shooter_rid), "shot")
+				(c as B3Unit).hurt(dmg, (vel.normalized() + Vector3.UP * 0.2).normalized(), knock, battle.unit_by_id(shooter_id), "shot")
 				battle.snd("arrow_hit", p, 0.6)
 				queue_free()
 				return
@@ -236,7 +238,7 @@ func _boom(p: Vector3) -> void:
 ## even if the shooter was knocked out while this was flying) so that with
 ## friendly fire off the blast still spares that team.
 func _blast_opts() -> Dictionary:
-	var o := {"by": battle.unit_by_rid(shooter_rid)}
+	var o := {"by": battle.unit_by_id(shooter_id)}
 	if team != "":
 		o["team"] = team
 	return o
@@ -267,7 +269,7 @@ func _fire_burst(p: Vector3) -> void:
 ## Gorilla boulder: no fire, just a big THUD that bowls fighters over and
 ## shatters into rubble.
 func _crash(p: Vector3) -> void:
-	var by = battle.unit_by_rid(shooter_rid)
+	var by = battle.unit_by_id(shooter_id)
 	for u: B3Unit in battle.units.duplicate():
 		if u.dead or not is_instance_valid(u) or (team != "" and team != "wild" and u.team == team):
 			continue

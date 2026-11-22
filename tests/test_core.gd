@@ -273,8 +273,125 @@ func _ready() -> void:
 			bad += 1
 	check(bad == 0, "every toy, build, Wiggly special, magic spell and gravity runs (%d things left)" % w.things.size())
 
+	print("lists")
+	await _lists()
+
 	print("test_core: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+## World.fighters(), toys(), wigglies() and ride_parts() are kept between
+## calls: they must always match what's really in the world, however things
+## come and go (and a friend's copy of the world too).
+func _lists() -> void:
+	w.load_world("battle")
+	await frames(2)
+	check(_same_lists(w), "the lists match a freshly loaded world (%d fighters, %d toys)" % [w.fighters().size(), w.toys().size()])
+	w.apply_command(0, {"cmd": "spawn", "id": "f:knight", "x": -300, "y": 100, "team": "blue"})
+	w.apply_command(0, {"cmd": "spawn", "id": "bowling_ball", "x": -200, "y": 0})
+	w.apply_command(0, {"cmd": "spawn", "id": "w:zappy", "x": 0, "y": 0})
+	w.apply_command(0, {"cmd": "spawn", "id": "monster_truck", "x": 300, "y": 100})
+	w.apply_command(0, {"cmd": "spawn", "id": "water_tub", "x": 600, "y": 250})
+	w.apply_command(0, {"cmd": "spawn", "id": "build:ferris", "x": -600, "y": -100})
+	check(_same_lists(w), "and after spawning a fighter, toys, a Wiggly, a ride, a tub and a build")
+	var held: Array = w.fighters()
+	var n := held.size()
+	var extra_f := w.spawn_fighter("ninja", Vector2(100, 100), "red", "peaceful")
+	check(held.size() == n and w.fighters().size() == n + 1 and held.is_read_only(), "a list you're holding stays as it was (and can't be changed) while fighters come and go")
+	var truck: Toy = null
+	for t in w.toys():
+		if t.id == "monster_truck":
+			truck = t
+	check(truck != null and w.ride_parts(truck.uid).size() == 2, "the monster truck's two wheels are its parts")
+	truck.on = true
+	await frames(30)
+	w.apply_command(0, {"cmd": "erase", "uid": truck.uid})
+	w.apply_command(0, {"cmd": "erase", "uid": extra_f.uid})
+	w.apply_command(0, {"cmd": "erase", "uid": w.wigglies()[0].uid})
+	check(_same_lists(w), "and after erasing a ride (wheels and all), a fighter and a Wiggly")
+	w.apply_command(0, {"cmd": "clone", "uid": w.fighters()[0].uid})
+	w.apply_command(0, {"cmd": "resize", "uid": w.fighters()[1].uid, "s": 1.6})
+	var jelly := w.spawn_wiggly("bloop", Vector2(-100, 0), 1.4)
+	w.apply_command(0, {"cmd": "resize", "uid": jelly.uid, "s": 1.6})
+	w.split_wiggly(w.wigglies()[w.wigglies().size() - 1])
+	var halves := w.wigglies().filter(func(g): return g.kind == "bloop")
+	if halves.size() == 2:
+		w.merge_wigglies(halves[0], halves[1])
+	check(_same_lists(w), "and after cloning, resizing, splitting and merging")
+	w.push_undo()
+	w.spawn_toy("brick", Vector2(0, -100))
+	w.apply_command(0, {"cmd": "erase", "uid": w.fighters()[0].uid})
+	w.undo()
+	await frames(2)
+	check(_same_lists(w), "and after ↩️ undo")
+	# a save loaded into a world that has handed out fewer numbers: the new
+	# things get numbers that a saved one is about to take over
+	var saved := w.serialize()
+	var ts_saved: Array = saved.toys
+	ts_saved.reverse()   # newest first, so new numbers land on ones already taken
+	var low := 1 << 30
+	for e in ts_saved:
+		low = mini(low, int(e.uid))
+	w._clear_all()
+	w.next_uid = low - 1
+	w.restore(saved)
+	await frames(2)
+	check(_same_lists(w), "and after loading a save whose numbers clash with the new things' (%d things)" % w.things.size())
+	var lost := w.spawn_toy("marble", Vector2(0, -100))
+	lost.global_position = Vector2(0, w.bounds.end.y + 400.0)
+	await frames(2)
+	check(not w.toys().has(lost) and _same_lists(w), "and after a toy falls out of the world")
+	# a friend's copy of the world, kept up to date from the host's snapshots
+	var host := _Fake.new()
+	host.world = w
+	host.net = _FakeNet.new()
+	var friend := _Fake.new()
+	friend.world = World.new()
+	friend.world.puppet = true
+	add_child(friend.world)
+	friend.world.load_world(w.world_id, false)
+	NetCommon.apply_snapshot(friend, NetCommon.snapshot(host))
+	check(_same_lists(friend.world) and friend.world.fighters().size() == w.fighters().size() and friend.world.toys().size() == w.toys().size(), "a friend's copy has the same lists (%d fighters, %d toys)" % [friend.world.fighters().size(), friend.world.toys().size()])
+	w.apply_command(0, {"cmd": "erase", "uid": w.toys()[0].uid})
+	w.spawn_fighter("viking", Vector2(-50, 100), "green", "peaceful")
+	w.spawn_wiggly("puffy", Vector2(50, -50))
+	NetCommon.apply_snapshot(friend, NetCommon.snapshot(host))
+	check(_same_lists(friend.world) and friend.world.fighters().size() == w.fighters().size() and friend.world.wigglies().size() == w.wigglies().size(), "and still does after things come and go on the host")
+	friend.world.queue_free()
+	# a fighter taking over a toy's number (a save or a friend's copy with numbers
+	# that clash): the toy drops out of the toy list
+	var brick := w.spawn_toy("brick", Vector2(0, -100))
+	var taker := w.spawn_fighter("soldier", Vector2(100, 100), "red", "peaceful", 1.0, false)
+	w.toys()
+	w.fighters()
+	w.renumber(taker, brick.uid)
+	check(not w.toys().has(brick) and w.fighters().has(taker) and _same_lists(w), "and when a fighter takes over a toy's number")
+	w.apply_command(0, {"cmd": "clear"})
+	await frames(2)
+	check(_same_lists(w) and w.toys().is_empty() and w.fighters().is_empty(), "and after 🧹 Clear")
+
+
+class _Fake extends RefCounted:
+	var world: World
+	var cam = null
+	var hud = null
+	var net = null
+
+
+class _FakeNet extends RefCounted:
+	func players_snapshot() -> Array:
+		return []
+
+
+func _same_lists(wd: World) -> bool:
+	var fs := wd.fighter_layer.get_children().filter(func(f): return f is Fighter and wd.things.get(f.uid) == f)
+	var ts := wd.things.values().filter(func(t): return t is Toy)
+	var gs := wd.things.values().filter(func(t): return t is Wiggly)
+	var ok: bool = fs == wd.fighters() and ts == wd.toys() and gs == wd.wigglies() and wd.count_toys() == ts.size() and wd.count_wigglies() == gs.size()
+	for r in ts:
+		if wd.ride_parts(r.uid) != ts.filter(func(o): return o.parent_uid == r.uid):
+			ok = false
+	return ok
 
 
 ## How much water (and lava and acid) is showing, in square pixels.

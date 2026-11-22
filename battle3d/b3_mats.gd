@@ -10,13 +10,15 @@ static var flash_mat: StandardMaterial3D = null
 static var font: Font = null
 
 
-## Drops the shared resources (called when leaving 3D Battle).
+## Drops the shared resources (called when leaving 3D Battle), and the
+## models' merged meshes made from them (B3Rig).
 static func clear_cache() -> void:
 	_mats.clear()
 	_meshes.clear()
 	_ko.clear()
 	_shaders.clear()
 	flash_mat = null
+	B3Rig.clear_cache()
 
 
 static func mat(c: Color, rough := 0.75, metal := 0.0) -> StandardMaterial3D:
@@ -29,6 +31,34 @@ static func mat(c: Color, rough := 0.75, metal := 0.0) -> StandardMaterial3D:
 		m.metallic = metal
 		if metal > 0.0:
 			m.metallic_specular = 0.7
+		m.set_meta("plain", true)      # B3Rig can merge pieces painted with it
+		_mats[key] = m
+	return m
+
+
+## The material of B3Rig's merged pieces: each vertex carries its piece's
+## colour and, in UV, its roughness and metalness, so it looks just like
+## mat() does on the separate pieces. `look`: "" as built, "ko" greyed out
+## like ko() (knocked out), "char" scorched (a wrecked vehicle). `per_mesh`:
+## for meshes with pieces in the team or skin colour, which every mesh
+## gets as its own values ("team", "skin"), so fighters of every team and
+## skin share their merged meshes. Only those meshes use it: every mesh with
+## its own values takes room in a buffer the renderer has a limit for (see
+## project.godot, rendering/limits/global_shader_variables/buffer_size).
+static func rig_mat(look := "", per_mesh := false) -> ShaderMaterial:
+	var key := "rig_%s%s" % [look, "_pm" if per_mesh else ""]
+	var m: ShaderMaterial = _mats.get(key)
+	if m == null:
+		m = ShaderMaterial.new()
+		m.shader = shader("rig_pm" if per_mesh else "rig")
+		match look:
+			"ko":
+				m.set_shader_parameter("grey", 0.55)
+				m.set_shader_parameter("dark", 0.12)
+			"char":
+				m.set_shader_parameter("grey", 0.6)
+				m.set_shader_parameter("dark", 0.35)
+		m.set_meta("rig_pm", per_mesh)
 		_mats[key] = m
 	return m
 
@@ -91,7 +121,9 @@ static func ko(m: Material) -> Material:
 	var k: Material = _ko.get(id)
 	if k != null:
 		return k
-	if m is StandardMaterial3D and (m as StandardMaterial3D).shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL:
+	if m is ShaderMaterial and m.has_meta("rig_pm"):
+		k = rig_mat("ko", bool(m.get_meta("rig_pm")))
+	elif m is StandardMaterial3D and (m as StandardMaterial3D).shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL:
 		var src := m as StandardMaterial3D
 		var c := src.albedo_color
 		var g := c.get_luminance()
@@ -128,6 +160,7 @@ static func sphere(r: float, segs := 14) -> SphereMesh:
 		m.height = r * 2.0
 		m.radial_segments = segs
 		m.rings = maxi(4, segs / 2)
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -142,6 +175,7 @@ static func hemi(r: float) -> SphereMesh:
 		m.is_hemisphere = true
 		m.radial_segments = 16
 		m.rings = 6
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -156,6 +190,7 @@ static func capsule(r: float, h: float) -> CapsuleMesh:
 		m.height = h
 		m.radial_segments = 12
 		m.rings = 4
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -166,6 +201,7 @@ static func box(s: Vector3) -> BoxMesh:
 	if m == null:
 		m = BoxMesh.new()
 		m.size = s
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -180,6 +216,7 @@ static func cyl(top: float, bottom: float, h: float, segs := 14) -> CylinderMesh
 		m.height = h
 		m.radial_segments = segs
 		m.rings = 1
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -191,6 +228,7 @@ static func prism(s: Vector3, ltr := 0.5) -> PrismMesh:
 		m = PrismMesh.new()
 		m.size = s
 		m.left_to_right = ltr
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -204,6 +242,7 @@ static func torus(inner: float, outer: float) -> TorusMesh:
 		m.outer_radius = outer
 		m.rings = 24
 		m.ring_segments = 8
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -214,6 +253,7 @@ static func quad(s: Vector2) -> QuadMesh:
 	if m == null:
 		m = QuadMesh.new()
 		m.size = s
+		m.set_meta("k", key)
 		_meshes[key] = m
 	return m
 
@@ -251,6 +291,10 @@ static func shader(id: String) -> Shader:
 			s.code = RING_SHADER
 		"cloud":
 			s.code = CLOUD_SHADER
+		"rig":
+			s.code = RIG_SHADER
+		"rig_pm":
+			s.code = RIG_SHADER.replace("uniform float dark = 0.0;", "uniform float dark = 0.0;\ninstance uniform vec4 skin = vec4(1.0);\ninstance uniform vec4 team = vec4(1.0);").replace("vec3 c = COLOR.rgb;", "vec3 c = COLOR.a < 0.25 ? skin.rgb : (COLOR.a < 0.75 ? team.rgb * UV2.x + UV2.y : COLOR.rgb);")
 	_shaders[id] = s
 	return s
 
@@ -342,6 +386,26 @@ instance uniform vec4 tint : source_color = vec4(1.0, 0.9, 0.7, 1.0);
 void fragment() {
 	ALBEDO = tint.rgb * 3.0;
 	ALPHA = (1.0 - age) * tint.a;
+}
+"""
+
+## B3Rig's merged pieces (see rig_mat): the same lighting as mat()'s
+## StandardMaterial3D, with the colour (sRGB) from the vertex and the
+## roughness and metalness from UV. grey/dark: B3Mats.ko()'s greying. (The
+## "rig_pm" copy also has the per-mesh skin and team colours.)
+const RIG_SHADER := """
+shader_type spatial;
+render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+uniform float grey = 0.0;
+uniform float dark = 0.0;
+void fragment() {
+	vec3 c = COLOR.rgb;
+	float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+	c = mix(c, vec3(l), grey) * (1.0 - dark);
+	ALBEDO = mix(pow((c + vec3(0.055)) * (1.0 / 1.055), vec3(2.4)), c * (1.0 / 12.92), lessThan(c, vec3(0.04045)));
+	ROUGHNESS = UV.x;
+	METALLIC = UV.y;
+	SPECULAR = UV.y > 0.0 ? 0.7 : 0.5;
 }
 """
 

@@ -141,6 +141,20 @@ func _ready() -> void:
 	_make_pool("dust", 10)
 	_make_pool("steam", 8)
 	_make_pool("hit", 14)
+	_prewarm()
+
+
+## Shaders that would otherwise first turn up in the middle of a battle (the
+## nuke's cloud, lava and acid pools, the fighters' merged pieces) get an
+## unseen mesh each, so they're compiled now. On a computer that hasn't
+## compiled them before, the first nuke or pool froze the game for a moment.
+func _prewarm() -> void:
+	for m: Material in [B3Mats.shader_mat("cloud"), B3Hazard.pool_mat(false), B3Mats.rig_mat(), B3Mats.rig_mat("", true)]:
+		var w := MeshInstance3D.new()
+		w.mesh = B3Mats.sphere(1.0, 14)
+		w.material_override = m
+		w.visible = false
+		add_child(w)
 
 
 # --------------------------------------------------------------- particles

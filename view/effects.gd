@@ -5,12 +5,37 @@ extends CanvasLayer
 ## camera, so fireworks and sparks stay bright at night.
 
 const MAX_P := 2600
+# Particle kinds (what _draw_part draws).
+const KINDS := {"soft": 0, "dot": 1, "spark": 2, "streak": 3, "confetti": 4, "shard": 5, "star": 6, "bubble": 7,
+	"note": 8, "heart": 9, "line": 10, "plus": 11, "plane": 12, "bolt": 13}
+const _BUF := MAX_P * 2
 
 var world: Node = null
 var view_rect := Rect2(-800, -500, 1600, 1000)
 var shake := 0.0
 var flash := Color(1, 1, 1, 0)
-var parts: Array = []        # dictionaries
+# The particles, oldest first, one array per property (no dictionary per
+# particle). They live in slots _head.._tail-1; a particle that dies leaves a
+# hole (_dead) until the slots are packed together again, and when there are
+# MAX_P the oldest makes room for the next.
+var _n := 0
+var _head := 0
+var _tail := 0
+var _dead := PackedByteArray()
+var _pp := PackedVector2Array()     # position
+var _pv := PackedVector2Array()     # velocity
+var _life := PackedFloat64Array()
+var _max := PackedFloat64Array()
+var _pr := PackedFloat64Array()     # size
+var _col := PackedColorArray()
+var _kind := PackedInt32Array()     # KINDS (-1: not drawn)
+var _grav := PackedFloat64Array()
+var _glows := PackedByteArray()
+var _drag := PackedFloat64Array()
+var _rot := PackedFloat64Array()
+var _spin := PackedFloat64Array()
+var _to := PackedVector2Array()     # the far end of a tracer or bolt
+var _has_to := PackedByteArray()
 var rings: Array = []
 var pops: Array = []         # comic text
 var weather := {}            # rain / snow / wind seconds left
@@ -19,6 +44,25 @@ var _glow: Node2D
 var _norm: Node2D
 var _flash_rect: ColorRect
 var _lights: Array = []
+
+
+func _init() -> void:
+	# (packed arrays are values: resize each one itself, not a copy in a loop)
+	_dead.resize(_BUF)
+	_pp.resize(_BUF)
+	_pv.resize(_BUF)
+	_life.resize(_BUF)
+	_max.resize(_BUF)
+	_pr.resize(_BUF)
+	_col.resize(_BUF)
+	_kind.resize(_BUF)
+	_grav.resize(_BUF)
+	_glows.resize(_BUF)
+	_drag.resize(_BUF)
+	_rot.resize(_BUF)
+	_spin.resize(_BUF)
+	_to.resize(_BUF)
+	_has_to.resize(_BUF)
 
 
 func _ready() -> void:
@@ -44,7 +88,9 @@ func _ready() -> void:
 
 
 func clear() -> void:
-	parts.clear()
+	_n = 0
+	_head = 0
+	_tail = 0
 	rings.clear()
 	pops.clear()
 	weather.clear()
@@ -53,9 +99,68 @@ func clear() -> void:
 
 # ---------------------------------------------------------------- spawning
 func _p(pos: Vector2, vel: Vector2, life: float, r: float, col: Color, kind := "soft", g := 0.0, glow := false, drag := 1.2) -> void:
-	if parts.size() >= MAX_P:
-		parts.pop_front()
-	parts.append({"p": pos, "v": vel, "life": life, "max": life, "r": r, "col": col, "k": kind, "g": g, "glow": glow, "drag": drag, "rot": randf() * TAU, "spin": randf_range(-8, 8)})
+	if _n >= MAX_P:
+		# full: the oldest one goes
+		while _dead[_head] != 0:
+			_head += 1
+		_head += 1
+		_n -= 1
+	if _tail >= _BUF:
+		_pack()
+	var i := _tail
+	_tail += 1
+	_n += 1
+	_dead[i] = 0
+	_pp[i] = pos
+	_pv[i] = vel
+	_life[i] = life
+	_max[i] = life
+	_pr[i] = r
+	_col[i] = col
+	_kind[i] = int(KINDS.get(kind, -1))
+	_grav[i] = g
+	_glows[i] = 1 if glow else 0
+	_drag[i] = drag
+	_rot[i] = randf() * TAU
+	_spin[i] = randf_range(-8, 8)
+	_has_to[i] = 0
+
+
+## The newest particle (a tracer or a bolt) reaches over to `to`.
+func _last_to(to: Vector2) -> void:
+	_to[_tail - 1] = to
+	_has_to[_tail - 1] = 1
+
+
+func particle_count() -> int:
+	return _n
+
+
+## Closes up the holes left by particles that died (keeping their order).
+func _pack() -> void:
+	var w := 0
+	for i in range(_head, _tail):
+		if _dead[i] != 0:
+			continue
+		if i != w:
+			_dead[w] = 0
+			_pp[w] = _pp[i]
+			_pv[w] = _pv[i]
+			_life[w] = _life[i]
+			_max[w] = _max[i]
+			_pr[w] = _pr[i]
+			_col[w] = _col[i]
+			_kind[w] = _kind[i]
+			_grav[w] = _grav[i]
+			_glows[w] = _glows[i]
+			_drag[w] = _drag[i]
+			_rot[w] = _rot[i]
+			_spin[w] = _spin[i]
+			_to[w] = _to[i]
+			_has_to[w] = _has_to[i]
+		w += 1
+	_head = 0
+	_tail = w
 
 
 func burst(pos: Vector2, n: int, speed: Vector2, life: Vector2, r: Vector2, col: Color, kind := "soft", g := 0.0, glow := false, vary := 0.0) -> void:
@@ -329,7 +434,7 @@ func handle(name: String, a: Dictionary) -> void:
 			var tb: Vector2 = a.get("b", p)
 			var lz: bool = a.get("laser", false)
 			_p(ta, Vector2.ZERO, 0.12 if lz else 0.07, 3.0 if lz else 2.0, Color(1.6, 0.8, 2.8) if lz else Color(2.6, 2.3, 1.2), "line", 0.0, true)
-			parts[parts.size() - 1]["to"] = tb
+			_last_to(tb)
 		"shot":
 			var ang := float(a.get("a", 0.0))
 			cone(p, Vector2.from_angle(ang), 0.35, 4, Vector2(80, 220), Vector2(0.05, 0.1), Vector2(4, 8), Color(2.6, 2.0, 0.8), "soft", 0.0, true)
@@ -492,7 +597,7 @@ func _special(k: String, p: Vector2, r: float) -> void:
 
 func _bolt(a: Vector2, b: Vector2) -> void:
 	_p(a, Vector2.ZERO, 0.25, 2.5, Color(1.6, 2.0, 2.6), "bolt", 0.0, true)
-	parts[parts.size() - 1]["to"] = b
+	_last_to(b)
 
 
 func _explode(p: Vector2, r: float, mega: bool) -> void:
@@ -553,17 +658,23 @@ func _process(dt: float) -> void:
 			weather.erase(k)
 	_weather(dt)
 	_trails(dt)
-	var alive: Array = []
-	for q in parts:
-		q.life -= dt
-		if q.life <= 0.0:
+	for i in range(_head, _tail):
+		if _dead[i] != 0:
 			continue
-		q.v.y += 980.0 * q.g * dt
-		q.v *= maxf(0.0, 1.0 - q.drag * dt)
-		q.p += q.v * dt
-		q.rot += q.spin * dt
-		alive.append(q)
-	parts = alive
+		var life := _life[i] - dt
+		if life <= 0.0:
+			_dead[i] = 1
+			_n -= 1
+			continue
+		_life[i] = life
+		var v := _pv[i]
+		v.y += 980.0 * _grav[i] * dt
+		v *= maxf(0.0, 1.0 - _drag[i] * dt)
+		_pv[i] = v
+		_pp[i] += v * dt
+		_rot[i] += _spin[i] * dt
+	if _tail - _head > _n * 2 + 64:
+		_pack()   # mostly holes: close them up
 	rings = rings.filter(func(r):
 		r.life -= dt
 		return r.life > 0.0)
@@ -617,10 +728,9 @@ func _trails(dt: float) -> void:
 
 # ---------------------------------------------------------------- drawing
 func _draw_norm() -> void:
-	for q in parts:
-		if q.glow:
-			continue
-		_draw_part(_norm, q)
+	for i in range(_head, _tail):
+		if _dead[i] == 0 and _glows[i] == 0:
+			_draw_part(_norm, i)
 	for r in rings:
 		var k: float = 1.0 - r.life / r.max
 		var rad: float = r.r * (1.0 - pow(1.0 - k, 3.0))
@@ -640,71 +750,74 @@ func _draw_norm() -> void:
 
 
 func _draw_glow() -> void:
-	for q in parts:
-		if q.glow:
-			_draw_part(_glow, q)
+	for i in range(_head, _tail):
+		if _dead[i] == 0 and _glows[i] != 0:
+			_draw_part(_glow, i)
 
 
-func _draw_part(ci: CanvasItem, q: Dictionary) -> void:
-	var k: float = q.life / q.max
-	var c: Color = q.col
+func _draw_part(ci: CanvasItem, i: int) -> void:
+	var k: float = _life[i] / _max[i]
+	var c: Color = _col[i]
 	var col := Color(c.r, c.g, c.b, c.a * minf(1.0, k * 2.0))
-	var p: Vector2 = q.p
-	var r: float = q.r
-	match String(q.k):
-		"soft":
+	var p: Vector2 = _pp[i]
+	var r: float = _pr[i]
+	var kind := _kind[i]
+	match kind:
+		0:   # soft
 			var rr := r * (1.4 - k * 0.4)
 			ci.draw_texture_rect(Art.dot_texture(), Rect2(p - Vector2(rr, rr), Vector2(rr, rr) * 2.0), false, col)
-		"dot":
+		1:   # dot
 			ci.draw_circle(p, r * (0.5 + 0.5 * k), col, true, -1.0, true)
-		"spark":
-			ci.draw_line(p, p - q.v * 0.03, col, r * 0.8, true)
-		"streak":
-			ci.draw_line(p, p - q.v.normalized() * r * 2.0, col, 2.0, true)
-		"confetti", "shard":
-			ci.draw_set_transform(p, q.rot, Vector2(1.0, absf(sin(q.rot * 2.0)) * 0.8 + 0.2) if q.k == "confetti" else Vector2.ONE)
-			if q.k == "shard":
+		2:   # spark
+			ci.draw_line(p, p - _pv[i] * 0.03, col, r * 0.8, true)
+		3:   # streak
+			ci.draw_line(p, p - _pv[i].normalized() * r * 2.0, col, 2.0, true)
+		4, 5:   # confetti, shard
+			var rot: float = _rot[i]
+			ci.draw_set_transform(p, rot, Vector2(1.0, absf(sin(rot * 2.0)) * 0.8 + 0.2) if kind == 4 else Vector2.ONE)
+			if kind == 5:
 				ci.draw_colored_polygon(PackedVector2Array([Vector2(-r, -r * 0.4), Vector2(r * 0.8, -r * 0.6), Vector2(r * 0.2, r)]), col)
 			else:
 				ci.draw_rect(Rect2(-r, -r * 0.55, r * 2.0, r * 1.1), col)
 			ci.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-		"star":
-			Art._star(ci, p, r * (0.6 + 0.6 * k), col, q.rot)
-		"bubble":
+		6:   # star
+			Art._star(ci, p, r * (0.6 + 0.6 * k), col, _rot[i])
+		7:   # bubble
 			ci.draw_circle(p, r, Color(0.8, 0.95, 1.0, 0.12 * k), true, -1.0, true)
 			ci.draw_arc(p, r, 0, TAU, 20, col, 1.5, true)
 			ci.draw_circle(p + Vector2(-r * 0.35, -r * 0.35), r * 0.2, Color(1, 1, 1, 0.8 * k), true, -1.0, true)
-		"note":
+		8:   # note
 			ci.draw_circle(p, r * 0.45, col, true, -1.0, true)
 			ci.draw_line(p + Vector2(r * 0.4, 0), p + Vector2(r * 0.4, -r * 1.4), col, 2.5, true)
 			ci.draw_line(p + Vector2(r * 0.4, -r * 1.4), p + Vector2(r * 0.9, -r * 1.0), col, 2.5, true)
-		"heart":
+		9:   # heart
 			var hp := PackedVector2Array()
-			for i in 24:
-				var tt := TAU * i / 24.0
+			for j in 24:
+				var tt := TAU * j / 24.0
 				hp.append(p + Vector2(16.0 * pow(sin(tt), 3.0), -(13.0 * cos(tt) - 5.0 * cos(2.0 * tt) - 2.0 * cos(3.0 * tt) - cos(4.0 * tt))) * r / 16.0)
 			ci.draw_colored_polygon(hp, col)
-		"line":
-			var to2: Vector2 = q.get("to", p)
+		10:   # line
+			var to2: Vector2 = _to[i] if _has_to[i] != 0 else p
 			ci.draw_line(p, to2, col, r, true)
-		"plus":
+		11:   # plus
 			ci.draw_rect(Rect2(p - Vector2(r * 0.25, r), Vector2(r * 0.5, r * 2.0)), col)
 			ci.draw_rect(Rect2(p - Vector2(r, r * 0.25), Vector2(r * 2.0, r * 0.5)), col)
-		"plane":
-			var fl := signf(q.v.x) if q.v.x != 0.0 else 1.0
+		12:   # plane
+			var vx: float = _pv[i].x
+			var fl := signf(vx) if vx != 0.0 else 1.0
 			ci.draw_set_transform(p, 0.0, Vector2(fl, 1.0))
 			ci.draw_colored_polygon(Art.rr(Rect2(-60, -10, 120, 20), 10.0), Color("7f8c8d"))
 			ci.draw_colored_polygon(PackedVector2Array([Vector2(-10, 0), Vector2(20, 0), Vector2(-20, 34)]), Color("636e72"))
 			ci.draw_colored_polygon(PackedVector2Array([Vector2(-60, -8), Vector2(-44, -8), Vector2(-58, -30)]), Color("636e72"))
 			ci.draw_circle(Vector2(40, -3), 6.0, Color("a5f3ff"))
 			ci.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-		"bolt":
-			var to: Vector2 = q.get("to", p)
+		13:   # bolt
+			var to: Vector2 = _to[i] if _has_to[i] != 0 else p
 			var pts := PackedVector2Array([p])
 			var d := to - p
 			var n := d.normalized().orthogonal()
-			for i in range(1, 7):
-				pts.append(p + d * (i / 7.0) + n * randf_range(-14, 14))
+			for j in range(1, 7):
+				pts.append(p + d * (j / 7.0) + n * randf_range(-14, 14))
 			pts.append(to)
 			ci.draw_polyline(pts, col, 3.0, true)
 			ci.draw_polyline(pts, Color(2.5, 2.5, 2.5, col.a), 1.2, true)

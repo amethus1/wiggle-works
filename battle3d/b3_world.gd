@@ -34,6 +34,13 @@ const SHAPES := {
 	"deadtree": [0.25, 2.6], "palm": [0.28, 4.2], "olive": [0.3, 2.0], "rock": [0.85, 0.0],
 }
 const NO_SHADOW := ["tuft", "pebble", "wheat", "corn", "cabbage"]
+## First person: how far each kind of ground detail shows (metres; it fades
+## out over the last DETAIL_FADE). For that it's cut into DETAIL_CELL-sized
+## pieces (the overhead view looks at it all from far above and keeps the
+## big chunks).
+const DETAIL_FAR := {"tuft": 75.0, "pebble": 75.0, "cabbage": 95.0, "wheat": 125.0, "corn": 155.0}
+const DETAIL_FADE := 20.0
+const DETAIL_CELL := 48.0
 ## Per map: fog distance (first person, by day), height of the far
 ## mountains, snow line, and the ring's mid / rock colours.
 const CFG := {
@@ -87,6 +94,10 @@ var _glass_mi: MeshInstance3D = null
 var _water_mat: ShaderMaterial
 var _ice_mat: StandardMaterial3D
 var _nodes: Array[Node] = []     # everything made for the current map
+var _detail: Array[MultiMeshInstance3D] = []     # ground detail chunks (tufts, crops...)
+var _detail_fp: Array[MultiMeshInstance3D] = []  # first person: the same in finer pieces that fade out
+var _detail_inst := {}           # kind -> its [transform, colour, ...] (for _detail_fp)
+var _detail_mm: Array[MultiMesh] = []    # _detail_fp's MultiMeshes, kept for the next time
 # only used while building a map
 var _d: Dictionary = {}
 var _cols := PackedColorArray()
@@ -359,6 +370,68 @@ func _process(_dt: float) -> void:
 		_view = v
 		_apply_fog()
 		_apply_shadows()
+		_apply_detail()
+
+
+## Overhead: the ground detail in its big chunks. First person: in finer
+## pieces, each fading out past DETAIL_FAR (far-off tufts and crops are a
+## pixel or two, and there are thousands of them).
+func _apply_detail() -> void:
+	var fp := _view == 1
+	if fp and _detail_fp.is_empty():
+		if _detail_mm.is_empty():
+			_detail_mm = _detail_cells()
+		for mm in _detail_mm:
+			var kind := String(mm.get_meta("kind"))
+			var far: float = DETAIL_FAR.get(kind, 100.0)
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = mm
+			mmi.material_override = B3Mats.vcol()
+			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mmi.visibility_range_end = far
+			mmi.visibility_range_end_margin = DETAIL_FADE
+			mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+			scenery.add_child(mmi)
+			_detail_fp.append(mmi)
+	elif not fp:
+		for m in _detail_fp:
+			if is_instance_valid(m):
+				m.queue_free()
+		_detail_fp.clear()
+	for m in _detail:
+		if is_instance_valid(m):
+			m.visible = not fp
+
+
+## The ground detail cut into DETAIL_CELL squares (one MultiMesh per kind
+## and square, with meta "kind").
+func _detail_cells() -> Array[MultiMesh]:
+	var out: Array[MultiMesh] = []
+	var n := ceili(2.0 * HALF / DETAIL_CELL)
+	for kv in _detail_inst:
+		var kind := String(kv)
+		var cells := {}
+		for ev in (_detail_inst[kv] as Array):
+			var e: Array = ev
+			var o: Transform3D = e[0]
+			var ci := Vector2i(clampi(int((o.origin.x + HALF) / DETAIL_CELL), 0, n - 1), clampi(int((o.origin.z + HALF) / DETAIL_CELL), 0, n - 1))
+			if not cells.has(ci):
+				cells[ci] = []
+			(cells[ci] as Array).append(e)
+		for ci in cells:
+			var grp: Array = cells[ci]
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.use_colors = true
+			mm.mesh = kind_mesh(kind)
+			mm.instance_count = grp.size()
+			for j in grp.size():
+				var e2: Array = grp[j]
+				mm.set_instance_transform(j, e2[0])
+				mm.set_instance_color(j, e2[1])
+			mm.set_meta("kind", kind)
+			out.append(mm)
+	return out
 
 
 # ------------------------------------------------------------------ queries
@@ -595,6 +668,10 @@ func _instantiate(dat: Dictionary) -> void:
 	_bodies.clear()
 	_by_sid.clear()
 	_glass_mi = null
+	_detail.clear()
+	_detail_fp.clear()
+	_detail_inst = {}
+	_detail_mm.clear()
 	heights = dat.heights
 	builtin_pools = (dat.pools as Array).duplicate(true)
 	waters = dat.waters
@@ -678,6 +755,8 @@ func _instantiate(dat: Dictionary) -> void:
 	if map_id == "volcano":
 		_far_volcano()
 	_make_instances(dat.inst)
+	if _view == 1:
+		_apply_detail()
 
 
 func _keep(n: Node) -> void:
@@ -699,6 +778,8 @@ func _make_instances(inst: Dictionary) -> void:
 			(groups[_chunk_of(o.origin)] as Array).append(e)
 		var km := kind_mesh(kind)
 		var shadow := not NO_SHADOW.has(kind)
+		if not shadow:
+			_detail_inst[kind] = all
 		for gv in groups:
 			var grp: Array = gv
 			if grp.is_empty():
@@ -717,6 +798,7 @@ func _make_instances(inst: Dictionary) -> void:
 			mmi.material_override = mat
 			if not shadow:
 				mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				_detail.append(mmi)
 			scenery.add_child(mmi)
 			for j in grp.size():
 				var e3: Array = grp[j]

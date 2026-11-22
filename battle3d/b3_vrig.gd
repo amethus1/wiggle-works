@@ -26,7 +26,7 @@ var mg_muzzle: Node3D = null
 var eye: Node3D = null              # first-person camera seat
 var wheels: Array[Node3D] = []
 var steer: Array[Node3D] = []
-var cleats: Array = []          # [node, base_z, dir] tank tread cleats
+var cleats: Array = []          # [node, dir]: a tank tread's row of cleats (top 1, bottom -1), moved as one
 var shapes: Array = []          # [{shape, xf}]
 var wreck: Array = []           # [{node, size, offset, mass, up, main}]
 var crew: Array[Node3D] = []
@@ -69,6 +69,7 @@ func build(unit_kind: String, team_id: String, _rng: RandomNumberGenerator) -> v
 			_build_plane()
 		_:
 			_build_nest()
+	_merge()
 	for k in pv:
 		var p: Node3D = pv[k]
 		_base_y[k] = p.position
@@ -196,12 +197,15 @@ func _build_tank() -> void:
 			_m(tr, B3Mats.cyl(0.2, 0.2, 0.64, 10), _c(Color("55585e"), 0.5), Vector3(0, 0.42, z), Vector3(0, 0, 90), Vector3.ONE, false)
 		for i in 5:
 			_wheel(tr, Vector3(0.31 * sx, 0.38, lerpf(-1.25, 1.25, i / 4.0)), 0.25, 0.06, Color("70747a"))
+		# the cleats along the top and the bottom of the tread each move as one row
+		var top_row := _node("CleatsTop", tr, Vector3.ZERO)
+		var bot_row := _node("CleatsBottom", tr, Vector3.ZERO)
 		for i in 9:
 			var z := -1.6 + i * 0.4
-			var top_c := _m(tr, B3Mats.box(Vector3(0.62, 0.06, 0.14)), _c(Color("26272b"), 0.9), Vector3(0, 0.75, z), Vector3.ZERO, Vector3.ONE, false)
-			cleats.append([top_c, z, 1.0])
-			var bot_c := _m(tr, B3Mats.box(Vector3(0.62, 0.06, 0.14)), _c(Color("26272b"), 0.9), Vector3(0, 0.1, z), Vector3.ZERO, Vector3.ONE, false)
-			cleats.append([bot_c, z, -1.0])
+			_m(top_row, B3Mats.box(Vector3(0.62, 0.06, 0.14)), _c(Color("26272b"), 0.9), Vector3(0, 0.75, z), Vector3.ZERO, Vector3.ONE, false)
+			_m(bot_row, B3Mats.box(Vector3(0.62, 0.06, 0.14)), _c(Color("26272b"), 0.9), Vector3(0, 0.1, z), Vector3.ZERO, Vector3.ONE, false)
+		cleats.append([top_row, 1.0])
+		cleats.append([bot_row, -1.0])
 		_k(_m(tr, B3Mats.box(Vector3(0.72, 0.07, 3.85)), _c(dark), Vector3(0, 0.79, 0)))
 		_piece(tr, Vector3(0.6, 0.75, 3.9), Vector3(0, 0.42, 0), 18.0, 5.0)
 	# hull: body, sloped front plate, engine deck, headlights, exhausts
@@ -643,12 +647,12 @@ func animate(dt: float, spd: float, act: String, k: float, aiming: bool, mood: S
 	for w in wheels:
 		w.rotation.x = _roll
 	if not cleats.is_empty():
+		# each cleat used to wrap round the tread by itself; spaced 0.4 m apart,
+		# a whole row shifted by less than 0.4 m lands in the same places
 		var off := fposmod(_roll * wheel_r * 0.5, 0.4)
 		for c in cleats:
 			var n: Node3D = c[0]
-			var bz: float = c[1]
-			var dir: float = c[2]
-			n.position.z = -1.6 + fposmod(bz + 1.6 + off * dir, 3.6)
+			n.position.z = off if float(c[1]) > 0.0 else fposmod(-off, 0.4)
 	if gun:
 		var gb: Vector3 = _base_y.get("gun", gun.position)
 		gun.position = gb - Vector3(0, 0, recoil * (0.35 if style == "tank" or style == "cannon" else 0.08))
@@ -741,7 +745,9 @@ func _char(n: Node) -> void:
 			var mi := c as MeshInstance3D
 			mi.material_overlay = null
 			var m := mi.material_override
-			if m is StandardMaterial3D and (m as StandardMaterial3D).shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL:
+			if m is ShaderMaterial and m.has_meta("rig_pm"):
+				mi.material_override = B3Mats.rig_mat("char", bool(m.get_meta("rig_pm")))      # merged pieces scorch the same way
+			elif m is StandardMaterial3D and (m as StandardMaterial3D).shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL:
 				var sm := m as StandardMaterial3D
 				var g := sm.albedo_color.get_luminance()
 				mi.material_override = B3Mats.mat(sm.albedo_color.lerp(Color(g, g, g), 0.6).darkened(0.35), sm.roughness, sm.metallic)
