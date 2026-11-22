@@ -25,6 +25,8 @@ var stickers := {}            # id -> true
 var counters := {}            # booms, paints, jumps, specials (dict), worlds (dict)
 var b3_rules := {}            # 3D Battle rules (see B3Rules)
 var b3_mouse_k := 1.0         # first-person mouse speed
+var b3_puzzles := {}          # 🧩 Army Puzzles: stage id -> best stars (1-3); a win opens the next one
+var b3_hist_stars := {}       # 📜 History battles: id -> {"finish": true, "change": true, "hero": true}
 var auto_update := true       # 🔄 look for a new version on GitHub when the game starts
 var testing := false          # tests and screenshots never write the save file
 var file := PATH              # where it's saved (tests point this somewhere else)
@@ -67,6 +69,8 @@ func load_settings() -> void:
 	last_join = String(c.get_value("net", "last_join", ""))
 	b3_rules = c.get_value("battle3d", "rules", {})
 	b3_mouse_k = float(c.get_value("battle3d", "mouse", 1.0))
+	b3_puzzles = _dict(c.get_value("battle3d", "puzzles", {}))
+	b3_hist_stars = _dict(c.get_value("battle3d", "hist_stars", {}))
 	auto_update = bool(c.get_value("update", "auto", true))
 
 
@@ -87,6 +91,8 @@ func save() -> void:
 	c.set_value("net", "last_join", last_join)
 	c.set_value("battle3d", "rules", b3_rules)
 	c.set_value("battle3d", "mouse", b3_mouse_k)
+	c.set_value("battle3d", "puzzles", b3_puzzles)
+	c.set_value("battle3d", "hist_stars", b3_hist_stars)
 	c.set_value("update", "auto", auto_update)
 	c.save(file)
 
@@ -111,6 +117,33 @@ func _exit_tree() -> void:
 	# quitting before save_soon() got to it: keep the progress
 	if _unsaved:
 		save()
+
+
+static func _dict(v: Variant) -> Dictionary:
+	return v if v is Dictionary else {}
+
+
+## 🧩 An Army Puzzle was won with `n` stars: keeps the best. True if it's
+## better than before (saved straight away).
+func puzzle_won(id: String, n: int) -> bool:
+	var best := int(b3_puzzles.get(id, 0))
+	if n <= best:
+		return false
+	b3_puzzles[id] = clampi(n, 1, 3)
+	save()
+	return true
+
+
+## 📜 Earns one of a History battle's three stars ("finish", "change" or
+## "hero"). True the first time (saved straight away).
+func history_star(id: String, which: String) -> bool:
+	var got := _dict(b3_hist_stars.get(id, {}))
+	if got.has(which):
+		return false
+	got[which] = true
+	b3_hist_stars[id] = got
+	save()
+	return true
 
 
 func add_recent(id: String) -> void:

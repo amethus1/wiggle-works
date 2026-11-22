@@ -40,6 +40,20 @@ var structs: Array[B3Struct] = []
 var hazards: Array[B3Hazard] = []
 var planes: Array = []
 var fighting := false
+
+## 🪙 Budget battles (🧩 Puzzles, 🌊 Wave Defense): points to spend on what you
+## place. budget -1 means everything is free (the normal sandbox). Things you
+## buy carry their price as meta "cost" and give it back if you erase them
+## before the fight starts. build_zone limits where you may place things (an
+## x/z rectangle; no size means anywhere) and build_team, if set, is the team
+## everything you place joins.
+signal budget_changed
+signal battle_ended(winner: String)      # a team, "wild:kind" or "nobody"
+var budget := -1
+var spent := 0
+var build_zone := Rect2()
+var build_team := ""
+var _spent_at_fight := 0
 var paused := false
 var slowmo := false
 var time := 0.0
@@ -73,6 +87,21 @@ var team_kos := {}               # team -> knock-outs it scored
 var net: B3Net = null             # 👥 playing together (see B3Net)
 var puppet := false               # a friend's copy of someone else's battle: no physics or brains here
 var start_layout: Dictionary = {}  # everything as it was when Fight! was pressed (⏮ Reset puts it back)
+var history_id := ""              # the 📜 History battle on the field (the 📜 History Buff sticker)
+var ready_id := ""                # the 🎯 Ready-made battle on the field (B3Scenarios.on_fight at Fight!)
+var puzzle: B3Puzzles = null      # the 🧩 Army Puzzle on the field (B3Puzzles), if one is
+var zone_vis: Node3D = null       # the glowing build zone of a budget battle (B3Puzzles.zone_visual)
+var modes: B3Modes = null         # 🏁 the battle goal (👑 King, 🚩 Hill) and 🌊 Wave Defense (B3Modes)
+# 🏆 the scoreboard (see scoreboard()), counted from when Fight! is pressed
+var fight_t0 := 0.0               # battle time then
+var fight_end_t := 0.0            # ...and when it was won
+var fight_kos0 := 0               # `kos` then
+var fight_teams := {}             # team -> how many fighters it brought
+var fighter_log := {}             # uid -> {team, kind, kills, at}: everyone who knocked someone out
+var _respawning := false
+const DRAW_TXT := "💥  Nobody wins! It's a draw!"
+## Booms from the Toy Box that go off by themselves (the 🎆 Boom Boom Boom sticker counts them).
+const SELF_BOOMS := ["grenade", "dynamite", "cluster", "napalm", "acidbomb", "airstrike", "artillery", "nuke"]
 
 
 func begin(opts: Dictionary) -> void:
@@ -105,6 +134,9 @@ func begin(opts: Dictionary) -> void:
 	cam = B3Cam.new()
 	cam.battle = self
 	add_child(cam)
+	modes = B3Modes.new()
+	modes.battle = self
+	add_child(modes)
 	_sphere.radius = 1.0
 	_shape_q.shape = _sphere
 	_shape_q.collide_with_bodies = true
@@ -116,6 +148,7 @@ func begin(opts: Dictionary) -> void:
 		ui = load("res://battle3d/b3_ui.gd").new()
 		ui.battle = self
 		add_child(ui)
+		Settings.sticker_earned.connect(_on_sticker)
 	scenario = String(opts.get("scenario", ""))
 	var map_s := String(opts.get("map", ""))
 	if map_s == "":
@@ -162,12 +195,32 @@ func begin(opts: Dictionary) -> void:
 			"help":
 				ui.toggle_help()
 			"history":
-				ui._show_history()
+				ui._show_history("history")
+			"ready":
+				ui._show_history("ready")
+			var o:
+				B3Puzzles.open_arg(self, String(o))     # puzzles, puzzle:ID, puzzle:ID:win (🧩)
 
 
 ## Sets up one of the 📜 History battles (B3History).
 func run_history(id: String) -> void:
 	B3History.run(self, id)
+	var hid := id.trim_suffix("!")
+	history_id = hid if not B3History.info(hid).is_empty() else ""
+
+
+## Sets up one of the 🎯 Ready-made battles (B3Scenarios.MENU), ready for
+## ▶ Fight!. Only the host can (like History).
+func run_ready(id: String) -> bool:
+	if puppet:
+		return false
+	return B3Scenarios.setup(self, id)
+
+
+## 📒 A sticker was just earned: show it.
+func _on_sticker(id: String) -> void:
+	if ui:
+		ui.sticker_pop(id)
 
 
 # ------------------------------------------------------------ 👥 together
@@ -261,6 +314,8 @@ func _client_cmd(c: Dictionary) -> bool:
 
 
 func _exit_tree() -> void:
+	if Settings.sticker_earned.is_connected(_on_sticker):
+		Settings.sticker_earned.disconnect(_on_sticker)
 	B3Player.stop()
 	B3Player.me.fp = false
 	if DisplayServer.get_name() != "headless":
@@ -319,13 +374,26 @@ func set_fighting(on: bool) -> void:
 		return
 	fighting = on
 	if on:
+		_spent_at_fight = spent
 		if not units.is_empty():
 			start_layout = B3Saves.snapshot(self)
 		snd("battle_start", null, 1.0)
 		winner = ""
 		teams_seen = _team_keys().size()
+		# a fresh 🏆 scoreboard
+		fight_t0 = time
+		fight_end_t = time
+		fight_kos0 = kos
+		fight_teams = team_counts()
+		fighter_log = {}
+		team_kos = {}
+		mvp = {}
+		if ready_id != "":
+			B3Scenarios.on_fight(self, ready_id)
 		if ui:
 			ui.toast("⚔️  FIGHT!")
+	if modes:
+		modes.on_fighting(on)      # 🏁 crowns the Kings, puts out the hill, sends wave 1 (or back to the start)
 	if ui:
 		ui.refresh()
 
@@ -339,8 +407,20 @@ func reset_battle() -> bool:
 		return false
 	var keep := start_layout
 	var was_paused := paused
+	var hid := history_id
+	var rid := ready_id
+	var pz := puzzle
+	puzzle = null          # (clearing the field to put it back doesn't end a 🧩 puzzle)
 	B3Saves.restore(self, keep, false, true)
+	puzzle = pz
 	start_layout = keep
+	if budget >= 0:
+		spent = _spent_at_fight      # what you'd bought when you pressed Fight!
+		budget_changed.emit()
+	if puzzle:
+		puzzle.reset_done()    # 🧩 Try again: your army's yours to change, the blue one's back
+	history_id = hid       # still the same History or Ready-made battle
+	ready_id = rid
 	if was_paused:
 		set_paused(false)
 	if ui:
@@ -396,6 +476,8 @@ func spawn_unit(kind: String, team: String, pos: Vector3, pers := "auto", yaw :=
 		u.rig.rotation.y = u.facing
 	u.reset_physics_interpolation()
 	units.append(u)
+	if fighting and not _respawning and not puppet:
+		fight_teams[team] = int(fight_teams.get(team, 0)) + 1     # joined the fight (for the scoreboard)
 	think_period = 0.2 + units.size() * 0.0016
 	if winner != "":
 		_check_victory()
@@ -492,6 +574,14 @@ func spawn_proj(kind: String, pos: Vector3, vel: Vector3, shooter, w: Dictionary
 
 ## Things from the Booms tab: `dir` is the screen-right direction (airstrikes).
 func drop(id: String, pos: Vector3, dir := Vector3.RIGHT) -> void:
+	if puzzle and not puzzle.pay_boom(id, pos):
+		return      # 🧩 in a puzzle, booms cost points and go on your side only
+	if modes and not modes.pay_boom(id, pos):
+		return      # 🌊 Wave Defense: the same, in your fort
+	if id == "nuke":
+		Settings.award("nuke")
+	if id in SELF_BOOMS:
+		Settings.count("booms", "boom", 10)
 	if _client_cmd({"c": "drop", "id": id, "pos": pos, "dir": dir}):
 		return
 	var d: Dictionary = B3Defs.BOOMS.get(id, {})
@@ -899,6 +989,9 @@ func on_unit_ko(u: B3Unit, by) -> void:
 		team_kos[by.team] = int(team_kos.get(by.team, 0)) + 1
 		if by.kills > int(mvp.get("kills", 0)):
 			mvp = {"kind": by.kind, "team": by.team, "kills": by.kills, "uid": by.uid}
+		# kept here, as `by` may be knocked out itself before the end
+		fighter_log[by.uid] = {"team": by.team, "kind": by.kind, "kills": by.kills, "at": time}
+	_ko_stickers(u, by)
 	if fighting and B3Rules.respawn():
 		_respawns.append({"t": 5.0, "kind": u.kind, "team": u.team, "pos": u.home, "pers": u.pers_choice})
 	think_period = 0.2 + units.size() * 0.0016
@@ -931,6 +1024,9 @@ func _trim_corpses() -> void:
 func remove_unit(u: B3Unit, poof := true) -> void:
 	if not is_instance_valid(u):
 		return
+	if poof and puzzle and not u.dead and puzzle.keeps(u):
+		return      # 🧩 erasing: the puzzle's own fighters stay (beat them!)
+	_refund(u)
 	units.erase(u)
 	if tools and u == B3Player.unit and u.ctl == B3Player.me:
 		tools.stop_playing()
@@ -987,6 +1083,9 @@ func remove_chunk(b: RigidBody3D, poof := true) -> void:
 
 
 func remove_struct(s: B3Struct, poof := true) -> void:
+	if poof and puzzle and puzzle.keeps(s):
+		return      # 🧩 erasing: the puzzle's own buildings stay
+	_refund(s)
 	structs.erase(s)
 	if net and is_instance_valid(s):
 		net.rec_event(["rm", s.get_instance_id()])
@@ -999,6 +1098,9 @@ func remove_struct(s: B3Struct, poof := true) -> void:
 
 
 func remove_hazard(h: B3Hazard, poof := false) -> void:
+	if poof and puzzle and puzzle.keeps(h):
+		return      # 🧩 erasing: the puzzle's own pools stay
+	_refund(h)
 	hazards.erase(h)
 	if net and is_instance_valid(h):
 		net.rec_event(["rm", h.get_instance_id()])
@@ -1007,6 +1109,21 @@ func remove_hazard(h: B3Hazard, poof := false) -> void:
 			fx.steam(h.global_position, h.radius * 0.5)
 			snd("fizz", h.global_position, 0.7)
 		h.queue_free()
+
+
+## 📒 Stickers for knocking things out yourself (the fighter or vehicle this
+## computer is playing), and for wrecking a tank.
+func _ko_stickers(u: B3Unit, by) -> void:
+	var by_u: B3Unit = by if by != null and is_instance_valid(by) and by is B3Unit else null
+	var mine := by_u != null and by_u == B3Player.unit and by_u.ctl == B3Player.me
+	if mine and by_u.is_enemy(u):
+		if by_u is B3Aircraft:
+			Settings.count("b3_air_kos", "ace", 3)
+		elif not (by_u is B3Vehicle) and String(by_u.def.body) == "human":
+			Settings.count("b3_hero_kos", "hero", 5)
+	# 🪖 wrecked by you, or by a boom, a pool or a fall (not by the computer's fighters)
+	if u.kind == "tank" and (mine or by == null):
+		Settings.award("tankbuster")
 
 
 func c4_count() -> int:
@@ -1018,6 +1135,9 @@ func c4_count() -> int:
 
 
 func detonate_c4() -> void:
+	var n := c4_count()
+	if n > 0:
+		Settings.count("booms", "boom", 10, n)
 	if _client_cmd({"c": "c4"}):
 		return
 	var t := 0.0
@@ -1033,10 +1153,82 @@ func detonate_c4() -> void:
 		ui.toast("No C4 placed yet! Pick 📟 C4 from the 💣 Booms tab.", false)
 
 
+# ------------------------------------------------------------ 🪙 budget battles
+## Turns on budget battles: `points` to spend, placing only inside `zone`
+## (x/z; Rect2() = anywhere) and only for `team` ("" = whatever the Toy Box says).
+func set_budget(points: int, zone := Rect2(), team := "") -> void:
+	budget = points
+	spent = 0
+	build_zone = zone
+	build_team = team
+	# the glowing area on the ground where you can build (gone with no zone)
+	if zone_vis and is_instance_valid(zone_vis):
+		zone_vis.queue_free()
+	zone_vis = null
+	if zone.size != Vector2.ZERO and world:
+		zone_vis = B3Puzzles.zone_visual(self, zone, B3Puzzles.ZONE_COL)
+		add_child(zone_vis)
+	budget_changed.emit()
+
+
+## Back to the normal sandbox: everything free, place anywhere.
+func clear_budget() -> void:
+	set_budget(-1)
+
+
+func points_left() -> int:
+	return budget - spent if budget >= 0 else 1 << 30
+
+
+## "" if `count` of `id` can go at `pos`, or why not (for a message).
+func can_place(id: String, pos: Vector3, count := 1) -> String:
+	if build_zone.size != Vector2.ZERO and not build_zone.has_point(Vector2(pos.x, pos.z)):
+		return "🚧 You can only build on your side (the glowing area)."
+	if budget >= 0 and B3Defs.cost(id) * count > points_left():
+		return "🪙 Not enough points for that! You have %d left." % points_left()
+	return ""
+
+
+## Pays for `node` (a fighter, building or pool just placed as `id`).
+func buy(node: Node, id: String) -> void:
+	if budget < 0 or node == null:
+		return
+	var c := B3Defs.cost(id)
+	node.set_meta("cost", c)
+	spent += c
+	budget_changed.emit()
+
+
+## Erasing something you bought before the fight gives its points back.
+func _refund(node: Node) -> void:
+	if budget < 0 or fighting or node == null or not is_instance_valid(node) or not node.has_meta("cost"):
+		return
+	spent = maxi(0, spent - int(node.get_meta("cost")))
+	node.remove_meta("cost")
+	budget_changed.emit()
+
+
+## After clearing: what's still standing is what's still paid for.
+func _recount_spent() -> void:
+	if budget < 0:
+		return
+	var n := 0
+	for arr: Array in [units, structs, hazards]:
+		for o in arr:
+			if is_instance_valid(o) and (o as Node).has_meta("cost"):
+				n += int((o as Node).get_meta("cost"))
+	spent = n
+	budget_changed.emit()
+
+
 func clear_units() -> void:
 	if tools:
 		tools.stop_playing()      # quietly: your fighter is being cleared away, not knocked out
 	start_layout = {}             # nothing left to ⏮ Reset to (Reset itself puts its copy back)
+	history_id = ""               # not that battle any more (⏮ Reset puts these back too)
+	ready_id = ""
+	if puzzle:
+		puzzle.stop()             # 🧩 the puzzle's over: everything's free again
 	for u in units:
 		if is_instance_valid(u):
 			if u.laser:
@@ -1044,6 +1236,7 @@ func clear_units() -> void:
 			u.dead = true
 			u.queue_free()
 	units.clear()
+	_recount_spent()
 	for rd in ragdolls:
 		if is_instance_valid(rd):
 			rd.queue_free()
@@ -1093,6 +1286,7 @@ func clear_battlefield() -> void:
 		if is_instance_valid(h):
 			h.queue_free()
 	hazards.clear()
+	_recount_spent()
 	_events.clear()
 	_waves.clear()
 	_sinking.clear()
@@ -1202,14 +1396,15 @@ func mvp_text() -> String:
 
 func _check_victory() -> void:
 	var keys := _team_keys()
+	if modes:
+		keys = modes.standing(keys)     # 🏁 a fallen King, the hill's winner, or 🌊 the fort still holding (B3Modes)
 	team_count = keys.size()
 	if not fighting:
 		return
 	if winner != "":
 		if team_count == 0 and winner != "nobody":
 			winner = "nobody"
-			if ui:
-				ui.banner("💥  Nobody wins! It's a draw!", Color("ffcf4a"))
+			_battle_over(DRAW_TXT, Color("ffcf4a"))
 			return
 		if team_count >= 2:
 			winner = ""
@@ -1217,14 +1412,16 @@ func _check_victory() -> void:
 				u.cheer = false
 			if ui:
 				ui.hide_banner()
+		elif ui:
+			ui.update_score(scoreboard())     # the winners still standing (some may still be on fire...)
 		return
 	teams_seen = maxi(teams_seen, team_count)
 	if teams_seen < 2 or team_count > 1:
 		return
+	fight_end_t = time
 	if team_count == 0:
 		winner = "nobody"
-		if ui:
-			ui.banner("💥  Nobody wins! It's a draw!", Color("ffcf4a"))
+		_battle_over(DRAW_TXT, Color("ffcf4a"))
 		snd("victory", null, 0.7)
 		return
 	var k := String(keys.keys()[0])
@@ -1239,10 +1436,12 @@ func _check_victory() -> void:
 		var td: Dictionary = B3Defs.TEAM[k]
 		txt = "%s  %s wins!  🏆" % [td.icon, td.name]
 		col = (td.col as Color).lightened(0.15)
+	if modes:
+		txt = modes.win_text(k, txt)
 	for u in units:
 		u.cheer = true
+	_battle_over(txt, col)
 	if ui:
-		ui.banner(txt, col)
 		var star := mvp_text()
 		if star != "":
 			later(1.2, func():
@@ -1257,6 +1456,131 @@ func _check_victory() -> void:
 		c /= units.size()
 		for i in 5:
 			later(i * 0.3, func(): fx.explosion(c + Vector3(rng.randf_range(-6, 6), 6.0 + rng.randf() * 4.0, rng.randf_range(-6, 6)), 0.9))
+
+
+## The battle just ended (`winner` is set): the banner with the 🏆
+## scoreboard under it, and the stickers it earned.
+func _battle_over(txt: String, col: Color) -> void:
+	battle_ended.emit(winner)
+	var sb := scoreboard()
+	victory_stickers(read_score(sb))
+	if ui:
+		ui.banner(txt, col, sb)
+
+
+## The 🏆 scoreboard of the battle that just ended, as short lines of text.
+## They ride along under the winner banner's headline to friends' screens
+## (B3UI.banner), so it's plain and small:
+##   "w|winner"                    a team, "wild:kind" or "nobody"
+##   "s|seconds"                   how long the fight took (battle time)
+##   "h|id"                        the 📜 History battle, if it was one
+##   "t|team|brought|left|kos"     each team: fighters it brought, how many
+##                                 are still standing, knock-outs it scored
+##   "o|kos"                       knock-outs by booms, lava, falls (nobody's)
+##   "f|team|kind|kos"             the top 3 fighters (even knocked-out ones)
+func scoreboard() -> PackedStringArray:
+	var out := PackedStringArray()
+	out.append("w|" + winner)
+	out.append("s|%d" % roundi(maxf(0.0, (fight_end_t if winner != "" else time) - fight_t0)))
+	if history_id != "":
+		out.append("h|" + history_id)
+	var left := team_counts()
+	var by_teams := 0
+	for t in B3Defs.TEAM_ORDER:
+		if fight_teams.has(t) or left.has(t) or team_kos.has(t):
+			out.append("t|%s|%d|%d|%d" % [t, int(fight_teams.get(t, 0)), int(left.get(t, 0)), int(team_kos.get(t, 0))])
+			by_teams += int(team_kos.get(t, 0))
+	var others := kos - fight_kos0 - by_teams
+	if others > 0:
+		out.append("o|%d" % others)
+	var best: Array = fighter_log.values()
+	# most knock-outs first; a tie goes to whoever got there first
+	best.sort_custom(func(x: Dictionary, y: Dictionary) -> bool:
+		return int(x.kills) > int(y.kills) or (int(x.kills) == int(y.kills) and float(x.at) < float(y.at)))
+	for i in mini(3, best.size()):
+		var e: Dictionary = best[i]
+		if int(e.kills) > 0:
+			out.append("f|%s|%s|%d" % [e.team, e.kind, int(e.kills)])
+	return out
+
+
+## Reads scoreboard() lines back into {win, secs, hist, teams: [{team,
+## brought, left, kos}], others, top: [{team, kind, kos}]}, or {} if there's
+## no scoreboard. On a friend's copy they come from the host, so anything odd
+## (unknown teams or fighters, silly numbers, too many lines) is left out.
+static func read_score(lines: PackedStringArray) -> Dictionary:
+	var win := ""
+	var secs := -1
+	var hist := ""
+	var others := 0
+	var teams: Array[Dictionary] = []
+	var top: Array[Dictionary] = []
+	var seen := {}
+	for ln: String in lines.slice(0, 24):
+		var f := ln.split("|")
+		match f[0]:
+			"w":
+				if f.size() == 2 and (f[1] == "nobody" or B3Defs.TEAM.has(f[1]) or (f[1].begins_with("wild:") and B3Defs.UNITS.has(f[1].substr(5)))):
+					win = f[1]
+			"s":
+				if f.size() == 2 and f[1].is_valid_int():
+					secs = clampi(f[1].to_int(), 0, 359999)
+			"h":
+				if f.size() == 2 and not B3History.info(f[1]).is_empty():
+					hist = f[1]
+			"o":
+				if f.size() == 2 and f[1].is_valid_int():
+					others = clampi(f[1].to_int(), 0, 99999)
+			"t":
+				if f.size() == 5 and B3Defs.TEAM.has(f[1]) and not seen.has(f[1]) and f[2].is_valid_int() and f[3].is_valid_int() and f[4].is_valid_int():
+					seen[f[1]] = true
+					teams.append({"team": f[1], "brought": clampi(f[2].to_int(), 0, 9999),
+						"left": clampi(f[3].to_int(), 0, 9999), "kos": clampi(f[4].to_int(), 0, 9999)})
+			"f":
+				if f.size() == 4 and top.size() < 3 and B3Defs.TEAM.has(f[1]) and B3Defs.UNITS.has(f[2]) and f[3].is_valid_int():
+					top.append({"team": f[1], "kind": f[2], "kos": clampi(f[3].to_int(), 0, 9999)})
+	if win == "":
+		return {}
+	return {"win": win, "secs": secs, "hist": hist, "teams": teams, "others": others, "top": top}
+
+
+## "45 seconds", "1 minute 5 seconds".
+static func time_text(secs: int) -> String:
+	var m := floori(secs / 60.0)
+	var sec := secs - m * 60
+	var st := "%d second%s" % [sec, "" if sec == 1 else "s"]
+	if m == 0:
+		return st
+	return "%d minute%s%s" % [m, "" if m == 1 else "s", "" if sec == 0 else " " + st]
+
+
+## 📒 Stickers for a battle that just ended, from its scoreboard. A friend's
+## copy calls this too when the host's banner (with the scoreboard) arrives,
+## so friends earn them as well.
+func victory_stickers(sc: Dictionary) -> void:
+	if sc.is_empty():
+		return
+	var hist := String(sc.hist)
+	if hist != "":
+		Settings.mark("b3_history", hist, "historybuff", 3)
+		B3History.earn_stars(self, hist, String(sc.win))     # ⭐ finish, ⭐ change history, ⭐ hero
+	var win := String(sc.win)
+	if win == "nobody":
+		return
+	Settings.award("b3win")
+	# 🎖️ General: 5 or more on each team
+	var teams: Array = sc.teams
+	var big := teams.size() >= 2
+	for e: Dictionary in teams:
+		if int(e.brought) < 5:
+			big = false
+	if big:
+		Settings.award("general")
+	# 👀 First-Person Hero: your side won while you were looking out of its eyes
+	if B3Player.active() and B3Player.me.fp and B3Player.unit.ctl == B3Player.me:
+		var me := B3Player.unit
+		if (me.team if me.team != "wild" else "wild:" + me.kind) == win:
+			Settings.award("fphero")
 
 
 # ---------------------------------------------------------------- feedback
@@ -1359,7 +1683,9 @@ func _respawn_tick(dt: float) -> void:
 			_respawns.remove_at(i)
 			var p: Vector3 = r.pos
 			p.y = surface_y(p)
+			_respawning = true
 			var nu := spawn_unit(String(r.kind), String(r.team), p, String(r.pers))
+			_respawning = false
 			if nu:
 				fx.poof(p + Vector3(0, 0.8, 0), 1.0)
 				snd("pop", p, 0.6)

@@ -72,6 +72,24 @@ func c4_props(b) -> Array:
 	return b.props.filter(func(p): return is_instance_valid(p) and p.kind == "c4")
 
 
+## True if a message with `txt` in it is showing at the top of `b`'s screen.
+func toast_has(b, txt: String) -> bool:
+	for c in b.ui.toasts.get_children():
+		for l in (c as Node).find_children("*", "Label", true, false):
+			if String((l as Label).text).contains(txt):
+				return true
+	return false
+
+
+## How many 👑 Kings with a crown on their head there are in `b`.
+func crowned_kings(b) -> int:
+	var n := 0
+	for u: B3Unit in b.units:
+		if is_instance_valid(u) and not u.dead and u.king and u.rig and u.rig.pv.get("head") and (u.rig.pv.head as Node).get_node_or_null("Crown"):
+			n += 1
+	return n
+
+
 func _ready() -> void:
 	await get_tree().process_frame
 	B3Rules.reset()
@@ -202,6 +220,32 @@ func _ready() -> void:
 	friend.tools.stop_playing()
 	await wait_for(func(): return not friend_plays_red(0), 2.0)
 
+	# right-click powers and ⇥ Tab work for friends too
+	var hk: B3Unit = null
+	for u: B3Unit in host.units:
+		if u.team == "blue" and u.kind == "knight" and not u.dead and not u.down:
+			hk = u
+			break
+	var fk: B3Unit = friend.net.puppets.get(hk.get_instance_id())
+	friend.tools.play_as(fk)
+	check(await wait_for(func(): return hk.ctl != null and hk.ctl.peer != 0, 3.0), "🛡️ the friend plays a knight")
+	B3Player.me.fire2 = true
+	check(await wait_for(func(): return hk.shield_up, 2.0), "holding right-click raises its shield in the host's battle")
+	check(await wait_for(func(): return fk.shield_up, 2.0), "and the friend sees it up")
+	B3Player.me.fire2 = false
+	check(await wait_for(func(): return not hk.shield_up and not fk.shield_up, 2.0), "letting go lowers it on both screens")
+	var hk_id := hk.get_instance_id()
+	friend.tools.switch_teammate()
+	var next_knight := func() -> bool:
+		for u: B3Unit in host.units:
+			if u.get_instance_id() != hk_id and u.team == "blue" and not u.dead and u.ctl != null and u.ctl.peer != 0:
+				return hk.ctl == null
+		return false
+	check(await wait_for(next_knight, 3.0), "⇥ Tab on the friend's screen asks the host, and they jump into the next knight")
+	check(B3Player.active() and B3Player.unit != fk, "(and the friend's camera goes with them)")
+	friend.tools.stop_playing()
+	await wait_for(func(): return not next_knight.call() and hk.ctl == null, 2.0)
+
 	# knock-outs and broken walls show up too
 	var victim: B3Unit = null
 	for u: B3Unit in host.units:
@@ -286,7 +330,7 @@ func _ready() -> void:
 		{"c": "drop", "id": "grenade", "pos": "here"}, {"c": "drop", "id": "blackhole", "pos": at(host, 0, 0)},
 		{"c": "drop", "id": "grenade", "pos": Vector3(0, INF, 0)},
 		{"c": "team", "nid": a_red.get_instance_id(), "t": "purple"}, {"c": "mood", "nid": a_red.get_instance_id(), "p": "evil"},
-		{"c": 5}, {"c": ["fight"]}, {}]
+		{"c": "wave"}, {"c": "wave", "n": 99}, {"c": 5}, {"c": ["fight"]}, {}]
 	for c in junk:
 		friend.net._send({"m": "cmd", "c": c}, true)
 	friend.net._send({"m": "cmd", "c": "erase"}, true)
@@ -348,6 +392,58 @@ func _ready() -> void:
 	check(await wait_for(func(): return friend.paused, 2.0), "and their own")
 	friend.toggle_play()
 	await wait_for(func(): return not host.paused, 2.0)
+
+	# 🌊 Wave Defense: the friend sees the points, the fort and the waves, and helps
+	host.run_ready("waves")
+	check(await wait_for(func(): return friend.budget == B3Modes.START_POINTS and friend.build_zone == B3Modes.FORT and friend.zone_vis != null, 4.0),
+		"🌊 the friend sees the host's 🪙 points and the glowing fort")
+	check(await wait_for(func(): return friend.modes.kind == "waves" and friend.modes.phase == "build" and friend.ui.mode_hud.visible and friend.ui.coin_lbl.visible, 2.0), "with the coins at the top and the 🌊 Wave Defense panel")
+	var spent0: int = host.spent
+	friend.tools.place_id = "soldier"
+	friend.tools.team = "green"
+	friend.tools._place(at(friend, 0, 10), at(friend, 0, 10), false, false)
+	check(await wait_for(func(): return host.spent == spent0 + 2, 3.0), "a friend's soldier in the fort is paid from the host's points")
+	check(await wait_for(func(): return friend.ui.coin_lbl.text == "🪙 %d / %d" % [host.points_left(), host.budget], 2.0),
+		"and the friend's coins go down too (%s)" % friend.ui.coin_lbl.text)
+	friend.tools._place(at(friend, 0, -30), at(friend, 0, -30), false, false)
+	check(await wait_for(func(): return toast_has(friend, "🚧"), 2.0) and host.spent == spent0 + 2, "outside the fort, the friend is told why and nothing's placed")
+	friend.drop("mine", at(friend, 3, 30))
+	check(await wait_for(func(): return toast_has(friend, "glowing"), 2.0) and host.spent == spent0 + 2, "same for a mine")
+	friend.ui.mode_hud.press_next()
+	check(await wait_for(func(): return host.fighting and host.modes.wave == 1, 3.0), "the friend's ▶ Start wave 1 starts the host's wave")
+	check(await wait_for(func(): return friend.modes.wave == 1 and friend.modes.phase == "wave" and friend.modes.left == 6 and String(friend.ui.mode_hud.title.text).contains("Wave 1"), 3.0), "the friend sees 🌊 Wave 1 and its 6 attackers")
+	for u: B3Unit in host.units.duplicate():
+		if is_instance_valid(u) and u.team == "blue" and not u.dead:
+			u.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+	check(await wait_for(func(): return friend.modes.phase == "break" and friend.modes.break_t > 1.0 and friend.budget == host.budget and host.budget > B3Modes.START_POINTS, 4.0), "then the break, its countdown and the bonus points (%d)" % friend.budget)
+	check(await wait_for(func(): return String(friend.ui.mode_hud.title.text).contains("Wave 2 is coming") and friend.ui.mode_hud.next_btn.visible, 2.0),
+		"🌊 Wave 2 is coming! with ▶ Next wave")
+	# 👑 the Kings and their crowns
+	host.run_ready("skirmish")
+	check(await wait_for(func(): return friend.budget < 0 and friend.zone_vis == null and not friend.ui.coin_lbl.visible, 4.0),
+		"another battle: the friend's coins and glowing fort go away")
+	B3Rules.set_value("goal", "king")
+	host.toggle_play()
+	check(await wait_for(func(): return crowned_kings(host) == 2 and crowned_kings(friend) == 2, 4.0), "👑 the friend sees both Kings, with their crowns")
+	check(await wait_for(func(): return friend.modes.kind == "king" and friend.modes.king_view.size() == 2 and friend.ui.mode_hud._bars.size() == 2, 2.0),
+		"and the Kings' health in the panel")
+	# 🚩 the hill
+	B3Rules.set_value("goal", "hill")
+	check(await wait_for(func(): return friend.modes.kind == "hill" and friend.modes.hill_node != null and host.modes.hill_on and friend.modes.hill_pos.distance_to(host.modes.hill_pos) < 0.3, 3.0), "🚩 the friend sees the glowing circle where the host's is")
+	host.modes.scores["blue"] = 42.0
+	check(await wait_for(func(): return absf(float(friend.modes.scores.get("blue", 0.0)) - float(host.modes.scores.get("blue", 0.0))) < 1.0 and float(friend.modes.scores.get("blue", 0.0)) >= 42.0, 2.0), "and the score bars (%.0f)" % float(friend.modes.scores.get("blue", 0.0)))
+	# junk mode or budget state from a "host" is ignored
+	var keep_pos: Vector3 = friend.modes.hill_pos
+	for md in [["hill", true, Vector3(NAN, 0, 0), 5.0, "red", {}, ""], ["hill", true, Vector3.ZERO, INF, "red", {}, ""], ["boss"], [5], "hill",
+			["waves", "lots", "wave", 0.0, 1, 1], ["waves", 1, "party", 0.0, 1, 1], ["king", "everyone"]]:
+		friend.modes.apply_net(md)
+	check(friend.modes.hill_pos == keep_pos and friend.modes.king_view.is_empty(), "🛡️ broken battle-goal state from the host is ignored")
+	var keep_b: int = friend.budget
+	for bg in [[5, 0, Rect2(Vector2(NAN, 0), Vector2.ONE), "red"], ["lots", 0, Rect2(), ""], [5, 0, "zone", "red"], [1, 2]]:
+		friend.net._budget(bg)
+	check(friend.budget == keep_b, "and so are broken points")
+	B3Rules.set_value("goal", "last")
+	await wait_for(func(): return friend.modes.kind == "", 2.0)
 
 	# leaving
 	friend.stop_net()

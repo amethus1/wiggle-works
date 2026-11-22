@@ -8,6 +8,38 @@ class_name B3Player
 ##    looking, the crosshair is where shots go. Knocked out? You jump into the
 ##    nearest teammate and keep going (B3Tools.player_lost).
 ## Vehicles do their own driving/flying from the same controls (player_drive).
+##
+## Right-click powers (`fire2`, see power()) for fighters, animals and
+## dinosaurs. Each has a cooldown (B3Unit.power_cd) so it can't be spammed.
+## Vehicles use right-click for their second gun instead.
+##   shield  - hold: shield up. Blocks much better and wider from the front,
+##             but you walk at half speed.
+##   scope   - sniper. First person: right-click puts the scope in and out
+##             (zoom, slower mouse look; B3Tools, B3Cam). Overhead: hold for a
+##             steady aim (a red laser, dead-on shots, a quicker aim, slower walk).
+##   bayonet - musket line infantry: a quick stab with the bayonet, even while reloading.
+##   charge  - bulls, triceratops, mammoths and horsemen charge where you aim
+##             (in first person you steer with the mouse).
+##   pounce  - raptor: leaps at where you aim and claws whoever it lands on.
+##   heal    - medic: a green pulse that heals teammates nearby (and you a little).
+##   swoop   - dragon and pterodactyl: dive at where you aim and bite.
+##   gorilla - aim close: ground pound. Aim far away: throw a boulder there.
+##   roar    - T-Rex (and the elephant's trumpet): pushes back and stuns enemies nearby.
+##   shove   - everyone else: a kick (people) or a shove (animals) that pushes
+##             the enemy in front back a little.
+## Powers run on the host like everything else, so friends' work too.
+
+const POWERS := {
+	"shield": {"cd": 0.0}, "scope": {"cd": 0.0}, "bayonet": {"cd": 1.0}, "shove": {"cd": 1.2},
+	"charge": {"cd": 4.5}, "pounce": {"cd": 1.8}, "heal": {"cd": 6.0}, "swoop": {"cd": 3.5},
+	"gorilla": {"cd": 3.5}, "roar": {"cd": 6.0},
+}
+const BOULDER_CD := 5.0      # the gorilla's boulder (its ground pound is POWERS.gorilla)
+const HEAL_R := 7.0          # how far the medic's pulse reaches
+const HEAL_FRIEND := 35.0    # ...and how much it heals each teammate
+const HEAL_SELF := 15.0
+const ROAR_R := 9.0
+const GUARD_SLOW := 0.5      # walking speed with the shield up (or a sniper steadying)
 
 static var me := B3Ctl.new()        # this computer's controls
 static var unit: B3Unit = null      # the fighter or vehicle this computer is playing
@@ -87,6 +119,11 @@ static func detach(u: B3Unit) -> void:
 	u.ctl = null
 	u.player = false
 	u.target = null
+	u.shield_up = false
+	if u.power_t > 0.0 and u._swoop:
+		u._swoop = false
+		u._alt = u.power_alt
+	u.power_t = 0.0
 
 
 ## Called from B3Unit._physics_process while it's being played.
@@ -106,8 +143,8 @@ static func control(u: B3Unit, dt: float) -> void:
 		var dist := to.length()
 		u.look = to / dist if dist > 0.4 else Vector3.ZERO
 	u.want = c.move * u.speed * 1.1
-	if u.charge_t > 0.0:
-		u.charge_t = 0.0
+	if _power_tick(u, c, dt):
+		return      # charging or swooping: it carries on by itself for a moment
 	if c.jump:
 		c.jump = false
 		if u._grounded and not u.flying and u.stun_t <= 0.0:
@@ -184,6 +221,8 @@ static func _attack(u: B3Unit, c: B3Ctl) -> void:
 		u._attack(w)
 		if u.act in WINDUPS:
 			c.windup = u.act
+			if u.act == "aim" and steady(u, c):
+				u.act_len *= 0.5      # a steady sniper takes aim twice as fast
 		return
 	_shoot_at(u, c, w, true)
 
@@ -208,7 +247,9 @@ static func _fire_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
 	var s := float(w.get("spread", 0.03))
 	if u.ctl and u.ctl.fp:
 		s *= 0.5        # aiming down the sights
-	dir = (dir + Vector3(u.rng.randf_range(-s, s), u.rng.randf_range(-s, s) * 0.6, u.rng.randf_range(-s, s))).normalized()
+	if u.ctl and u.ctl.fire2 and power(u) == "scope":
+		s *= 0.1        # through the scope, or steadied overhead: dead on
+	dir =(dir + Vector3(u.rng.randf_range(-s, s), u.rng.randf_range(-s, s) * 0.6, u.rng.randf_range(-s, s))).normalized()
 	var to := from + dir * (float(w.range) * 1.6)
 	var hit: Dictionary = u.shot_ray(from, to)      # flies past teammates, like the computer's shots
 	var end := to
@@ -288,3 +329,273 @@ static func _throw_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
 	u._start_act("throw", 0.4, w)
 	u.act_fired = true
 	u.cd = float(w.cd)      # the same as when the Grenadier throws by itself
+
+
+# ------------------------------------------------------- right-click powers
+## Which right-click power `u` has (see the top of this file). "" for
+## vehicles: right-click fires their second gun (player_drive).
+static func power(u: B3Unit) -> String:
+	if u == null or not is_instance_valid(u) or u is B3Vehicle:
+		return ""
+	match u.kind:
+		"sniper":
+			return "scope"
+		"medic":
+			return "heal"
+		"gorilla":
+			return "gorilla"
+		"trex", "elephant":
+			return "roar"
+	var d: Dictionary = u.def
+	if bool(d.get("flying", false)):
+		return "swoop"
+	if bool(d.get("charge", false)):
+		return "charge"       # bulls, triceratops, mammoths, horsemen (the mounted knight too)
+	if bool(d.get("pounce", false)):
+		return "pounce"
+	if bool(d.get("bayonet", false)):
+		return "bayonet"
+	if B3Rig.shield_kind(d) != "":
+		return "shield"
+	return "shove"
+
+
+## What right-click does for `u`, for the help line at the top while you
+## play it (B3UI.controls_help). "" for vehicles: their own help says it.
+static func power_help(u: B3Unit) -> String:
+	if u == null or not is_instance_valid(u):
+		return ""
+	var icon := String(u.def.get("icon", ""))
+	match power(u):
+		"shield":
+			return "hold right-click 🛡️ shield up"
+		"scope":
+			return "right-click 🔭 scope" if me.fp else "hold right-click 🎯 steady aim"
+		"bayonet":
+			return "right-click 🗡️ bayonet"
+		"charge":
+			return "right-click %s charge!" % icon
+		"pounce":
+			return "right-click %s pounce" % icon
+		"heal":
+			return "right-click 💚 heal friends"
+		"swoop":
+			return "right-click %s swoop" % icon
+		"gorilla":
+			return "right-click 🦍 ground pound (aim far: 🪨 boulder)"
+		"roar":
+			return "right-click %s %s" % [icon, "trumpet" if u.kind == "elephant" else "roar"]
+		"shove":
+			return "right-click 👟 kick" if kicks(u) else "right-click 💥 shove"
+	return ""
+
+
+## How ready `u`'s power is: 0 just used, 1 ready again (for a cooldown meter;
+## only the host knows, so a friend's copy always reads 1).
+static func power_ready(u: B3Unit) -> float:
+	if u == null or not is_instance_valid(u) or u.power_cd <= 0.0:
+		return 1.0
+	return clampf(1.0 - u.power_cd / maxf(u.power_len, 0.01), 0.0, 1.0)
+
+
+## A sniper looking through its scope (first person, right-click toggled on).
+static func scoped(u: B3Unit, c: B3Ctl) -> bool:
+	return c != null and c.fp and c.fire2 and power(u) == "scope"
+
+
+## A sniper holding right-click in the overhead view: a steady aim.
+static func steady(u: B3Unit, c: B3Ctl) -> bool:
+	return c != null and not c.fp and c.fire2 and power(u) == "scope"
+
+
+## People and robots kick; animals shove.
+static func kicks(u: B3Unit) -> bool:
+	var body := String(u.def.body)
+	return body == "human" or body == "robot"
+
+
+## Right-click, every physics step while `u` is played. Returns true while a
+## charge or a swoop carries it along (it steers itself; no attacking then).
+static func _power_tick(u: B3Unit, c: B3Ctl, dt: float) -> bool:
+	var pw := power(u)
+	var up := pw == "shield" and c.fire2
+	if up != u.shield_up:
+		u.shield_up = up
+		if up:
+			u.battle.snd("clink", u.position, 0.5, 0.75)
+	if u.shield_up or steady(u, c) or scoped(u, c):
+		u.want *= GUARD_SLOW
+	if u.charge_t > 0.0:
+		if u.power_t > 0.0:
+			_steer_charge(u, c, dt)
+			c.jump = false      # (no surprise jump once it's over)
+			return true
+		u.charge_t = 0.0      # the computer's own charge stops when you take over
+		if u.act == "charge":
+			u.act = ""
+	if u.power_t > 0.0:
+		if u._swoop:
+			_swoop_tick(u, dt)
+			c.jump = false
+			return true
+		u.power_t = 0.0
+	if u.act == "pound" or u.act == "hurl" or u.act == "roar":
+		u.want *= 0.3         # big moves plant the feet
+	if c.fire2 and u.power_cd <= 0.0 and u.act == "":
+		_use_power(u, c, pw)
+	return false
+
+
+static func _use_power(u: B3Unit, c: B3Ctl, pw: String) -> void:
+	var b = u.battle
+	var info: Dictionary = POWERS.get(pw, {})
+	var cd := float(info.get("cd", 0.0))
+	match pw:
+		"bayonet":
+			u._start_act("thrust", 0.4, u.melee)
+			b.snd("swing", u.position, 0.5, 1.3)
+		"shove":
+			u._start_act("kick", 0.4, B3Defs.weapon("kick" if kicks(u) else "shove"))
+			b.snd("swing", u.position, 0.45, 1.5)
+		"charge":
+			if not u._grounded:
+				return
+			u._start_charge(_power_dir(u, c))
+			u.power_t = u.charge_t
+			b.fx.dust(u.position, 1.4)
+			b.fx.word(u.position + Vector3(0, u.tall + 0.6, 0), "CHARGE!", Color("ffd34d"))
+		"pounce":
+			if not u._grounded:
+				return
+			u._pounce(_power_dir(u, c))
+			b.fx.dust(u.position, 0.9)
+		"heal":
+			_heal_pulse(u)
+		"swoop":
+			_start_swoop(u, c)
+		"gorilla":
+			if u._flat(c.aim - u.position).length() > 6.5:
+				u._start_act("hurl", 1.15, B3Defs.weapon("boulder"))     # B3Special._hurl throws it where you aim
+				b.snd("growl", u.position, 0.6)
+				cd = BOULDER_CD
+			else:
+				u._start_act("pound", 0.95, B3Defs.weapon("gorilla_pound"))
+				b.snd("growl", u.position, 0.7)
+		"roar":
+			_roar(u)
+		_:
+			return       # shield and scope are held, not used up
+	u.power_cd = cd
+	u.power_len = cd
+
+
+## Where a charge, pounce or swoop goes: where you look (first person) or
+## towards the mouse (overhead).
+static func _power_dir(u: B3Unit, c: B3Ctl) -> Vector3:
+	if c.fp:
+		return Vector3(sin(c.look_yaw), 0, cos(c.look_yaw))
+	var to := u._flat(c.aim - u.position)
+	return to.normalized() if to.length() > 0.5 else u.forward()
+
+
+## A charge you started. In first person it turns (slowly) to where you look.
+static func _steer_charge(u: B3Unit, c: B3Ctl, dt: float) -> void:
+	if c.fp:
+		var a := rotate_toward(atan2(u.charge_dir.x, u.charge_dir.z), c.look_yaw, dt * 1.6)
+		u.charge_dir = Vector3(sin(a), 0, cos(a))
+	u._charging(dt)
+	u.power_t = u.charge_t
+	u._power_fx -= dt
+	if u._power_fx <= 0.0 and u._grounded:
+		u._power_fx = 0.15
+		u.battle.fx.dust(u.position - u.charge_dir * u.radius, 0.5)
+
+
+## Dragon and pterodactyl: dive at the spot you aim at (not too far).
+static func _start_swoop(u: B3Unit, c: B3Ctl) -> void:
+	var to := u._flat(c.aim - u.position)
+	var d := to.length()
+	var dir := to / d if d > 0.5 else u.forward()
+	var p := u.position + dir * clampf(d, 4.0, 20.0)
+	var gy: float = u.battle.world.height_at(p.x, p.z)
+	u.power_at = Vector3(p.x, maxf(gy, c.aim.y) if d <= 20.0 else gy, p.z)
+	u.power_t = 3.0
+	u.power_alt = u._alt
+	u._swoop = true
+	u.battle.snd("screech" if u.kind == "ptero" else "roar", u.position, 0.6, 1.2)
+	u.battle.snd("whoosh", u.position, 0.8, 0.8)
+
+
+static func _swoop_tick(u: B3Unit, dt: float) -> void:
+	u.power_t -= dt
+	var to := u._flat(u.power_at - u.position)
+	var d := to.length()
+	var gh: float = u.battle.world.height_at(u.position.x, u.position.z)
+	u._alt = move_toward(u._alt, maxf(0.7, u.power_at.y - gh + 0.5), dt * 10.0)
+	u.want = Vector3.ZERO
+	if d > 0.8:
+		u.want = to / d * u.speed * 1.6
+		u.look = to / d
+	for o: B3Unit in u.battle.units:
+		if o != u and not o.down and u.is_enemy(o) and u.center().distance_to(o.center()) < u.radius + o.radius + 1.0:
+			_swoop_bite(u, o)
+			return
+	if u.power_t <= 0.0 or d < 1.0:
+		_end_swoop(u)
+
+
+static func _swoop_bite(u: B3Unit, o: B3Unit) -> void:
+	var big := u.kind == "dragon"
+	var dir := (u._flat(o.position - u.position).normalized() + Vector3.UP * 0.6).normalized()
+	u._start_act("attack", 0.4, u.melee)
+	u.act_fired = true
+	u.battle.fx.dust(o.position, 1.0)
+	u.battle.snd("snap" if big else "screech", u.position, 0.9)
+	o.hurt(30.0 if big else float(u.wpn.dmg) * 1.5, dir, 9.0 if big else float(u.wpn.knock) * 1.2, u)
+	_end_swoop(u)
+
+
+static func _end_swoop(u: B3Unit) -> void:
+	u._swoop = false
+	u.power_t = 0.0
+	u._alt = maxf(u.power_alt, 3.0)
+
+
+## The medic's pulse: heals every teammate close by (and the medic a little).
+static func _heal_pulse(u: B3Unit) -> void:
+	var b = u.battle
+	u._start_act("pulse", 0.6, u.wpn)
+	b.fx.ring(u.position + Vector3(0, 0.3, 0), 0.5, HEAL_R, 0.6, Color(0.35, 1.0, 0.45, 0.85))
+	b.snd("heal", u.position, 1.0)
+	var c := u.center()
+	for o: B3Unit in b.units:
+		if o.dead or o is B3Vehicle or o.team != u.team or u.is_enemy(o) or o.center().distance_to(c) > HEAL_R:
+			continue
+		o.hp = minf(o.max_hp, o.hp + (HEAL_SELF if o == u else HEAL_FRIEND))
+		o.hurt_t = 0.0        # shows their health bar filling up
+		b.fx.heal(o.center() + Vector3(0, 0.5, 0))
+
+
+## T-Rex roar (or elephant trumpet): enemies close by get pushed back and
+## stand stunned for a moment. It doesn't hurt anyone.
+static func _roar(u: B3Unit) -> void:
+	var b = u.battle
+	u._start_act("roar", 1.2, u.wpn)
+	var r := ROAR_R * clampf(u.size, 0.6, 2.0)
+	b.snd(String(u.def.get("voice", "roar")), u.position, 1.0)
+	b.shake(0.3, u.position)
+	b.fx.ring(u.position + Vector3(0, 0.6, 0), 1.0, r, 0.55, Color(1.0, 0.95, 0.8, 0.7))
+	b.fx.word(u.position + Vector3(0, u.tall + 0.8, 0), "TOOT!" if u.kind == "elephant" else "ROAR!", Color("ffb347"))
+	for o: B3Unit in b.units.duplicate():
+		if o == u or o.down or o.dead or o is B3Vehicle or not u.is_enemy(o) or u._height_gap(o) > 3.0:
+			continue
+		var off := u._flat(o.position - u.position)
+		var d := off.length()
+		if d > r + o.radius:
+			continue
+		var f := 1.0 - 0.5 * clampf(d / r, 0.0, 1.0)
+		o.hurt(0.0, (off / maxf(d, 0.01) + Vector3.UP * 0.3).normalized(), 7.0 * f, u, "blast")
+		if is_instance_valid(o) and not o.dead and not o.down:
+			o.stun_t = maxf(o.stun_t, 0.6)
+			if o.pers == "coward":
+				o.fleeing = true

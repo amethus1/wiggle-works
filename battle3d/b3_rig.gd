@@ -184,6 +184,59 @@ func _seg(parent: Node3D, a: Vector3, b: Vector3, ra: float, rb: float, mt: Mate
 	return mi
 
 
+## 👑 A cartoony gold crown on top of the head (and on top of any helmet or
+## hat), for a King (B3Modes, Defend the King). It's part of the head, so it
+## tumbles with the head when the King gets knocked over, and stays gold.
+func add_crown() -> Node3D:
+	var head: Node3D = pv.get("head")
+	if head == null:
+		return null
+	var old := head.get_node_or_null("Crown")
+	if old:
+		return old as Node3D
+	# how big the head (with its helmet or hat) is, and where its top is
+	var box := AABB()
+	var first := true
+	for c in head.get_children():
+		var group: Array = [c]
+		if c is Node3D and not (c is MeshInstance3D) and not c.has_meta("pivot"):
+			group = (c as Node3D).get_children()      # eyes and the like
+		for m in group:
+			if m is MeshInstance3D and (m as MeshInstance3D).mesh:
+				var mi := m as MeshInstance3D
+				var xf := mi.transform if mi.get_parent() == head else (mi.get_parent() as Node3D).transform * mi.transform
+				var bb: AABB = xf * mi.mesh.get_aabb()
+				box = bb if first else box.merge(bb)
+				first = false
+	if first:
+		box = AABB(Vector3(-0.2, 0, -0.2), Vector3(0.4, 0.4, 0.4))
+	var r := clampf(maxf(box.size.x, box.size.z) * 0.42, 0.18, 0.75)
+	var h := r * 0.95
+	var gold := B3Mats.mat(H_GOLD, 0.28, 0.55)
+	var crown := Node3D.new()
+	crown.name = "Crown"
+	crown.position = Vector3(box.get_center().x, box.end.y - h * 0.12, box.get_center().z)
+	crown.rotation_degrees = Vector3(-6, 0, 0)       # tipped back a little, for fun
+	head.add_child(crown)
+	var parts: Array[MeshInstance3D] = []
+	parts.append(B3Mats.add(crown, B3Mats.cyl(r, r * 0.9, h * 0.42, 18), gold, Vector3(0, h * 0.21, 0)))
+	parts.append(B3Mats.add(crown, B3Mats.torus(r * 0.86, r * 1.04), gold, Vector3(0, h * 0.03, 0), Vector3.ZERO, Vector3(1, 1.6, 1)))
+	for i in 5:
+		var a := TAU * i / 5.0
+		var p := Vector3(sin(a), 0, cos(a)) * r * 0.8
+		parts.append(B3Mats.add(crown, B3Mats.cyl(0.0, r * 0.3, h * 0.62, 6), gold, p + Vector3(0, h * 0.42 + h * 0.31, 0)))
+		parts.append(B3Mats.add(crown, B3Mats.sphere(r * 0.12, 8), gold, p + Vector3(0, h * 1.06, 0), Vector3.ZERO, Vector3.ONE, false))
+	# jewels round the band
+	var jewels := [Color("ff3b5c"), Color("3d8bff"), Color("3fcf4e"), Color("ff3b5c"), Color("3d8bff")]
+	for i in 5:
+		var a := TAU * (i + 0.5) / 5.0
+		var p := Vector3(sin(a), 0, cos(a)) * r * 0.97
+		B3Mats.add(crown, B3Mats.sphere(r * 0.13, 8), B3Mats.glow(jewels[i], 1.4), p + Vector3(0, h * 0.21, 0), Vector3.ZERO, Vector3.ONE, false)
+	for mi in parts:
+		meshes.append(mi)      # flashes white when the King is hit, like the rest of it
+	return crown
+
+
 func _eye(parent: Node3D, pos: Vector3, r: float, white := false) -> void:
 	var e := Node3D.new()
 	e.position = pos

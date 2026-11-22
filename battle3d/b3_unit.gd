@@ -75,6 +75,14 @@ var held := false
 var player := false              # steered by a person (see B3Player); `ctl` holds their controls
 var ctl: B3Ctl = null
 var size_mult := 1.0             # Toy Box size (tiny .. huge); set before setup()
+# right-click powers while someone plays it (B3Player.power)
+var shield_up := false           # shield held up (blocks better from the front; friends see it)
+var power_cd := 0.0              # until the power can be used again
+var power_len := 1.0             # ...out of this long
+var power_t := 0.0               # a charge or swoop you started still going
+var power_at := Vector3.ZERO     # where a swoop dives to
+var power_alt := 6.0             # the height to climb back to after a swoop
+var king := false                # 👑 a team's King (B3Modes, Defend the King): wears a crown
 var rng := RandomNumberGenerator.new()
 var _hz_t := 0.0
 var _spd := 0.0
@@ -86,6 +94,9 @@ var _heal_fx := 0.0
 var _burn_fx := 0.0
 var _bar_hp := -1.0
 var _turn := 9.0
+var _power_fx := 0.0
+var _block_t := 0.0
+var _steady := false
 
 
 static func unit_pmat() -> PhysicsMaterial:
@@ -175,6 +186,25 @@ func _make_rig() -> void:
 	radius = rig.radius
 	tall = rig.height
 	aim_y = rig.reach_y
+	if king:
+		rig.add_crown()      # (it's rebuilt after getting up, or changing team)
+
+
+## 👑 Makes this fighter its team's King (B3Modes): a crown, and `hp_k` times
+## the health. A friend's copy (👥) just gets the crown (hp_k 1): its health
+## comes from the host.
+func make_king(hp_k := 1.0) -> void:
+	if king:
+		return
+	king = true
+	if hp_k != 1.0:
+		max_hp *= hp_k
+		hp = max_hp
+		stab *= 1.6       # harder to knock over, too
+	if rig:
+		rig.add_crown()
+	if bar:
+		bar.position.y = tall + 0.95      # the health bar floats over the crown
 
 
 func set_personality(p: String) -> void:
@@ -237,6 +267,8 @@ func _physics_process(dt: float) -> void:
 	voice_t -= dt
 	stun_t -= dt
 	charge_cd -= dt
+	power_cd -= dt
+	_block_t -= dt
 	var p := position
 	if p.y < -20.0 or absf(p.x) > B3Defs.BOUNDS + 10.0 or absf(p.z) > B3Defs.BOUNDS + 10.0:
 		battle.remove_unit(self, false)
@@ -363,6 +395,29 @@ func _think() -> void:
 	ally = hurt_u if hd < 22.0 * 22.0 else null
 
 
+## 🚩 King of the Hill (B3Modes): with no enemy close by (`dist` to the
+## target), walk to the glowing circle, or stand in it. Sets `want` (and
+## `look` for fighters who'd rather face the way they walk) and returns true;
+## false if it should just fight as usual. Guards (🛡️ Defend) stay at their posts.
+func _hill_pull(dist: float, spd: float) -> bool:
+	var m = battle.modes
+	if m == null or not bool(m.hill_on) or pers == "defend" or pers == "peaceful" or flying:
+		return false
+	if dist < 10.0:
+		return false      # an enemy close by: fight it
+	var hp_: Vector3 = m.hill_pos
+	var hr: float = m.hill_r
+	var to := _flat(hp_ - position)
+	var d := to.length()
+	if d > hr * 0.55:
+		want = to / maxf(d, 0.001) * spd
+		if String(wpn.type) == "melee" or dist == INF:
+			look = Vector3.ZERO
+	else:
+		want = Vector3.ZERO      # hold the hill
+	return true
+
+
 func guard_radius() -> float:
 	var r := 9.0
 	if String(wpn.type) != "melee":
@@ -427,6 +482,9 @@ func _decide(dt: float) -> void:
 		target = null
 		if pers == "defend":
 			_go_home()
+		elif _hill_pull(INF, speed):
+			want = _safe(want + sep * speed * 0.9)
+			_unstick(dt)
 		elif battle.enemies_left(self):
 			_wander(dt, 0.25)
 		return
@@ -443,6 +501,13 @@ func _decide(dt: float) -> void:
 	var ranged := String(w.type) != "melee"
 	look = dir
 	var spd := speed * (1.4 if pers == "berserk" else 1.0)
+	if _hill_pull(dist, spd):
+		# 🚩 off to the hill (or holding it), shooting anyone in range on the way
+		want = _safe(want + sep * speed * 0.9)
+		_unstick(dt)
+		if dist <= reach and cd <= 0.0 and act == "" and _facing_ok(dir) and _volley_ok(w):
+			_attack(w)
+		return
 	if not ranged and dist < 7.0 and String(def.body) == "rider" and _bayonet_wall(target):
 		# horses shy away from a hedge of bayonets: ride round it instead
 		var round_dir := Vector3(-dir.z, 0, dir.x) * (1.0 if uid % 2 == 0 else -1.0)
@@ -725,11 +790,17 @@ func _act_update() -> void:
 				act_fired = true
 				_throw(act_w)
 		"pounce":
-			if not act_fired and target and is_instance_valid(target) and not target.down:
-				if center().distance_to(target.center()) < radius + target.radius + 1.0:
+			if not act_fired:
+				var v := _pounce_victim()
+				if v != null:
 					act_fired = true
-					target.hurt(float(wpn.dmg) * 1.5, (_flat(target.position - position).normalized() + Vector3.UP * 0.5).normalized(), 7.0, self)
+					v.hurt(float(wpn.dmg) * 1.5, (_flat(v.position - position).normalized() + Vector3.UP * 0.5).normalized(), 7.0, self)
 					battle.snd("slash", position, 0.8)
+		"kick", "thrust":
+			# right-click powers (B3Player): a kick, a shove or a bayonet stab
+			if not act_fired and k >= 0.45:
+				act_fired = true
+				power_hit(act_w)
 		"heal":
 			if k >= 1.0:
 				act_t = 0.0
@@ -778,6 +849,49 @@ func _melee_hit(w: Dictionary) -> void:
 		battle.shake(float(w.shake), position)
 
 
+## Who a pounce lands on: its enemy, or (when a person is playing it and
+## pounced at a spot) any enemy it reaches.
+func _pounce_victim() -> B3Unit:
+	if target and is_instance_valid(target) and not target.down and _pounce_reaches(target):
+		return target
+	if not player:
+		return null
+	for u: B3Unit in battle.units:
+		if u != self and not u.down and is_enemy(u) and _pounce_reaches(u):
+			return u
+	return null
+
+
+func _pounce_reaches(u: B3Unit) -> bool:
+	return center().distance_to(u.center()) < radius + u.radius + 1.0
+
+
+## A right-click kick, shove or bayonet stab (B3Player powers): hits the
+## nearest enemy right in front (no need to have aimed at it) and pushes it
+## back a little. Barrels and knocked-over fighters in the way get a nudge.
+func power_hit(w: Dictionary) -> void:
+	var fwd := forward()
+	var best: B3Unit = null
+	var bd := INF
+	for u: B3Unit in battle.units:
+		if u == self or u.down or not is_enemy(u) or _height_gap(u) > MELEE_UP:
+			continue
+		var off := _flat(u.position - position)
+		var d := off.length()
+		if d < bd and d < _reach(w, u) * 1.2 and fwd.dot(off / maxf(d, 0.01)) > 0.25:
+			bd = d
+			best = u
+	battle.blast_props(position + fwd * (radius + 0.7 * size) + Vector3(0, 0.4, 0), 0.9 * size, 4.0)
+	if best == null:
+		return
+	var dir := (_flat(best.position - position).normalized() + Vector3.UP * 0.35).normalized()
+	battle.snd(String(w.snd), position, 0.8)
+	if w.has("word"):
+		battle.fx.word(best.position + Vector3(0, best.tall + 1.2, 0), String(w.word), Color("ffd34d"))      # (above the damage number)
+	# a kick from a giant (or a Huge fighter) sends people flying
+	best.hurt(float(w.dmg) * size, dir, float(w.knock) * clampf(size, 1.0, 2.5), self)
+
+
 func _muzzle_pos() -> Vector3:
 	if rig and rig.muzzle and is_instance_valid(rig.muzzle):
 		return rig.muzzle.global_position
@@ -791,6 +905,8 @@ func _fire_gun(w: Dictionary) -> void:
 	var aim := target.center()
 	var dir := (aim - from).normalized()
 	var s := float(w.get("spread", 0.03))
+	if player and B3Player.steady(self, ctl):
+		s *= 0.1      # a sniper you're holding steady (right-click)
 	dir = (dir + Vector3(rng.randf_range(-s, s), rng.randf_range(-s, s) * 0.6, rng.randf_range(-s, s))).normalized()
 	var to := from + dir * (float(w.range) * 1.4)
 	var hit := shot_ray(from, to)
@@ -888,14 +1004,17 @@ func _throw(w: Dictionary) -> void:
 func _update_laser() -> void:
 	if target == null or not is_instance_valid(target):
 		return
+	_laser_line(_muzzle_pos(), target.center())
+
+
+## The red aiming laser from `a` to `b`.
+func _laser_line(a: Vector3, b: Vector3) -> void:
 	if laser == null:
 		laser = MeshInstance3D.new()
 		laser.mesh = B3Mats.box(Vector3(0.025, 0.025, 1.0))
 		laser.material_override = B3Mats.glow(Color(1.0, 0.15, 0.1, 0.8), 3.0)
 		laser.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		battle.fx.add_child(laser)
-	var a := _muzzle_pos()
-	var b := target.center()
 	var l := a.distance_to(b)
 	if l < 0.1:
 		return
@@ -1003,11 +1122,15 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 	var d := dmg * (1.0 - armor)
 	if rig and rig.shield and how != "blast" and how != "fire":
 		var from := _flat(-dir).normalized()
-		if forward().dot(from) > 0.25:
-			d *= 0.35
-			knock *= 0.5
+		# held up with right-click (B3Player), the shield covers more and stops more
+		if forward().dot(from) > (-0.2 if shield_up else 0.25):
+			d *= 0.1 if shield_up else 0.35
+			knock *= 0.2 if shield_up else 0.5
 			battle.snd("clang", position, 0.7)
 			battle.fx.sparks(position + Vector3(0, 1.0, 0) + forward() * 0.4, 6)
+			if shield_up and _block_t <= 0.0:
+				_block_t = 0.6
+				battle.fx.word(position + Vector3(0, tall + 1.2, 0), "BLOCK!", Color("9fd8ff"))
 	hp -= d
 	battle.player_hit(by, self)      # first-person hit marker, if it was you
 	hurt_t = 0.0
@@ -1057,7 +1180,11 @@ func knock_down(vel: Vector3) -> void:
 	down_t = 0.0
 	act = ""
 	charge_t = 0.0
+	if power_t > 0.0 and _swoop:
+		_alt = power_alt      # a swoop you started: fly back up there after getting up
+	power_t = 0.0
 	_swoop = false
+	shield_up = false
 	_hide_laser()
 	var rd := B3Ragdoll.new()
 	rd.battle = battle
@@ -1185,10 +1312,22 @@ func _process(dt: float) -> void:
 	elif fleeing and _spd < 0.6 and battle.fighting:
 		mood = "cower"
 	var aiming: bool = battle.fighting and target != null and String(wpn.type) != "melee" and pers != "berserk" and not fleeing and not cheer
+	if not aiming and player and B3Player.steady(self, ctl):
+		aiming = true      # a sniper you hold steady shoulders its rifle
 	var a := act
 	if _swoop:
 		a = "swoop"
+	match a:
+		"thrust":
+			a = "attack"      # the bayonet stab is the musket's jab
+		"pulse":
+			a = "heal"        # the medic's pulse: both hands out
+		"kick":
+			if not B3Player.kicks(self):
+				a = "attack"  # animals shove with a head-butt
 	rig.animate(dt, _spd, a, act_t / maxf(act_len, 0.01), aiming, mood)
+	_power_pose()
+	_steady_laser()
 	if hurt_t < 3.0 and hp < max_hp and not battle.cam.too_close(position):
 		bar.visible = true
 		var f := clampf(hp / max_hp, 0.0, 1.0)
@@ -1197,3 +1336,35 @@ func _process(dt: float) -> void:
 			bar.set_instance_shader_parameter("hp", f)
 	elif bar.visible:
 		bar.visible = false
+
+
+## Right-click power poses on top of the normal animation (on friends'
+## copies too): the shield held up in front, a kick.
+func _power_pose() -> void:
+	if cheer or not (String(def.body) == "human" or String(def.body) == "robot"):
+		return
+	if shield_up and rig.shield:
+		var al: Node3D = rig.pv.get("arm_l")
+		if al:
+			al.rotation = Vector3(-1.45, -0.85, 0.1)
+	if act == "kick":
+		var leg: Node3D = rig.pv.get("leg_r")
+		if leg:
+			leg.rotation = Vector3(-1.5 * sin(clampf(act_t / maxf(act_len, 0.01), 0.0, 1.0) * PI), 0, 0)
+
+
+## A sniper held steady overhead (right-click): a red laser to where you're
+## aiming. Only on the computer of the person playing it.
+func _steady_laser() -> void:
+	var on := B3Player.unit == self and not down and B3Player.steady(self, B3Player.me)
+	if on:
+		var a := _muzzle_pos()
+		var b: Vector3 = B3Player.me.aim + Vector3(0, 0.9, 0)
+		if _flat(b - a).length() > 0.5:
+			_laser_line(a, b)
+			_steady = true
+			return
+	if _steady:
+		_steady = false
+		if act != "aim":
+			_hide_laser()

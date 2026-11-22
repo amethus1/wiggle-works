@@ -5,7 +5,8 @@ extends Node
 ## The host's computer runs the real battle. About 20 times a second it sends
 ## friends a snapshot: every fighter and vehicle (where, which way, what it's
 ## doing, health), barrels and crates, flying rockets, pools, buildings, the
-## knocked-out, the battle state and who's playing what. Effects and sounds
+## knocked-out, the battle state and who's playing what, the 🏁 battle goal
+## (Kings, the hill, 🌊 waves) and the 🪙 points to spend. Effects and sounds
 ## that happened since the last snapshot ride along. Things that must not get
 ## lost (a fighter knocked out, a wall piece breaking) go on a reliable channel.
 ##
@@ -146,6 +147,12 @@ func _setup_mp() -> void:
 
 
 func close() -> void:
+	if is_client() and battle and is_instance_valid(battle) and not battle.is_queued_for_deletion():
+		# the host's 🪙 points, glowing area and battle goal were for their battle
+		if int(battle.budget) >= 0:
+			battle.clear_budget()
+		if battle.modes:
+			battle.modes.apply_net([""])
 	if mp and peer:
 		if is_host():
 			_send({"m": "bye", "why": "The host stopped sharing the battle."}, true)
@@ -332,6 +339,8 @@ func _command(id: int, c: Dictionary) -> void:
 		"place":
 			var pc := _clean_place(c)
 			if battle.tools and not pc.is_empty() and NetCommon.allow(f, "spawn", 8.0, 20.0):
+				if not _can_place(id, String(pc.id), pc.a):
+					return
 				battle.tools.place_for(pc)
 		"drop":
 			var bid: Variant = c.get("id")
@@ -345,6 +354,8 @@ func _command(id: int, c: Dictionary) -> void:
 				return      # one nuke every few seconds is plenty
 			var at: Vector3 = pos
 			var way: Vector3 = dir
+			if not _can_place(id, String(bid), at):
+				return
 			battle.drop(String(bid), at, way)
 		"erase":
 			var o = _thing(_nid(c))
@@ -387,6 +398,10 @@ func _command(id: int, c: Dictionary) -> void:
 			battle.reset_battle()
 		"c4":
 			battle.detonate_c4()
+		"wave":
+			# 🌊 ▶ Next wave (or start wave 1)
+			if battle.modes and NetCommon.allow(f, "wave", 0.5, 2.0):
+				battle.modes.next_wave()
 		"launch":
 			var ul := _unit(_nid(c))
 			if ul:
@@ -407,6 +422,18 @@ func _command(id: int, c: Dictionary) -> void:
 			var p: Variant = c.get("p")
 			if u3 and p is String and B3Defs.PERS.has(p):
 				u3.set_personality(String(p))
+
+
+## 🪙 Budget battles (🌊 Wave Defense, 🧩 puzzles): a friend can only place
+## what there are points for, in the glowing area. If not, they're told why.
+func _can_place(id: int, what: String, at: Vector3) -> bool:
+	if int(battle.budget) < 0:
+		return true
+	var why: String = battle.can_place(what, at)
+	if why == "":
+		return true
+	_send({"m": "toast", "t": why}, true, id)
+	return false
 
 
 ## A friend's Toy Box placement, rebuilt from only what makes sense
@@ -515,7 +542,9 @@ func snapshot() -> Dictionary:
 	var out := {"m": "snap", "u": us, "p": ps, "j": js, "h": hs, "s": ss, "a": ap, "fx": _fx, "pl": players,
 		"st": [b.map_id, b.fighting, b.paused, b.slowmo, b.ui.banner_lbl.text if b.ui and b.ui.banner_lbl.visible else "",
 			b.ui.banner_lbl.get_theme_color("font_color") if b.ui else Color.WHITE, b.c4_count()],
-		"r": B3Rules.values}
+		"r": B3Rules.values,
+		"md": b.modes.net_state() if b.modes else [""],
+		"bg": [int(b.budget), int(b.spent), b.build_zone, String(b.build_team)]}
 	if _snap_n % 5 == 0:
 		var cs: Array = []
 		for rd: B3Ragdoll in b.ragdolls:
@@ -525,11 +554,13 @@ func snapshot() -> Dictionary:
 	return out
 
 
-## flags: 1 down, 2 aiming, 4 cheering, 8 on fire, 16 scared, 32 swooping, 64 played by someone, 128 held
+## flags: 1 down, 2 aiming, 4 cheering, 8 on fire, 16 scared, 32 swooping, 64 played by someone, 128 held,
+## 256 shield up (right-click, B3Player), 512 a 👑 King (B3Modes)
 func _unit_entry(u: B3Unit) -> Array:
-	var aiming: bool = u.target != null and b_fighting()
+	var aiming: bool = (u.target != null or (u.player and B3Player.steady(u, u.ctl))) and b_fighting()
 	var flags := int(u.down) | (int(aiming) << 1) | (int(u.cheer) << 2) | (int(u.burn_t > 0.0) << 3) \
-		| (int(u.fleeing) << 4) | (int(u._swoop) << 5) | (int(u.player) << 6) | (int(u.held) << 7)
+		| (int(u.fleeing) << 4) | (int(u._swoop) << 5) | (int(u.player) << 6) | (int(u.held) << 7) | (int(u.shield_up) << 8) \
+		| (int(u.king) << 9)
 	var pos: Vector3 = u.global_position
 	var vel: Vector3 = u.linear_velocity
 	if u.down and u.ragdoll and is_instance_valid(u.ragdoll):
@@ -711,6 +742,9 @@ func _apply_snapshot(s: Dictionary) -> void:
 		b.apply_rules()
 		if b.ui:
 			b.ui.refresh()
+	if b.modes:
+		b.modes.apply_net(s.get("md"))     # 🏁 the hill, the Kings' health, 🌊 the wave
+	_budget(s.get("bg"))
 	players = s.get("pl", [])
 	for p in players:
 		# the host says we're not playing anything (our fighter got knocked out);
@@ -749,6 +783,32 @@ func _apply_snapshot(s: Dictionary) -> void:
 		_play_fx(e)
 	if b.ui:
 		b.ui.counts_dirty = true
+
+
+## 🪙 The host's points to spend and the glowing area to build in (a budget
+## battle): the coins at the top and the glowing area show here too.
+func _budget(bg: Variant) -> void:
+	if not (bg is Array) or (bg as Array).size() != 4:
+		return
+	var a: Array = bg
+	if not (a[0] is int) or not (a[1] is int) or not (a[2] is Rect2) or not (a[3] is String):
+		return
+	var zone: Rect2 = a[2]
+	if not (NetCommon.vec2_ok(zone.position) and NetCommon.vec2_ok(zone.size)):
+		return
+	var b = battle
+	var pts := clampi(int(a[0]), -1, 999999)
+	var team := String(a[3]) if B3Defs.TEAM.has(String(a[3])) else ""
+	if zone != b.build_zone or team != b.build_team or (pts < 0) != (int(b.budget) < 0):
+		if pts < 0:
+			b.clear_budget()
+		else:
+			b.set_budget(pts, zone, team)
+	var sp := clampi(int(a[1]), 0, 999999)
+	if pts != int(b.budget) or sp != int(b.spent):
+		b.budget = pts
+		b.spent = sp
+		b.budget_changed.emit()
 
 
 func _seen_now(id: int) -> void:
@@ -795,6 +855,9 @@ func _unit_apply(e: Array) -> void:
 	u.burn_t = 1.0 if flags & 8 != 0 else 0.0
 	u.fleeing = flags & 16 != 0
 	u._swoop = flags & 32 != 0
+	u.shield_up = flags & 256 != 0
+	if flags & 512 != 0 and not u.king:
+		u.make_king()       # 👑 just the crown: its health comes from the host
 	var down := flags & 1 != 0
 	if down and not u.down:
 		u.knock_down(e[12] if e[12] is Vector3 else Vector3.ZERO)

@@ -38,7 +38,7 @@ Open the **Toy Box** (Tab) and pick **People**, **Animals** or **Dinos**. Before
 - **Animals:** Dog, Wolf, Bear, Bull, Elephant and Chicken.
 - **Dinos:** T-Rex, Raptor, Triceratops, Stegosaurus, Brachiosaurus and Pterodactyl (flies).
 
-**Teams:** 🔴 Red, 🔵 Blue, 🟢 Green, 🟡 Yellow and 🐾 Wild. Wild beasts fight everyone. Teammates never hurt each other.
+**Teams:** 🔴 Red, 🔵 Blue, 🟢 Green, 🟡 Yellow and 🐾 Wild. Wild beasts fight everyone. Teammates never hurt each other. If a battle goes 15 seconds with nobody getting hurt (say, two archers with a wall between them), everyone shouts **📣 CHARGE!** and runs straight at the enemy, so a battle never gets stuck.
 
 **Personalities:**
 
@@ -87,7 +87,7 @@ Click **⚔️ 3D Battle** on the title screen. It's a 3D battlefield you look d
 1. Pick something in the **Toy Box** on the left (People, Animals, Dinos, Vehicles, History, Booms, Hazards or Build).
 2. For fighters, choose a **team** color, a **mood** and a **size** (🐜 Tiny, Normal, Big or 🦖 Huge). ✨ Auto lets each fighter do what it's best at. Big fighters are tougher, heavier and harder to knock over.
 3. Click the ground to place one. **Drag** to place a whole line, and **Shift-drag** for a big block.
-4. Press **▶ Fight!** (Space). The team counts at the top right show who's left, and the last team standing wins. 🏆
+4. Press **▶ Fight!** (Space). The team counts at the top right show who's left. The 🏁 Battle goal in ⚙️ Battle Rules decides who wins: the last team standing (the usual), whoever keeps their 👑 King safe, or whoever holds the 🚩 hill. 🏆
 
 **What's in it:**
 - **New in 3D only:**
@@ -125,6 +125,17 @@ Click **⚔️ 3D Battle** on the title screen. It's a 3D battlefield you look d
 - Click on an enemy to lock on. Click the ground to shoot at that spot.
 - The camera follows you, and a spinning ring marks your fighter. **Esc** hands it back to the computer.
 - **👀 First person (V):** look out of its eyes. The mouse looks around, W walks where you're looking, and a crosshair shows where your shots go. You see your own weapon in your hands. Fighters standing right in front of your face fade away so they don't block the view. Press **V** again for the overhead view. If you get knocked out (or your vehicle is wrecked), you jump straight into the nearest teammate and keep going: a fighter takes over before a vehicle does. When nobody is left on your team, you go back to the overhead view. Playing overhead, a knock-out just goes back to watching.
+- **⇥ Tab (or N):** jump into the nearest teammate, in first person or overhead. Press it again for the next one, round and round. Teammates a friend is playing are skipped.
+- **🖱️ Right-click powers:** every fighter, animal and dinosaur has one, and each needs a moment to recharge (vehicles use right-click for their second gun). The keys at the top of the screen show yours.
+  - 🛡️ Knights, hoplites, legionaries, Saxons, Gauls and Immortals: hold to raise the shield. It blocks hits from the front and sides much better, but you walk slower.
+  - 🎯 Sniper: in first person, right-click looks through the scope (right-click again to stop). Overhead, hold it for a steady aim with a red laser.
+  - 🗡️ Redcoats, line infantry, Union and Confederate soldiers: a quick bayonet stab, even while reloading.
+  - 🐂 Bulls, triceratops, mammoths and horsemen: charge where you aim (in first person, steer with the mouse).
+  - 🦎 Raptor: pounce. 🐉 Dragon and 🦅 pterodactyl: swoop down and bite.
+  - 💚 Medic: a healing pulse for teammates close by.
+  - 🦍 Gorilla: ground pound up close, or throw a boulder somewhere far away.
+  - 🦖 T-Rex roar and 🐘 elephant trumpet: push enemies back and stun them for a moment.
+  - Everyone else: a kick (or a shove) that pushes an enemy back.
 - **Driving and flying** (both views; the help line at the top shows the keys for what you're in):
 
   | Vehicle | Overhead view | First person |
@@ -143,6 +154,7 @@ Click **⚔️ 3D Battle** on the title screen. It's a 3D battlefield you look d
 
 | Rule | Choices |
 |---|---|
+| 🏁 Battle goal | ⚔️ Last team standing; 👑 Defend the King (at Fight! each team gets a big crowned King with lots of health and a few guards; if your King falls, your team is out, even with others still standing); 🚩 King of the Hill (a glowing circle in the middle of the fighting, on a hill if there's one close by; a team scores while it's the only one in it, and the first to 100 wins). A panel at the top right shows the Kings' health or the score bars. |
 | 🌍 Gravity | Normal, 🌙 Moon, 🪐 Floaty, 🪨 Heavy. Low gravity makes blasts send everyone sky-high. |
 | 💥 Explosions | Normal, Big, ☄️ MEGA |
 | 💨 Knockback | Normal, Big, 🌪️ Crazy |
@@ -154,13 +166,13 @@ Click **⚔️ 3D Battle** on the title screen. It's a 3D battlefield you look d
 | 🌦️ Weather | Clear, 🌧️ Rain, 🌨️ Snow |
 | 📳 Screen shake | Off, A little (the start), 📳 Lots. Small bumps and gunfire never shake the screen. ↺ Back to normal leaves this one alone. |
 
-**🎲 Surprise Battle:** builds a random battle and starts it a moment later. You get a random map, 2–4 equal armies (soldiers, knights and vikings, animals, dinosaur attacks, or total chaos), plus some cover, barrels, mines and maybe a lava pool.
+**🎲 Surprise Battle:** builds a random battle and starts it a moment later. You get a random map, 2–4 equal armies (every army gets the same 🪙 points, priced like the puzzles: soldiers, knights and vikings, animals, dinosaur attacks, or total chaos), plus some cover, barrels, mines and maybe a lava pool.
 
 **⏮ Reset:** when you press Fight!, the game remembers where everything was. **⏮** (next to Fight!) or **⏮ Play it again** on the winner screen puts every fighter, vehicle, building, barrel and pool back, ready to play the same battle again.
 
 **💾 Save:** six save slots. Each keeps the whole battle: map, rules, fighters (with their team, mood, size and health), buildings, barrels, C4, mines and pools. Saving during or after a fight saves the setup from when you pressed Fight!, so loading it gives you the same battle to play again.
 
-**📜 History:** press **📜** in the top bar to pick a real battle from long ago. Each one comes with a short, true story and what to watch for. It sets up both armies in their real formations, with the walls, stakes, earth forts, fences, beach obstacles and landing boats, then waits for you to press **Fight!** (or pick a soldier to play).
+**📜 Pick a battle:** press **📜** in the top bar. The **📜 History** tab has real battles from long ago. Each one comes with a short, true story and what to watch for. It sets up both armies in their real formations, with the walls, stakes, earth forts, fences, beach obstacles and landing boats, then waits for you to press **Fight!** (or pick a soldier to play).
 
 | Battle | Year | Sides | Map |
 |---|---|---|---|
@@ -179,7 +191,32 @@ The **📜 History** Toy Box tab has the 14 soldiers they use, so you can put th
 
 **👥 Play together:** see below.
 
-**⭐ MVP:** when a team wins, the fighter with the most knock-outs is named MVP.
+**🎯 Ready-made battles:** the **🎯 Ready-made** tab in the same pop-up has 15 battles to try: Skirmish, 🌊 Wave Defense, Dino Attack, Nuke!, Lava Bridge, Storm the Fort, Wild Animals, Total Chaos, Huge Battle (150 fighters), C4 Surprise, Tank Line, Monster Mash, Air Show, Road Trip and Hangar (every vehicle parked, ready to drive). **▶ Set it up** builds it on its own map and waits for **Fight!**. In Nuke! and C4 Surprise the boom comes once you press Fight!. Only the host can pick one when playing together.
+
+**🧩 Army Puzzles:** the third tab in the 📜 pop-up. A blue army is already waiting, and you get some 🪙 points and your side of the map (the glowing area). Buy a red army from the Toy Box (each card shows its price; fighters are Normal size, and erasing before the fight gives the points back), then press ▶ Fight!. Win for ⭐, spend three quarters of the points or less for ⭐⭐, half or less for ⭐⭐⭐. Each win opens the next puzzle, and your stars are saved. If you lose, ⏮ Try again puts the blue army back and keeps yours so you can change it. Puzzle armies can't be erased, grabbed or changed, booms cost points and only go on your side, and if nobody is knocked out for a while the blue army charges. Solve them all for the 🧩 Puzzle Master sticker. Clearing, changing the map or picking another battle ends the puzzle. Only the host can start one.
+
+| # | Puzzle | Map | Goal | 🪙 |
+|---|---|---|---|---|
+| 1 | 🧍 Stick Fight | Grassland | Beat 10 stick figures | 12 |
+| 2 | 🏹 Arrow Rain | Farmland | Beat 10 archers behind sandbags | 10 |
+| 3 | 🐺 Wolf Pack | Snow | Stop 8 hungry wolves | 18 |
+| 4 | 🛡️ Shield Wall | Grassland | Break a shield wall of 5 knights | 16 |
+| 5 | 🐉 Dragon Attack | Snow | A dragon and 6 vikings | 24 |
+| 6 | 🗼 Tower Archers | Farmland | Knock out the archers in the towers | 24 |
+| 7 | ⛰️ Hold the Pass | Mountain Pass | 12 vikings | 28 |
+| 8 | 🦏 Dino Stampede | Grassland | 2 triceratops and 4 raptors | 30 |
+| 9 | 🏘️ Town Square | Town | 8 soldiers and 2 MG turrets | 30 |
+| 10 | 🌉 Hold the Bridge | Volcano | 21 wild vikings at a bridge over lava | 30 |
+| 11 | 🪖 Tank Trouble | Desert | Stop 3 tanks | 36 |
+| 12 | 🦖 T-Rex! | Farmland | A T-Rex and 4 raptors | 36 |
+| 13 | 🏖️ Storm the Beach | Beach | An MG turret, soldiers and a sniper by 2 bunkers on the hill | 48 |
+| 14 | 🌋 The Big One | Volcano | Vikings, a giant, a robot, a tank, a T-Rex and archers | 76 |
+
+**⭐ History stars:** each History battle has three: ⭐ Finish it (someone wins), ⭐ Change history (the side that lost long ago wins) and ⭐ Hero (your side wins while you play in first person). The cards show the ones you have.
+
+**🌊 Wave Defense:** hold the fort against wave after wave! Pick 🌊 Wave Defense in 📜 → 🎯 Ready-made. You get a fort (sandbags round a tower and a bunker, with a few defenders) and 🪙 points to spend in the glowing area: fighters, vehicles like the MG turret and cannon, walls, sandbags, towers, mines and boom barrels. Press ▶ Fight! (or ▶ Start wave 1) and the blue attackers march in from the far side. Every attacker you knock out is worth 🪙 1 (a boss 🪙 10), and holding the fort earns a bonus. Between waves there's a short break to buy more; press ▶ Next wave (or Enter) if you can't wait. The waves get stronger: stick figures and soldiers, then vikings and knights, cavalry and raptors, dinosaurs, then tanks and air raids, with a HUGE boss every 5th wave (a giant, a T-Rex, a dragon…). The fort falls when nothing of yours is left in it. The panel at the top right shows the wave, how many attackers are left and your ⭐ best wave. Pick a defender and press 🎮 Play as me! to fight alongside your army, in first person too. ⏮ Play it again starts from wave 1 with the fort you had.
+
+**🏆 Scoreboard:** when a battle ends, a card under the winner banner shows how long it took, how many fighters each team brought and still has, the knock-outs each team scored (and those by booms, lava and falls), and the top 3 fighters 🥇🥈🥉, even ones that were knocked out. Friends playing together see it too. The fighter with the most knock-outs is also named ⭐ MVP.
 
 **Tools** (the bar at the bottom):
 - **➕ Place (1):** put things on the battlefield.
@@ -193,8 +230,11 @@ The **📜 History** Toy Box tab has the 14 soldiers they use, so you can put th
 |---|---|
 | Space | Fight / pause |
 | G | Slow motion |
-| Tab | Hide or show the Toy Box |
+| Tab | Hide or show the Toy Box. While playing: jump into the next teammate |
+| N | While playing: jump into the next teammate |
+| Right-click | While playing: your fighter's power (shield, scope, charge, kick…) |
 | P | Play as the selected fighter or vehicle (Esc stops) |
+| Enter | 🌊 Wave Defense: ▶ Next wave |
 | V | First person / overhead view while playing |
 | F | Follow the selected fighter with the camera |
 | Q / E | Turn the camera |
@@ -210,6 +250,7 @@ The **📜 History** Toy Box tab has the 14 soldiers they use, so you can put th
 **👥 Play together (3D):** friends on the same Wi-Fi can play the same battle, each on their own computer.
 - One person presses **👥 → 🏠 Host**. The others open 3D Battle, press **👥** and click the host's battle in the list (or type the host's address).
 - Everyone sees the same battle. Friends can place things from the Toy Box, erase, press Fight!, Pause and ⏮ Reset, and play their own fighter or vehicle, in first person too. Names float over the fighters people are playing.
+- Friends see the battle goal too: the Kings' crowns and health, the glowing hill and its scores, the wave, the countdown and the 🪙 points. In Wave Defense they can buy defenders in the fort (from the host's points) and press ▶ Next wave.
 - Only the host can change the map, rules, saves, History and Surprise battles, or ✋ grab things.
 - The host's computer runs the real battle and sends a snapshot about 20 times a second. Friends' computers show copies that glide to where the host says, and their keys and mouse go back to the host.
 
@@ -228,6 +269,8 @@ Each Wiggly is a soft jelly body that springs back into shape. Pull one too hard
 | ⚪ Boulder | Ground Pound: slams down and knocks everything back |
 | 🟣 Twinkle | Twinkle Warp: teleports in a flash |
 
+**Wigglies vs fighters:** ⚡ Zappy's zap stuns people, animals and dinosaurs for a moment and jumps from one to the next (wet fighters and ones in metal armor get it worse, and it runs right through a pond full of soldiers). 🔥 Blaze sets them on fire (a wet one just steams) and melts frozen ones out. 🩵 Frosty (and the ❄️ Freeze Bomb) freezes them into ice blocks, even a charging bull or a soldier in mid-jump; the ice pops after a few seconds, or a big hit smashes it sooner. ⚪ Boulder's Ground Pound launches squads standing nearby. 🟢 Gummy in Sticky Mode sticks to a T-Rex or bull that bumps into it and slows it right down until it shakes Gummy off. A big or fast Wiggly bowls people over; small slow ones roll past.
+
 ## Toys (Toy Box)
 
 - **⚽ Balls:** beach ball, super bouncy ball, soccer ball, bowling ball, marble, steel ball.
@@ -239,6 +282,8 @@ Each Wiggly is a soft jelly body that springs back into shape. Pull one too hard
 - **🎆 Booms:** confetti popper, firework, paint bomb, bubble bomb, glue bomb, freeze bomb, boom barrel, mega boom.
 - **🚗 Rides:** go-kart, monster truck, balloon, hot air balloon, hover saucer (with a tractor beam), sail boat.
 - **🛠️ Builds** (ready-made contraptions): see-saw, catapult, spinny wheel, rocket cart, domino run, light show.
+- **Toys vs fighters:** the 🛸 saucer's tractor beam lifts fighters and dinos (big ones slowly). Fans and ✨ Big Wind blow fighters back (chickens tumble away, a T-Rex barely budges) and can blow them off platforms. The Bubble Maker floats people and small animals away in bubbles, and a Bubble Bomb catches everyone nearby, even a T-Rex; when the bubble pops they tumble down and get back up. Magnets drag fighters in metal armor over and yank metal weapons (swords, axes, hammers, guns, the bazooka) out of their hands; bows, spears, clubs and laser swords stay put. A Glue Bomb gums up everyone's feet. Heavy, fast things knock fighters over: bowling and steel balls, thrown blocks, catapult shots, bodies thrown by blasts, and a go-kart or monster truck that's driving. It mostly knocks them down and only hurts a bit. 💧 Water and 🌧️ Rain Shower make fighters wet: fire goes out (napalm too), but zaps hurt more. Click a fighter to see 🧊 frozen, 🫧 in a bubble, ⚡ zapped, 🍬 sticky, 💧 wet or 🔥 on fire next to its health.
+- **🔌 Battle traps:** wire a battery, switch, Big Button or Blinky Timer to a boom (C4, dynamite, landmine, barrels, grenade, cluster bomb, napalm, acid bomb, nuke, firework, the bubble/paint/glue/freeze bombs, mega boom, confetti popper) and power sets it off. A Big Button is a pressure plate, even nailed down. A Zappy zap sets booms off too.
 
 The Toy Box also has the fighter tabs (People, Animals, Dinos), Weapons, Armor, Hazards and Platforms, described above.
 
@@ -294,7 +339,7 @@ Move the camera with **WASD**, by dragging empty space, or by right-dragging. Sc
 
 **🌙 Day/night:** lamps, saucers and fireworks glow in the dark.
 
-**📒 Stickers:** 22 goals to earn, such as popping a Wiggly in two, winning a big battle, setting off a nuke, or putting a T-Rex in the playground.
+**📒 Stickers:** 28 goals to earn, such as popping a Wiggly in two, winning a big battle, setting off a nuke, or putting a T-Rex in the playground. 3D Battle has its own: 🏆 Victory!, ✈️ Ace Pilot (3 knock-outs while flying), 🧨 Tank Buster, 📜 History Buff (finish 3 different History battles) 👀 First-Person Hero (win while playing in first person) and 🧩 Puzzle Master (solve every Army Puzzle). It also gives General, Hero, Big Bada Boom and Boom Boom Boom.
 
 ## Play together
 
@@ -319,10 +364,15 @@ tools/run_tests.sh b3more net    # just these
 
 A suite fails if it exits with an error, prints a SCRIPT ERROR or a parse error, or never prints its summary. The logs go to `.test-logs/`:
 - **core** covers the worlds, Wiggly jelly physics, split and merge, power, booms, freezing, undo, saves, and every toy, Wiggly special, magic spell and gravity setting. It also checks world pieces surviving Clear, glue and hinges holding, dragging while paused, lava not floating things, and animated toys moving.
-- **fight** covers every fighter spawning and standing, giving weapons and armor, a red-vs-blue battle finding a winner, blasts throwing people (who then get back up), lava, platforms, personalities (defend, peaceful, coward), saving and loading, and the nuke. It also checks Revive healing one fighter, armor not stacking, paused swings, gunners reloading, no spinning ragdoll limbs, and held weapons.
+- **toyfight** covers toys and Wiggly powers against fighters: zaps (chains, wet and metal), fire, water and rain, ice (thawing, smashing), ground pound, Gummy and glue, big Wigglies, the saucer beam, fans, bubbles, magnets (weapons yanked loose), wired traps and pressure plates, heavy things bowling armies over, how a friend's screen shows it, and a 100-fighter speed check.
+- **fight** covers every fighter spawning and standing, giving weapons and armor, a red-vs-blue battle finding a winner, blasts throwing people (who then get back up), lava, platforms, personalities (defend, peaceful, coward), saving and loading, and the nuke. It also checks Revive healing one fighter, armor not stacking, paused swings, gunners reloading, no spinning ragdoll limbs, held weapons, two shooters with a wall between them not just standing there, and 📣 CHARGE! ending a stand-off.
 - **battle** (3D Battle) covers spawning every fighter on every map, fights, explosions, getting up, chain reactions, mines and buildings, lava and acid, every mood, the nuke, every scenario, the HUD, and a 150-fighter speed check. It also checks no jumping in mid-air, melee reach (no healing hits, nothing far overhead), hazard and burn damage following the rules, shots flying past teammates, projectiles following the Gravity rule, and the effects pool.
+- **b3menu** covers the 📜 pop-up's 🎯 Ready-made tab (every battle sets up on its map and waits for Fight!; nuke and C4 go off after Fight!), the 🏆 scoreboard (numbers, top 3, keeping up after the win, a friend's copy, made-up lines ignored), the 3D stickers, and the title screen's Sticker Book fitting and scrolling.
+- **b3powers** covers the right-click powers (which fighter gets which, what each does, cooldowns, friends' powers) and ⇥ Tab jumping to the next teammate.
+- **b3puzzle** covers 🧩 Army Puzzles and the 🪙 points: prices, your side only, refunds, ⏮ Reset, clearing, the glowing area, the tab and its locks, setting up, keeping the blue army as it is, booms costing points, every puzzle won by a test army with its stars saved, trying again, leaving a puzzle, History stars, fair Surprise armies and saving the stars.
+- **b3modes** covers the 🏁 battle goals (Kings crowned, guarded and falling, the hill scoring only while one team holds it alone, fighters heading for it, the winner banner, scoreboard and ⏮ Reset) and 🌊 Wave Defense (the fort and points, buying in the fort, waves coming and getting stronger, points for knock-outs, the break and ▶ Next wave, losing, the best wave being saved, playing in first person, the panel's place on the screen).
 - **b3more** covers the 3D Battle extras: every Battle Rule (gravity, MEGA explosions, toughness, knockback, friendly fire, reinforcements, night, sunset, rain and snow), playing as a fighter (walking, jumping, shooting, stopping, getting knocked out), first person (the eye camera, mouse look, walking and shooting where you look, V back to overhead, jumping into a teammate when knocked out, and back overhead when nobody is left), screen shake, the follow camera, save slots, ⏮ Reset, and Surprise Battles reaching a winner with an MVP. It also checks the History tab's team picker, placement previews after playing, the first-person hit marker and body, saves keeping heights and History strength, Surprise Battle spacing, the top bar fitting, and your own shots landing in Moon gravity.
-- **b3net** runs a 3D host and a friend on this computer (the friend in its own 3D world) and checks joining, seeing every fighter, building and pool in the same place, a friend placing a fighter, walking a soldier and driving a tank with their own keys, knock-outs, broken walls, effects, erasing, pausing and leaving. It also checks trees knocked down before joining, vehicles facing the same way, airstrike planes, the nuke's flash, junk packets and effect names being ignored, and spam limits.
+- **b3net** runs a 3D host and a friend on this computer (the friend in its own 3D world) and checks joining, seeing every fighter, building and pool in the same place, a friend placing a fighter, walking a soldier and driving a tank with their own keys, knock-outs, broken walls, effects, erasing, pausing and leaving. It also checks a friend's raised shield and Tab, the 🏁 battle goal and 🌊 Wave Defense on a friend's screen (crowns, the hill and its scores, the wave and countdown, the 🪙 points, a friend buying in the fort), trees knocked down before joining, vehicles facing the same way, airstrike planes, the nuke's flash, junk packets and effect names being ignored, and spam limits.
 - **vehicles** covers the race car, helicopter and fighter plane (spawning, the computer driving and fighting, being driven and flown in both views, staying inside the map, being shot down) and the network copies of every vehicle. It also checks planes shot down at the map edge, guns firing past teammates, and bombs in Moon gravity.
 - **history** sets up every History battle (two sides, nobody falling or inside the ground, nothing moving before Fight!) and plays some out to a winner.
 - **maps** loads every map, checks the ground right out to the edges, that fighters placed far out stand on it, the volcano's pools and the beach's water. It also checks that knocked-over rocks keep their color.
@@ -367,15 +417,17 @@ Sounds and music are synthesized by the script, with no downloads or outside sou
 godot --path . -- --world=meadow --scenario=showcase --shot=shot.png
 ```
 
+2D scenarios `vs_powers`, `vs_machines` and `vs_traps` (with `--world=canvas`) show Wigglies and toys against fighters.
+
 For 3D Battle:
 
 ```bash
 godot --path . -- --battle3d --scenario=skirmish --shot=shot.png --shot-delay=10
 ```
 
-Extra options: `--rules=time:night,weather:rain`, `--surprise=5` (a seeded Surprise Battle), `--history=ID` (a History battle; add `!` to start the fight, or use `lineup` to see all 14 soldiers), `--play` (play as a red fighter) or `--play=heli` (the first unit of that kind), `--fp` (first person), `--open=rules|saves|help|history`, `--map=beach`, and `--host3d` / `--join3d=IP` (share or join a battle).
+Extra options: `--rules=time:night,weather:rain`, `--surprise=5` (a seeded Surprise Battle), `--history=ID` (a History battle; add `!` to start the fight, or use `lineup` to see all 14 soldiers), `--play` (play as a red fighter) or `--play=heli` (the first unit of that kind), `--fp` (first person), `--open=rules|saves|help|history|ready|puzzles`, `--open=puzzle:ID` (set one up) or `--open=puzzle:ID:win` (set it up and win it), `--map=beach`, and `--host3d` / `--join3d=IP` (share or join a battle).
 
-3D scenarios: `skirmish`, `dinos`, `nuke`, `hazards`, `structures`, `animals`, `chaos`, `big` (150 fighters), `c4`, `vehicles`, `monsters`, `airshow` (6 planes and 4 helicopters over 60 fighters), `roadtrip` (cars and ramps), `hangar` (every vehicle up close). These don't fight: `lineup` and `closeup` (every model standing still), and `showcase`, `garage` and `firebreath` (close-ups). Use a delay of at least 8 seconds: the first few seconds go to compiling shaders.
+3D scenarios: `skirmish`, `dinos`, `nuke`, `hazards`, `structures`, `animals`, `chaos`, `big` (150 fighters), `c4`, `vehicles`, `monsters`, `airshow` (6 planes and 4 helicopters over 60 fighters), `roadtrip` (cars and ramps), `hangar` (every vehicle up close), `waves` (🌊 Wave Defense; `waves:7` starts at wave 7, `waves:0` waits for Fight!). Add `--rules=goal:king` or `goal:hill` for the other battle goals. These don't fight: `lineup` and `closeup` (every model standing still), and `showcase`, `garage` and `firebreath` (close-ups). Use a delay of at least 8 seconds: the first few seconds go to compiling shaders.
 
 `--open=toybox|worlds|magic|help|stickers|together|settings` opens a panel first. Use `--open=toybox:Dinos` to open a Toy Box tab. Battle scenarios: `battle`, `army`, `dinos`, `zoo`, `people` and `nukeit`.
 
@@ -387,7 +439,7 @@ Extra options: `--rules=time:night,weather:rain`, `--surprise=5` (a seeded Surpr
 | `game/` | `world.gd` (the playground and every command), `fighter.gd` (people and beasts: standing body, ragdoll, AI, weapons), `combat.gd` (bullets, blasts, hazards, who won), `wiggly.gd` (soft-body jelly), `toy.gd`, `toy_logic.gd` (what each toy does), `link.gd` (glue, hinge, rope, spring, wire), `builders.gd`, `worlds.gd`, `ground.gd`, `game.gd` (input and tools), `saves.gd` |
 | `view/` | `art.gd` (all toy and Wiggly drawing), `fighter_art.gd` (people, animals, dinosaurs), `effects.gd` (particles, pops, lights, shake), backdrop, water/lava/acid, links, camera, previews |
 | `ui/` | HUD, toy-box cards, title menu, Play Together panel, UI kit |
-| `battle3d/` | 3D Battle: `battle3d.gd` (the mode, explosions, nuke, victory, ⏮ Reset), `b3_unit.gd` (fighter AI and combat), `b3_rig.gd` (3D models and animation), `b3_ragdoll.gd`, `b3_proj.gd` (arrows, rockets, bombs), `b3_struct.gd` (breakable buildings), `b3_hazard.gd`, `b3_fx.gd`, `b3_world.gd` (terrain, sky, trees), `b3_cam.gd`, `b3_tools.gd`, `b3_ui.gd`, `b3_scenarios.gd`, `b3_defs.gd` (all the data), `b3_rules.gd` (Battle Rules), `b3_player.gd` and `b3_ctl.gd` (playing a fighter or vehicle), `b3_fpview.gd` (the weapon in your hands in first person), `b3_vehicle.gd` / `b3_vrig.gd` (vehicles), `b3_aircraft.gd` (helicopter and plane), `b3_history.gd` (History battles), `b3_net.gd` (playing together), `b3_saves.gd`, `b3_surprise.gd`, `b3_weather.gd` |
+| `battle3d/` | 3D Battle: `battle3d.gd` (the mode, explosions, nuke, victory, ⏮ Reset), `b3_unit.gd` (fighter AI and combat), `b3_rig.gd` (3D models and animation), `b3_ragdoll.gd`, `b3_proj.gd` (arrows, rockets, bombs), `b3_struct.gd` (breakable buildings), `b3_hazard.gd`, `b3_fx.gd`, `b3_world.gd` (terrain, sky, trees), `b3_cam.gd`, `b3_tools.gd`, `b3_ui.gd`, `b3_scenarios.gd`, `b3_defs.gd` (all the data), `b3_rules.gd` (Battle Rules), `b3_player.gd` and `b3_ctl.gd` (playing a fighter or vehicle), `b3_fpview.gd` (the weapon in your hands in first person), `b3_vehicle.gd` / `b3_vrig.gd` (vehicles), `b3_aircraft.gd` (helicopter and plane), `b3_history.gd` (History battles), `b3_puzzles.gd` (🧩 Army Puzzles and the glowing build area), `b3_modes.gd` (🏁 battle goals and 🌊 Wave Defense), `b3_mode_hud.gd` (their panel), `b3_net.gd` (playing together), `b3_saves.gd`, `b3_surprise.gd`, `b3_weather.gd` |
 | `net/` | Host, client, LAN discovery, snapshots |
 | `tests/` | Headless test suites |
 | `tools/` | `run_tests.sh`, `export_all.sh`, `release.sh` (new version on GitHub), and the sound and icon generators |

@@ -156,10 +156,20 @@ func _act_update() -> void:
 
 
 func _hurl() -> void:
-	if target == null or not is_instance_valid(target):
+	var aim: Vector3
+	if player and ctl:
+		# right-click (B3Player): it lands where you're aiming, up to a good throw away
+		aim = ctl.aim
+		var off := _flat(aim - position)
+		if off.length() > 24.0:
+			aim = position + off.normalized() * 24.0
+			aim.y = battle.world.height_at(aim.x, aim.z)
+		aim += Vector3(0, 0.4, 0)
+	elif target and is_instance_valid(target):
+		aim = target.position + Vector3(target.linear_velocity.x, 0, target.linear_velocity.z) * 0.5 + Vector3(0, 0.4, 0)
+	else:
 		return
 	var from := position + Vector3(0, tall + 0.35, 0) + forward() * 0.35
-	var aim := target.position + Vector3(target.linear_velocity.x, 0, target.linear_velocity.z) * 0.5 + Vector3(0, 0.4, 0)
 	var flat := _flat(aim - from)
 	var tt := clampf(flat.length() / 12.0, 0.55, 1.4)
 	var vel := B3Proj.lob(from, aim, tt, "boulder")

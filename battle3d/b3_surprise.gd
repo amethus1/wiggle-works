@@ -30,7 +30,8 @@ static func run(b, seed_v := 0) -> void:
 	var teams: Array = ["red", "blue", "green", "yellow"]
 	_shuffle(teams, rng)
 	teams.resize(n_teams)
-	var budget := rng.randi_range(9, 18) if n_teams <= 2 else rng.randi_range(7, 13)
+	# 🪙 the same points for every army (B3Defs.cost: a soldier is 2, a tank 15)
+	var budget := rng.randi_range(20, 36) if n_teams <= 2 else rng.randi_range(14, 26)
 	var pool := _pool(theme)
 	var spin := 0.0 if narrow else rng.randf() * TAU
 	var ring := 15.0 + n_teams * 2.0
@@ -97,7 +98,8 @@ static func _pool(theme: String) -> Array:
 	return people + vehicles
 
 
-## Fills `budget` points of fighters (big ones cost more) in rows behind
+## Fills `budget` 🪙 points of fighters (B3Defs.cost, the same prices as
+## budget battles, so every army is as strong) in rows behind
 ## `base`, people in front and the big ones (tanks, T-Rexes) behind, each
 ## with as much room as it needs so nobody starts inside anyone else.
 static func _army(b, rng: RandomNumberGenerator, team: String, base: Vector3, face: Vector3, pool: Array, budget: int) -> void:
@@ -108,14 +110,14 @@ static func _army(b, rng: RandomNumberGenerator, team: String, base: Vector3, fa
 			roster.append(id)
 	if roster.is_empty():
 		roster = ["soldier"]
-	var left := float(budget)
+	var left := budget
 	var picks: Array = []
 	var guard := 0
-	while left > 0.0 and guard < 60:
+	while left > 0 and guard < 60:
 		guard += 1
 		var id := String(roster[rng.randi() % roster.size()])
-		var c := cost(id)
-		if c > left + 0.5 and guard < 40:
+		var c := B3Defs.cost(id)
+		if c > left and guard < 40:
 			continue
 		picks.append(id)
 		left -= c
@@ -166,12 +168,6 @@ static func room(id: String) -> float:
 		"rider", "dragon":
 			r = 0.65      # horses and dragons are long
 	return maxf(1.7, r * float(d.get("size", 1.0)) * 2.0 + 0.8)
-
-
-## How many army points a fighter is worth (by toughness).
-static func cost(id: String) -> float:
-	var d := B3Defs.unit_def(id)
-	return clampf(float(d.get("hp", 100)) / 120.0, 1.0, 9.0)
 
 
 static func _shuffle(a: Array, rng: RandomNumberGenerator) -> void:

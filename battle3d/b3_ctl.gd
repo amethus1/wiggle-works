@@ -11,7 +11,8 @@ var aim := Vector3.ZERO      # the point being aimed at (ground under the mouse,
 var look_yaw := 0.0          # first-person view direction, same convention as B3Unit.facing: atan2(x, z)
 var look_pitch := 0.0        # radians, positive looks up
 var fire := false            # attack button held (left mouse / F)
-var fire2 := false           # second weapon held (right mouse)
+var fire2 := false           # right mouse: a vehicle's second gun, or a fighter's power (B3Player.power);
+                             # for a sniper in first person it stays on while the scope is in
 var jump := false            # Space pressed (cleared once used)
 var fp := false              # looking out of the fighter's eyes (first person)
 var windup := ""             # the wind-up a click started (sniper aim, bow, spell), until its shot goes off (B3Player)

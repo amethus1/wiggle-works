@@ -3,6 +3,7 @@ class_name FighterArt
 ## shields) and beasts (animals and dinosaurs), standing or as ragdolls.
 
 const INK := Color("1e1b2e")
+const ICE := Color(0.72, 0.92, 1.0)
 
 ## For drawing a fighter somewhere other than itself (toy-box pictures and the
 ## placing ghost): where to draw, and an extra transform on top.
@@ -35,6 +36,12 @@ static func _person(f) -> void:
 	if f.flash > 0.0:
 		shirt = shirt.lerp(Color.WHITE, f.flash * 0.6)
 		skin = skin.lerp(Color.WHITE, f.flash * 0.6)
+	if f.shows("ice"):
+		shirt = shirt.lerp(ICE, 0.45)
+		skin = skin.lerp(ICE, 0.5)
+	elif f.shows("zap") and int(f.t * 20.0) % 2 == 0:
+		shirt = shirt.lerp(Color(1.0, 0.95, 0.5), 0.5)   # flickers yellow
+		skin = skin.lerp(Color(1.0, 0.95, 0.5), 0.5)
 	var limb := 7.0 * s
 	var standing: bool = (f.puppet and String(f.net.get("st", "stand")) == "stand") or (not f.puppet and f.state == "stand")
 	if standing:
@@ -128,7 +135,7 @@ static func _head(f, ci: CanvasItem, c: Vector2, rot: float, s: float, skin: Col
 		var b: Color = f.def.beard
 		ci.draw_colored_polygon(PackedVector2Array([Vector2(-r * 0.2, r * 0.25), Vector2(r * 0.95, r * 0.2), Vector2(r * 0.4, r * 1.25)]), b)
 	# face
-	var mood: String = f.net.get("mood", f.mood) if f.puppet else f.mood
+	var mood: String = f.face()
 	var eye := Vector2(r * 0.42, -r * 0.12)
 	if mood == "ko":
 		for e in [eye, eye + Vector2(-r * 0.42, 0)]:
@@ -144,6 +151,13 @@ static func _head(f, ci: CanvasItem, c: Vector2, rot: float, s: float, skin: Col
 				ci.draw_line(Vector2(r * 0.1, r * 0.42), Vector2(r * 0.65, r * 0.38), INK, 2.0, true)
 			"scared":
 				ci.draw_circle(Vector2(r * 0.38, r * 0.45), 3.0 * s, INK, true, -1.0, true)
+			"frozen":
+				# brrr: a wobbly frozen mouth
+				ci.draw_polyline(PackedVector2Array([Vector2(r * 0.05, r * 0.45), Vector2(r * 0.2, r * 0.38), Vector2(r * 0.35, r * 0.45), Vector2(r * 0.5, r * 0.38), Vector2(r * 0.65, r * 0.45)]), INK, 1.6, true)
+			"zapped":
+				# hair-raising zigzag grin
+				ci.draw_polyline(PackedVector2Array([Vector2(r * 0.0, r * 0.4), Vector2(r * 0.15, r * 0.55), Vector2(r * 0.3, r * 0.4), Vector2(r * 0.45, r * 0.55), Vector2(r * 0.6, r * 0.4)]), INK, 1.8, true)
+				ci.draw_arc(eye, 3.6 * s, 0, TAU, 10, INK, 1.2, true)
 			_:
 				ci.draw_arc(Vector2(r * 0.35, r * 0.18), r * 0.32, 0.4, PI - 0.6, 8, INK, 2.0, true)
 	# helmets
@@ -207,6 +221,10 @@ static func _beast(f) -> void:
 		col = col.lerp(Color(0.6, 0.6, 0.62), 0.45)
 	if f.flash > 0.0:
 		col = col.lerp(Color.WHITE, f.flash * 0.55)
+	if f.shows("ice"):
+		col = col.lerp(ICE, 0.45)
+	elif f.shows("zap") and int(f.t * 20.0) % 2 == 0:
+		col = col.lerp(Color(1.0, 0.95, 0.5), 0.45)
 	var standing: bool = (f.puppet and String(f.net.get("st", "stand")) == "stand") or (not f.puppet and f.state == "stand")
 	var b: Vector2 = d.body * s
 	var legs: float = float(d.legs) * s
@@ -311,7 +329,7 @@ static func _beast_head(f, ci: CanvasItem, d: Dictionary, hr: float, col: Color,
 
 static func _beast_head_shape(f, ci: CanvasItem, d: Dictionary, at: Vector2, hr: float, col: Color, bite: float) -> void:
 	var s: float = f.size
-	var mood: String = f.net.get("mood", f.mood) if f.puppet else f.mood
+	var mood: String = f.face()
 	var dark := col.darkened(0.3)
 	if d.get("frill", false):
 		ci.draw_colored_polygon(Art.ellipse(at + Vector2(-hr * 0.5, -hr * 0.2), hr * 0.75, hr * 1.0, 20), col.darkened(0.12))
@@ -344,6 +362,8 @@ static func _beast_head_shape(f, ci: CanvasItem, d: Dictionary, at: Vector2, hr:
 		ci.draw_circle(eye + Vector2(hr * 0.04, 0), maxf(1.6, hr * 0.09), INK, true, -1.0, true)
 		if mood == "angry":
 			ci.draw_line(eye + Vector2(-hr * 0.2, -hr * 0.22), eye + Vector2(hr * 0.2, -hr * 0.1), INK, 2.0, true)
+		elif mood == "zapped" or mood == "scared" or mood == "frozen":
+			ci.draw_arc(eye, maxf(3.5, hr * 0.22), 0, TAU, 12, INK, 1.4, true)
 	# extras
 	if d.get("horns", false):
 		for sx in [0.0, 0.3]:
@@ -390,6 +410,8 @@ static func _status(f) -> void:
 	var st: String = f.net.get("st", "stand") if f.puppet else f.state
 	var hp_ratio: float = float(f.net.get("hp", 1.0)) if f.puppet else f.hp / maxf(1.0, f.max_hp)
 	var tm: float = f.t
+	if canvas == null:
+		_overlays(f, ci, c, st, tm)
 	if st == "dead":
 		for i in 3:
 			var a := tm * 3.0 + TAU * i / 3.0
@@ -408,3 +430,71 @@ static func _status(f) -> void:
 			ci.draw_colored_polygon(PackedVector2Array([fp + Vector2(-5, 4), fp + Vector2(0, -12), fp + Vector2(5, 4)]), Color(2.2, 1.0, 0.25))
 	if f.player_id >= 0:
 		Art._star(ci, top + Vector2(0, -22), 6.0, Color(2.0, 1.8, 0.5))
+
+
+## What toys and Wiggly powers are doing to a fighter: an ice block, a bubble,
+## sparks, gooey feet, drips. Drawn from the mood flags, so a friend's copy
+## over Wi-Fi shows them too.
+static func _overlays(f, ci: CanvasItem, c: Vector2, st: String, tm: float) -> void:
+	var hs: Vector2 = f.half_size()
+	var s: float = f.size
+	if st != "stand":
+		var r: float = f.radius() * 0.8
+		hs = Vector2(r, r)
+	if f.shows("goo"):
+		# green gummy blobs stuck round the feet
+		var feet := c + Vector2(0, hs.y - 4.0 * s)
+		for i in 5:
+			var x := (float(i) / 4.0 - 0.5) * maxf(hs.x * 1.6, 24.0 * s)
+			var blob := 4.5 * s + 2.0 * s * sin(tm * 3.0 + i)
+			ci.draw_circle(feet + Vector2(x, 0), blob, Color(0.35, 0.84, 0.42, 0.85), true, -1.0, true)
+		ci.draw_line(feet + Vector2(-hs.x * 0.6, 4.0 * s), feet + Vector2(-hs.x * 0.6, 4.0 * s + 6.0 * s + 3.0 * s * sin(tm * 2.0)), Color(0.35, 0.84, 0.42, 0.85), 3.0 * s, true)
+	if f.shows("wet") and not f.shows("ice"):
+		for i in 3:
+			var ph := fposmod(tm * 1.3 + i * 0.37, 1.0)
+			var dp := c + Vector2((float(i) - 1.0) * hs.x * 0.7, -hs.y * 0.4 + ph * hs.y * 1.3)
+			var dc := Color(0.45, 0.75, 1.0, 0.8 * (1.0 - ph))
+			ci.draw_circle(dp, 2.6 * s, dc, true, -1.0, true)
+			ci.draw_colored_polygon(PackedVector2Array([dp + Vector2(-2.4, 0) * s, dp + Vector2(0, -5.5) * s, dp + Vector2(2.4, 0) * s]), dc)
+	if f.shows("zap"):
+		for i in 6:
+			var a := randf() * TAU
+			var p0 := c + Vector2(cos(a) * hs.x * 1.3, sin(a) * hs.y * 0.9)
+			var p1 := p0 + Vector2(randf_range(-14, 14), randf_range(-14, 14)) * s
+			var p2 := p1 + Vector2(randf_range(-10, 10), randf_range(-10, 10)) * s
+			ci.draw_polyline(PackedVector2Array([p0, p1, p2]), Color(1.6, 1.9, 2.4), 2.0, true)
+	if f.shows("ice"):
+		# a see-through ice block with shiny edges, big enough for heads and tails
+		var box := _ice_box(f, c, hs, st)
+		var poly := Art.rr(box, 10.0 * s)
+		ci.draw_colored_polygon(poly, Color(0.7, 0.93, 1.0, 0.42))
+		ci.draw_polyline(Art.closed(poly), Color(0.88, 0.98, 1.0, 0.95), 2.5, true)
+		ci.draw_line(box.position + Vector2(8, 10) * s, box.position + Vector2(box.size.x * 0.45, 6.0 * s), Color(1, 1, 1, 0.85), 3.0, true)
+		ci.draw_line(box.position + Vector2(8, 22) * s, box.position + Vector2(8.0 * s, box.size.y * 0.35), Color(1, 1, 1, 0.6), 2.0, true)
+		ci.draw_line(box.end - Vector2(10, 14) * s, box.end - Vector2(box.size.x * 0.35, 9.0 * s), Color(1, 1, 1, 0.5), 2.0, true)
+	if f.shows("bubble"):
+		var br: float = maxf(hs.x, hs.y) * 1.25 + 8.0
+		ci.draw_circle(c, br, Color(0.7, 0.93, 1.0, 0.22), true, -1.0, true)
+		ci.draw_arc(c, br, 0, TAU, 48, Color(0.35, 0.7, 0.95, 0.55), 4.0, true)
+		ci.draw_arc(c, br - 2.0, 0, TAU, 48, Color(0.9, 1.0, 1.0, 0.9), 2.0, true)
+		ci.draw_arc(c, br * 0.8, -2.4, -1.4, 12, Color(1, 1, 1, 0.95), 4.0, true)
+		ci.draw_arc(c, br * 0.9, 0.3 + sin(tm) * 0.2, 1.2, 12, Color(1.0, 0.6, 1.0, 0.55), 2.5, true)
+
+
+## The ice block round a frozen fighter: a beast's head, neck and tail go in too.
+static func _ice_box(f, c: Vector2, hs: Vector2, st: String) -> Rect2:
+	var s: float = f.size
+	if st != "stand":
+		var r: float = f.radius() * 1.05 + 8.0 * s
+		return Rect2(c - Vector2(r, r * 0.8), Vector2(r, r * 0.8) * 2.0)
+	if not f.beast:
+		var half := Vector2(maxf(hs.x + 10.0 * s, 24.0 * s), hs.y + 10.0 * s)
+		return Rect2(c - half, half * 2.0)
+	var d: Dictionary = f.def
+	var front := hs.x + (float(d.neck) * 0.7 + float(d.head) * 1.3) * s
+	var back := hs.x + float(d.tail) * 0.6 * s
+	var up := hs.y + (float(d.neck) * (0.95 if d.get("long_neck", false) else 0.5) + float(d.head) * 0.5) * s
+	var fc: float = f.facing
+	var x0 := c.x - (back if fc > 0.0 else front) - 6.0 * s
+	var x1 := c.x + (front if fc > 0.0 else back) + 6.0 * s
+	return Rect2(x0, c.y - up - 6.0 * s, x1 - x0, up + hs.y + 12.0 * s)

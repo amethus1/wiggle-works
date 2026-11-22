@@ -8,6 +8,9 @@ extends Node2D
 const LAYER := 16
 const MAX_BEND_SPEED := 14.0  # rad/s: the fastest a ragdoll joint is pushed back inside its limits
 const RAG_PARTS := ["head", "torso", "uarm_b", "larm_b", "thigh_b", "shin_b", "thigh_f", "shin_f", "uarm_f", "larm_f"]
+const METAL_HELMETS := ["army", "knight", "viking"]
+const TUMBLE_WIND := 430.0    # px/s: wind this strong blows a standing fighter off its feet
+const MAX_FREEZE := 4.0       # fighters only stay frozen this long (then the ice pops)
 
 var uid := 0
 var world: Node = null
@@ -69,6 +72,22 @@ var hair := Color("3b2a1a")
 var _voice_t := 0.0
 var hit_t := 0.0               # melee: time until the swing lands
 var _hit_wd := {}              # melee: the weapon that swing is with
+# What toys and Wiggly powers are doing to us. A friend's screen only gets
+# `mood`, so these ride along in it too ("angry+ice+wet", see _show_status).
+var frozen_t := 0.0            # stuck in an ice block (Frosty, Freeze Bomb)
+var bubble_t := 0.0            # floating up in a bubble (Bubble Maker, Bubble Bomb)
+var stun_t := 0.0              # zapped: twitching, can't do anything (Zappy)
+var goo_t := 0.0               # gummed up and slow (Gummy, Glue Bomb)
+var lift_t := 0.0              # carried off by a tractor beam
+var wet := 0.0                 # water and rain: puts fire out, zaps hurt more
+var wind := Vector2.ZERO       # how fast fans, Big Wind and magnets push us this step (px/s)
+var _wind_next := Vector2.ZERO
+var yank_t := 0.0              # a magnet tugging at our metal weapon (1 = it flies off)
+var _thud_t := -1.0            # when a soft bump last hurt our ragdoll
+var _soft := false             # knocked over by a toy or power: bumps hurt less until we're up
+var _launch_t := -1.0          # when a driving car last flipped us
+var _jelly_t := -1.0           # when a Wiggly last bumped into us
+var _blind_t := 0.0            # how long a wall has blocked our shot
 
 
 func setup(w: Node, fighter_type: String, pos: Vector2, team_id := "", personality := "", s := 1.0) -> void:
@@ -200,7 +219,7 @@ func make_standing(at: Vector2, vel := Vector2.ZERO) -> void:
 	body.lock_rotation = true
 	body.physics_material_override = _mat(0.3, 0.0)
 	body.collision_layer = LAYER
-	body.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS
+	body.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS   # (Wigglies: see World._wigglies_vs_fighters)
 	body.contact_monitor = true
 	body.max_contacts_reported = 4
 	body.can_sleep = false
@@ -288,9 +307,17 @@ func flipped(v: Vector2) -> Vector2:
 
 
 ## Turns the fighter into a floppy ragdoll (knocked over, grabbed, or KO).
-func ragdoll(impulse := Vector2.ZERO) -> void:
+## `soft`: knocked over by a toy or a Wiggly power (not a blast or a blow), so
+## landing and tumbling only hurt a little until we're back up.
+func ragdoll(impulse := Vector2.ZERO, soft := false) -> void:
 	if state != "stand" or puppet:
 		return
+	_soft = soft
+	# knocked over: the ice cracks and the bubble pops
+	if frozen_t > 0.0:
+		thaw(true)
+	if bubble_t > 0.0:
+		pop_bubble(false)
 	var c := body.global_position if is_instance_valid(body) else center()
 	var v := body.linear_velocity if is_instance_valid(body) else Vector2.ZERO
 	_drop_weapon(v + impulse * 0.6)
@@ -482,6 +509,7 @@ func stand_up() -> void:
 			p.queue_free()
 	parts.clear()
 	make_standing(c + Vector2(0, -10), v * 0.3)
+	_soft = false
 	_pickup_near(160.0)
 	world.fx_event("getup", {"p": c})
 
@@ -602,10 +630,17 @@ func hurt(amount: float, knock := Vector2.ZERO, from = null) -> void:
 			p.apply_central_impulse(knock * p.mass * 0.6)
 		return
 	var dmg := amount * (1.0 - armor)
+	if frozen_t > 0.0:
+		# the ice block soaks up half of it, and a big hit smashes it
+		dmg *= 0.5
+		if amount >= 40.0 or knock.length() > 450.0:
+			thaw(true)
 	if shield and from != null and is_instance_valid(from) and signf(from.center().x - center().x) == facing:
 		dmg *= 0.5
 		world.fx_event("clang", {"p": center() + Vector2(facing * 16.0 * size, -10)})
 	hp -= dmg
+	if dmg > 0.5:
+		world.quiet_t = 0.0      # the battle's still going (see World.brave)
 	flash = 1.0
 	if dmg > 4.0 and t - _voice_t > 0.35 and not beast:
 		_voice_t = t
@@ -614,6 +649,7 @@ func hurt(amount: float, knock := Vector2.ZERO, from = null) -> void:
 		target = from
 	if pers == "peaceful":
 		mood = "scared"
+		_show_status()   # keep the ice, bubble… flags for a friend's screen
 	var heavy := 260.0 * (maxf(1.0, def.body.x * def.body.y / 1500.0) if beast else size * size)
 	if hp <= 0.0:
 		hp = 0.0
@@ -636,8 +672,13 @@ func _mass_k() -> float:
 
 
 func _ko(knock: Vector2, from) -> void:
+	if frozen_t > 0.0:
+		thaw(true)
 	if state == "stand":
 		ragdoll(knock / sqrt(_mass_k()))
+	stun_t = 0.0
+	lift_t = 0.0
+	goo_t = 0.0
 	state = "dead"
 	mood = "ko"
 	dead_t = 0.0
@@ -653,25 +694,402 @@ func revive() -> void:
 	hp = max_hp
 	burning = 0.0
 	acid = 0.0
+	if frozen_t > 0.0:
+		thaw()
+	if bubble_t > 0.0:
+		pop_bubble(false)
+	stun_t = 0.0
+	goo_t = 0.0
 	if state == "dead":
 		state = "ragdoll"
 	mood = "calm"
 	stand_up()
 
 
-func on_part_impact(_p: FighterPart, other, closing: float, at: Vector2) -> void:
+## `hit`: how fast the other thing was coming at us, pointing at us (its own
+## speed, so walking into a resting bowling ball doesn't knock us over).
+func on_part_impact(_p: FighterPart, other, closing: float, at: Vector2, hit := Vector2.ZERO) -> void:
 	if puppet:
 		return
+	if bubble_t > 0.0 and closing > 200.0:
+		pop_bubble()   # bumped into something: pop!
 	if state == "stand":
-		if closing > 1050.0:
-			hurt((closing - 1050.0) * 0.06, Vector2(0, -closing * 0.3))
+		# a really fast smack hurts whatever it is (landing from high up, a cannon
+		# ball, a body thrown by a blast), but not the flailing arms of someone a
+		# toy or a Wiggly just knocked over
+		var fast := minf((closing - 1050.0) * 0.06, 30.0) if closing > 1050.0 else 0.0
+		if other is FighterPart and other.fighter and other.fighter._soft:
+			fast = 0.0
+		var m := _hitter_mass(other)
+		if m > 0.0:
+			_bump(other, m, hit, fast)
+		elif fast > 0.0:
+			hurt(fast, Vector2(0, -closing * 0.3))
 		return
+	if other is Toy and hit.length() > 30.0 and world.vision_time - _launch_t > 0.6 and other.driving():
+		# a driving go-kart or monster truck flips us up and over, BONK!
+		_launch_t = world.vision_time
+		var ride: Toy = world.things.get(other.parent_uid) if other.parent_uid != 0 and world.things.get(other.parent_uid) is Toy else other
+		_soft = true
+		for b in all_bodies():
+			b.linear_velocity = Vector2(ride.linear_velocity.x * 0.4, -620.0)
 	if closing > 520.0:
-		hurt((closing - 520.0) * 0.035)
+		if _soft or other is Toy:
+			# knocked over by a toy or a Wiggly power (not a blast or a blow), or
+			# squashed under a monster truck's wheel: only a little at a time,
+			# not a bit for every arm and leg on every bump
+			if closing > 600.0 and world.vision_time - _thud_t > 0.5:
+				_thud_t = world.vision_time
+				hurt(minf((closing - 520.0) * 0.035, 4.0))
+		else:
+			hurt((closing - 520.0) * 0.035)
 		if closing > 700.0:
 			world.fx_event("thud", {"p": at, "v": closing, "m": 2.0})
 	if other is Toy and other.id == "landmine":
 		ToyLogic.trigger(world, other)
+
+
+## How heavy the thing that hit us is (0 = the ground, a platform or anything
+## nailed down). A ride counts with its wheels, a flying ragdoll with its whole body.
+func _hitter_mass(other) -> float:
+	if other is Toy:
+		if other.freeze or other.extra.has("proj") or other.def.has("weapon") or other.def.has("armor"):
+			return 0.0   # nailed or frozen; bullets and blades have their own rules
+		var m: float = other.mass
+		if other.parent_uid != 0:
+			var ride = world.things.get(other.parent_uid)
+			if ride is Toy:
+				m += ride.mass + other.mass   # a wheel brings the whole car with it
+		elif String(other.def.get("build", "")) == "car":
+			m *= 1.4
+		return m
+	if other is FighterPart and other.fighter and is_instance_valid(other.fighter) and other.fighter != self:
+		return other.fighter.weight()
+	return 0.0
+
+
+## Something heavy and fast ran into us while we were standing: the heavier and
+## faster it is (and the lighter we are), the harder the shove. Big enough and
+## we go flying; it only hurts a bit.
+func _bump(other, m: float, hit: Vector2, fast: float) -> void:
+	var spd := hit.length()
+	var need := knock_speed()
+	var car: bool = other is Toy and spd > 0.0 and other.driving()
+	if car:
+		spd = maxf(spd, 320.0)   # a go-kart or monster truck that's driving bowls people over
+	if other is FighterPart and spd > 0.0:
+		# a flailing arm isn't a flying body: go by how fast its middle is coming
+		var tor = other.fighter.parts.get("torso", other)
+		spd = maxf(0.0, (tor.linear_velocity as Vector2).dot(hit / spd)) if is_instance_valid(tor) else 0.0
+		need *= 1.6   # only a body really flying (from a blast) knocks others down, not one just falling over
+	var dv := spd * m / (m + weight())
+	var dmg := maxf(fast, clampf((dv - 100.0) * 0.08, 0.0, 35.0))
+	if dv < need:
+		if dmg > 0.0:
+			hurt(dmg)
+		return
+	var dir := hit.normalized() if hit != Vector2.ZERO else Vector2(-facing, 0)
+	if car:
+		# up and over the bonnet, and the car drives on underneath
+		_launch_t = world.vision_time
+		var ride: Toy = world.things.get(other.parent_uid) if other.parent_uid != 0 and world.things.get(other.parent_uid) is Toy else other
+		shove(Vector2(ride.linear_velocity.x * 0.4, -620.0), dmg)
+	else:
+		shove((dir + Vector2(0, -0.5)).normalized() * dv * 1.1, dmg)
+	world.fx_event("bowled", {"p": center(), "v": dv})
+
+
+## A Wiggly rolling or flying into us while we stand (World._wigglies_vs_fighters):
+## `rel` is how fast it's coming at us along `dir`. Big and fast bowls us over,
+## anything else is a soft bump that bounces it off. It hardly hurts: jelly is soft.
+func jelly_bump(w: Wiggly, rel: float, dir: Vector2) -> void:
+	if puppet or state != "stand" or not is_instance_valid(body) or world.vision_time - _jelly_t < 0.4:
+		return
+	_jelly_t = world.vision_time
+	var m := float(w.def.mass) * Wiggly.N * w.size * w.size
+	var dv := rel * m / (m + weight())
+	if dv >= knock_speed() * 1.4:
+		shove((dir + Vector2(0, -0.5)).normalized() * dv * 1.1, clampf((dv - 100.0) * 0.025, 0.0, 10.0))
+		world.fx_event("bowled", {"p": center(), "v": dv})
+	elif frozen_t <= 0.0:
+		body.linear_velocity += Vector2(dir.x, minf(dir.y, 0.0)) * dv * 0.6
+	# the Wiggly loses some of its speed to us and bounces off a little
+	w.add_velocity(-dir * rel * minf(1.0, weight() / (m + weight()) * 1.6))
+
+
+# ------------------------------------------------------- toys and powers
+## Body weight (the same as the standing body's mass).
+func weight() -> float:
+	if beast:
+		var b: Vector2 = def.body
+		return maxf(1.0, b.x * b.y / 900.0) * size * size
+	return 3.0 * size * size
+
+
+## How fast a shove has to be to knock us off our feet (beasts stand firmer).
+func knock_speed() -> float:
+	return 200.0 if beast else 150.0
+
+
+## How much metal we wear: magnets pull it and zaps love it.
+func metal() -> float:
+	var m := 0.0
+	if helmet in METAL_HELMETS:
+		m += 1.0
+	if body_armor:
+		m += 1.0
+	if shield:
+		m += 1.0
+	return m
+
+
+## Frozen, floating, zapped or carried off: no walking or fighting just now.
+func helpless() -> bool:
+	return frozen_t > 0.0 or bubble_t > 0.0 or stun_t > 0.0 or lift_t > 0.0
+
+
+## Thrown by a toy, a Wiggly or a ground pound: `dv` is how fast it throws us.
+## Fast enough and we fall over (heavy beasts barely budge); `dmg` hurts a bit.
+func shove(dv: Vector2, dmg := 0.0, from = null) -> void:
+	if puppet:
+		return
+	if frozen_t > 0.0:
+		if dv.length() < 300.0:
+			return
+		thaw(true)
+	if dmg > 0.0:
+		hurt(dmg, Vector2.ZERO, from)
+	if state == "stand" and is_instance_valid(body):
+		if dv.length() >= knock_speed():
+			ragdoll(dv, true)
+		else:
+			body.linear_velocity += dv * 0.5
+	else:
+		_soft = true
+		for p in all_bodies():
+			p.linear_velocity += dv * 0.8
+
+
+## Fans, Big Wind and magnets: `push` is how fast the air (or the pull) would
+## carry a person. Lighter fighters go faster, a T-Rex hardly moves.
+func blow(push: Vector2, dt: float) -> void:
+	if puppet or frozen_t > 0.0:
+		return
+	var k := clampf(3.0 / weight(), 0.15, 2.5)
+	if state == "stand":
+		_wind_next += push * k
+	else:
+		_soft = true
+		for p in all_bodies():
+			p.linear_velocity += push * k * dt * 3.0
+
+
+## Hover Saucer's tractor beam: drifts us toward `want` (heavy dinos rise slower).
+func beam(want: Vector2, dt: float) -> void:
+	if puppet or frozen_t > 0.0:
+		return
+	if alive():
+		lift_t = 0.15
+		if state == "stand":
+			swing = 0.0
+			hit_t = 0.0
+			charge_t = 0.0
+	if state != "stand":
+		_soft = true   # (dropped from up there: a soft landing)
+	var lift := clampf(sqrt(6.0 / weight()), 0.35, 1.0)
+	var to := Vector2(want.x, want.y * lift)
+	var g: Vector2 = world.gravity_vec() * dt
+	for b in all_bodies():
+		b.linear_velocity = b.linear_velocity.lerp(to, minf(1.0, dt * 4.0)) - g
+
+
+## Frosty or a Freeze Bomb: an ice block, right where we are (even in mid-air).
+func set_frozen(sec: float) -> void:
+	if puppet or not alive() or sec <= 0.0:
+		return
+	if bubble_t > 0.0:
+		pop_bubble(false)
+	frozen_t = minf(sec, MAX_FREEZE)
+	burning = 0.0
+	stun_t = 0.0
+	swing = 0.0
+	hit_t = 0.0
+	charge_t = 0.0
+	move = 0.0
+	for b in all_bodies():
+		b.freeze_mode = RigidBody2D.FREEZE_MODE_STATIC
+		b.freeze = true
+	mood = "frozen"
+	_show_status()
+
+
+## The ice melts (or gets smashed): we drop out with a crack.
+func thaw(smash := false) -> void:
+	var was := frozen_t > 0.0
+	frozen_t = 0.0
+	for b in all_bodies():
+		if b.freeze:
+			b.freeze = false
+	if not was:
+		return
+	if alive():
+		mood = "calm"
+	_show_status()
+	world.fx_event("ice_pop", {"p": center(), "r": radius(), "smash": smash})
+
+
+## Caught in a bubble: floats up, helpless, until it pops.
+func set_bubble(sec: float) -> void:
+	if puppet or state != "stand" or not alive() or frozen_t > 0.0 or not is_instance_valid(body):
+		return
+	bubble_t = sec
+	body.gravity_scale = 0.0
+	body.linear_velocity = Vector2(body.linear_velocity.x * 0.3, minf(body.linear_velocity.y * 0.1, -40.0))
+	swing = 0.0
+	hit_t = 0.0
+	charge_t = 0.0
+	mood = "scared"
+	_show_status()
+
+
+## Pop! `fall`: tumble down as a ragdoll and get back up after.
+func pop_bubble(fall := true) -> void:
+	if bubble_t <= 0.0:
+		return
+	bubble_t = 0.0
+	if is_instance_valid(body):
+		body.gravity_scale = 0.0 if def.get("flies", false) else 1.0
+	if alive():
+		mood = "calm"
+	_show_status()
+	world.fx_event("pop_bubble", {"p": center(), "r": radius() * 1.3})
+	if fall and state == "stand":
+		ragdoll(Vector2(0, -60), true)   # a long way down: a soft landing
+
+
+## Zappy: a shock that stuns us for a moment. Wet fighters and ones in metal
+## armor get it worse.
+func zap(power := 1.0) -> void:
+	if puppet or not alive() or frozen_t > 0.0:
+		return
+	var k := 1.0 + (0.8 if wet > 0.2 else 0.0) + 0.3 * minf(2.0, metal())
+	stun_t = maxf(stun_t, 0.9 + 0.5 * k)
+	swing = 0.0
+	hit_t = 0.0
+	charge_t = 0.0
+	flash = 1.0
+	if bubble_t > 0.0:
+		pop_bubble()
+	if state == "stand" and is_instance_valid(body):
+		body.linear_velocity.y = minf(body.linear_velocity.y, -140.0)   # a little jolt
+	hurt(9.0 * k * power)
+	if alive():
+		mood = "zapped"
+		_show_status()
+
+
+## Blaze and fire: catch fire, unless we're wet (then it just steams).
+func ignite(sec: float) -> void:
+	if puppet or not alive():
+		return
+	if frozen_t > 0.0:
+		thaw()
+		return
+	if wet > 0.2:
+		wet = maxf(0.0, wet - 0.5)
+		world.fx_event("steam", {"p": center()})
+		return
+	burning = maxf(burning, sec)
+	if bubble_t > 0.0:
+		pop_bubble()
+
+
+## Gummy or a Glue Bomb: sticky and slow for a while.
+func stick(sec: float) -> void:
+	if puppet or not alive():
+		return
+	goo_t = maxf(goo_t, sec)
+	charge_t = 0.0
+	_show_status()
+
+
+## A magnet `k` (0..1) close by: metal armor gets pulled toward it, and a
+## metal weapon gets tugged until it flies out of our hands.
+func magnetize(at: Vector2, k: float, dt: float) -> void:
+	if puppet or frozen_t > 0.0:
+		return
+	var to := at - center()
+	var m := metal()
+	if m > 0.0 and to.length() > 50.0:
+		# dragged over to it (and held there), but not pulled off our feet
+		blow(to.normalized() * minf(300.0 * k * minf(m, 2.5), TUMBLE_WIND - 50.0), dt)
+	if weapon_toy and is_instance_valid(weapon_toy) and weapon_toy.def.get("metal", false):
+		yank_t += dt * (0.6 + k * 2.4)
+		if yank_t >= 1.0:
+			yank_t = 0.0
+			var w := weapon_toy
+			_drop_weapon((at - w.global_position).normalized() * 520.0)
+			weapon_id = ""
+			world.fx_event("yoink", {"p": w.global_position})
+
+
+## Counts down what toys and powers did to us (every physics step).
+func _effects_step(dt: float) -> void:
+	if wet > 0.0:
+		wet = maxf(0.0, wet - dt * 0.07)
+		if burning > 0.0 and wet > 0.15:
+			burning = 0.0
+			wet -= 0.25   # putting the fire out dries us off a bit
+			world.fx_event("steam", {"p": center()})
+	if frozen_t > 0.0:
+		frozen_t -= dt
+		if frozen_t <= 0.0:
+			frozen_t = 0.01
+			thaw()
+	if stun_t > 0.0:
+		stun_t -= dt
+		if stun_t <= 0.0 and alive():
+			mood = "calm"
+	if bubble_t > 0.0:
+		bubble_t -= dt
+		if bubble_t <= 0.0:
+			bubble_t = 0.01
+			pop_bubble()
+	goo_t = maxf(0.0, goo_t - dt)
+	if lift_t > 0.0:
+		lift_t -= dt
+		if lift_t <= 0.0 and alive():
+			mood = "calm"
+	yank_t = maxf(0.0, yank_t - dt * 0.4)
+
+
+## A friend's screen only gets `mood`: add on what's happening to us
+## ("angry+ice+wet") so their copy shows the ice, bubble, sparks and goo too.
+func _show_status() -> void:
+	var s := mood.get_slice("+", 0)
+	if frozen_t > 0.0:
+		s += "+ice"
+	if bubble_t > 0.0:
+		s += "+bubble"
+	if stun_t > 0.0:
+		s += "+zap"
+	if goo_t > 0.0:
+		s += "+goo"
+	if wet > 0.3:
+		s += "+wet"
+	mood = s
+
+
+## True if `flag` (ice, bubble, zap, goo, wet) is showing, here or on a friend's screen.
+func shows(flag: String) -> bool:
+	var m: String = String(net.get("mood", mood)) if puppet else mood
+	return m.contains("+" + flag)
+
+
+## The face part of the mood (angry, scared, frozen, zapped…).
+func face() -> String:
+	var m: String = String(net.get("mood", mood)) if puppet else mood
+	return m.get_slice("+", 0)
 
 
 # ------------------------------------------------------------------- AI
@@ -684,11 +1102,23 @@ func enemy_of(o) -> bool:
 
 
 func physics_step(dt: float) -> void:
-	t += dt
+	if mood.contains("+"):
+		mood = mood.get_slice("+", 0)
+	wind = _wind_next
+	_wind_next = Vector2.ZERO
+	_step(dt)
+	if frozen_t > 0.0 or bubble_t > 0.0 or stun_t > 0.0 or goo_t > 0.0 or wet > 0.3:
+		_show_status()
+
+
+func _step(dt: float) -> void:
+	if frozen_t <= 0.0:
+		t += dt   # (frozen: the tail and wings stop wagging too)
 	flash = maxf(0.0, flash - dt * 4.0)
 	cool = maxf(0.0, cool - dt)
 	swing = maxf(0.0, swing - dt)
 	reload_t = maxf(0.0, reload_t - dt)   # reloading goes on between fights too
+	_effects_step(dt)
 	if burning > 0.0:
 		burning -= dt
 		hurt(12.0 * dt)
@@ -705,14 +1135,19 @@ func physics_step(dt: float) -> void:
 				world.remove(uid, false)
 			return
 		"ragdoll":
+			if frozen_t > 0.0:
+				return   # an ice block: nothing moves
 			_solve_limits(dt)
 			down_t += dt
 			var tor = parts.get("torso")
 			var slow: bool = tor != null and is_instance_valid(tor) and tor.linear_velocity.length() < 70.0
-			if held_by.is_empty() and down_t > 1.5 and slow:
+			if held_by.is_empty() and down_t > 1.5 and slow and lift_t <= 0.0:
 				stand_up()
 			return
-	if not is_instance_valid(body):
+	if not is_instance_valid(body) or frozen_t > 0.0:
+		return
+	if wind.length() > TUMBLE_WIND:
+		ragdoll(wind * 0.5, true)   # blown clean off our feet
 		return
 	if hit_t > 0.0:
 		hit_t -= dt
@@ -732,6 +1167,25 @@ func physics_step(dt: float) -> void:
 		PhysicsServer2D.body_set_state(weapon_toy.get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM, xf)
 	elif weapon_id != "":
 		weapon_id = ""
+	if bubble_t > 0.0:
+		# floating off in a bubble, paddling helplessly
+		var rise := -85.0 * clampf(sqrt(4.0 / weight()), 0.5, 1.0)
+		var drift := Vector2(sin(world.vision_time * 1.7 + uid) * 40.0, rise) + wind * 0.5
+		body.linear_velocity = body.linear_velocity.lerp(drift, minf(1.0, dt * 2.5))
+		walk += dt * 9.0
+		move = 0.0
+		return
+	if lift_t > 0.0:
+		walk += dt * 12.0   # legs kicking in the tractor beam
+		move = 0.0
+		mood = "scared"
+		return
+	if stun_t > 0.0:
+		move = 0.0
+		if randf() < dt * 8.0:
+			flash = 0.8
+		_locomote(dt)
+		return
 	if player_id >= 0:
 		_player(dt)
 	elif world.battle_on:
@@ -770,10 +1224,13 @@ func _locomote(dt: float) -> void:
 	speed *= minf(1.0, sqrt(size))
 	if world.in_liquid(center()) != "":
 		speed *= 0.5
+	if goo_t > 0.0:
+		speed *= 0.4   # gummed up
+		charge_t = 0.0
 	charge_t = maxf(0.0, charge_t - dt)
 	var v := body.linear_velocity
 	if def.get("flies", false):
-		var want := Vector2(move * speed, 0)
+		var want := Vector2(move * speed, 0) + wind
 		if target and is_instance_valid(target):
 			var dy: float = target.center().y - 60.0 - body.global_position.y
 			if absf(target.center().x - body.global_position.x) < 120.0:
@@ -785,7 +1242,9 @@ func _locomote(dt: float) -> void:
 		walk += dt * 12.0
 		return
 	var accel := (1400.0 if grounded else 450.0) * dt
-	v.x = move_toward(v.x, move * speed, accel)
+	# fans and wind carry us along (walking into the wind gets us nowhere)
+	v.x = move_toward(v.x, move * speed + wind.x, accel + absf(wind.x) * dt * 2.0)
+	v.y += wind.y * dt * 3.0
 	body.linear_velocity = v
 	if absf(move) > 0.05:
 		facing = signf(move) if target == null or player_id >= 0 or pers == "coward" and mood == "scared" else facing
@@ -807,7 +1266,7 @@ func _locomote(dt: float) -> void:
 	if want_jump and grounded:
 		want_jump = false
 		stuck_t = 0.0
-		var jv := 560.0 * (1.15 if def.get("jumpy", false) else 1.0) * (0.8 if beast else 1.0)
+		var jv := 560.0 * (1.15 if def.get("jumpy", false) else 1.0) * (0.8 if beast else 1.0) * (0.6 if goo_t > 0.0 else 1.0)
 		body.linear_velocity.y = -jv * sqrt(maxf(0.6, size))
 		world.fx_event("jump", {"p": body.global_position + Vector2(0, half_size().y)})
 
@@ -823,13 +1282,14 @@ func _think() -> void:
 	if pers == "peaceful":
 		target = null
 		return
-	if target == null or not is_instance_valid(target) or not target.alive() or (pers == "defend" and target.center().distance_to(center()) > 1500.0):
+	var guard: bool = pers == "defend" and not world.brave      # 📣 CHARGE!: guards leave their post too
+	if target == null or not is_instance_valid(target) or not target.alive() or (guard and target.center().distance_to(center()) > 1500.0):
 		# defenders watch as far as their weapon reaches (a sniper sees a long way)
-		var watch := 1400.0 if pers != "defend" else maxf(900.0, _reach() * 1.05)
+		var watch := 1400.0 if not guard else maxf(900.0, _reach() * 1.05)
 		target = _nearest(func(o): return enemy_of(o), watch)
 		# nobody close by: everyone except guards goes looking for a fight, so a
 		# battle never stalls with two armies waiting at opposite ends
-		if target == null and pers != "defend":
+		if target == null and not guard:
 			target = _nearest(func(o): return enemy_of(o), INF)
 	elif pers != "defend" and target.center().distance_to(center()) > 600.0:
 		# chasing someone far away: switch if somebody closer shows up
@@ -889,13 +1349,17 @@ func _act(dt: float) -> void:
 	elif ranged:
 		var near := reach * (0.35 if wt == "flame" else 0.45)
 		var far := reach * (0.75 if pers != "ranged" else 0.65)
-		if dist > far:
+		if dist > far or _blind_t > 2.0:
+			# too far, or a wall's been in the way for a while: go round (or hop over)
 			want = signf(d.x)
 		elif dist < near and pers == "ranged":
 			want = -signf(d.x)
 	else:
 		if absf(d.x) > reach * 0.7:
 			want = signf(d.x)
+	if world.brave:
+		# 📣 a stand-off: charge right up to them (off towers, over walls)
+		want = signf(d.x) if absf(d.x) > minf(reach * 0.5, 60.0) else 0.0
 	# spread out a little from teammates so armies don't stack into one blob
 	var push := 0.0
 	for o in world.fighters():
@@ -915,9 +1379,11 @@ func _act(dt: float) -> void:
 	# attack when in range
 	if dist <= reach + radius() * 0.6 + target.radius() * 0.5 and cool <= 0.0:
 		if ranged and not _clear_shot(tc):
+			_blind_t += dt
 			if randf() < 0.1:
 				want_jump = true
 			return
+		_blind_t = 0.0
 		_attack(tc, wt)
 
 
@@ -1069,7 +1535,7 @@ func _player(dt: float) -> void:
 
 # --------------------------------------------------------------- drawing
 func _process(_d: float) -> void:
-	if puppet:
+	if puppet and not shows("ice"):
 		t += _d
 	queue_redraw()
 

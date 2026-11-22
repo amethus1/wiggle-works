@@ -1,9 +1,12 @@
 class_name B3Rules
-## Battle Rules: the options in the ⚙️ panel (gravity, explosion size,
-## knockback, toughness, speed, friendly fire, reinforcements, time of day and
-## weather). Values are remembered between games (Settings.b3_rules).
+## Battle Rules: the options in the ⚙️ panel (the battle goal, gravity,
+## explosion size, knockback, toughness, speed, friendly fire, reinforcements,
+## time of day and weather). Values are remembered between games
+## (Settings.b3_rules). The 🏁 goals are run by B3Modes.
 
 const OPTIONS := [
+	{"id": "goal", "name": "Battle goal", "icon": "🏁", "choices": [
+		["last", "⚔️ Last team standing"], ["king", "👑 Defend the King"], ["hill", "🚩 King of the Hill"]]},
 	{"id": "gravity", "name": "Gravity", "icon": "🌍", "choices": [
 		["normal", "🌍 Normal"], ["moon", "🌙 Moon"], ["floaty", "🪐 Floaty"], ["heavy", "🪨 Heavy"]]},
 	{"id": "booms", "name": "Explosions", "icon": "💥", "choices": [
@@ -26,10 +29,11 @@ const OPTIONS := [
 		["off", "Off"], ["little", "A little"], ["lots", "📳 Lots"]]},
 ]
 
-const DEFAULTS := {"gravity": "normal", "booms": "normal", "knock": "normal", "health": "normal", "speed": "normal",
+const DEFAULTS := {"goal": "last", "gravity": "normal", "booms": "normal", "knock": "normal", "health": "normal", "speed": "normal",
 	"friendly": "on", "respawn": "off", "time": "day", "weather": "clear", "shake": "little"}
 
 const TIPS := {
+	"goal": "How to win: knock everyone out, keep your King safe, or hold the glowing circle",
 	"gravity": "Moon and Floaty gravity make everything fly much higher",
 	"booms": "Bigger blasts, bigger fireballs",
 	"knock": "How far fighters fly when they get hit",
@@ -120,3 +124,8 @@ static func friendly_fire() -> bool:
 
 static func respawn() -> bool:
 	return value("respawn") == "on"
+
+
+## 🏁 "last" (last team standing), "king" (👑 Defend the King) or "hill" (🚩 King of the Hill).
+static func goal() -> String:
+	return value("goal")

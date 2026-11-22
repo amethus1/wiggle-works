@@ -148,6 +148,12 @@ func is_on() -> bool:
 	return on or powered or zap_power > 0.0
 
 
+## Part of a go-kart or monster truck that's switched on (it bowls fighters over).
+func driving() -> bool:
+	var ride = self if parent_uid == 0 else (world.things.get(parent_uid) if world else null)
+	return ride is Toy and String(ride.def.get("build", "")) == "car" and ride.is_on()
+
+
 func update_freeze() -> void:
 	if extra.has("held_by"):
 		return   # a fighter is holding it

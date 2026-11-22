@@ -94,7 +94,7 @@ static func flame(w: World, shooter, from: Vector2, ang: float, rng: float, dmg:
 		var d: Vector2 = f.center() - from
 		if d.length() < rng and d.normalized().dot(dir) > 0.82:
 			f.hurt(dmg, dir * 60.0, shooter)
-			f.burning = maxf(f.burning, 2.5)
+			f.ignite(2.5)   # (a wet fighter just steams, and a frozen one melts)
 	for t in w.toys():
 		var d: Vector2 = t.global_position - from
 		if d.length() < rng and d.normalized().dot(dir) > 0.82:
@@ -116,7 +116,7 @@ static func blast(w: World, p: Vector2, rad: float, power: float, dmg: float) ->
 		dir = (dir + Vector2(0, -0.6)).normalized()
 		f.hurt(dmg * k, dir * power * k * 1.1)
 		if k > 0.5 and f.alive():
-			f.burning = maxf(f.burning, 1.0)
+			f.ignite(1.0)
 	for t in w.toys():
 		if t.global_position.distance_to(p) < rad * 0.7 and t.id in ["barrel", "dynamite", "landmine", "c4", "grenade"] and t.fuse < 0.0:
 			t.fuse = randf_range(0.08, 0.25)   # chain reaction
@@ -130,6 +130,8 @@ static func hazards(w: World, dt: float) -> void:
 		var kind := w.in_liquid(f.center() + Vector2(0, f.half_size().y * 0.6))
 		match kind:
 			"lava":
+				if f.frozen_t > 0.0:
+					f.thaw()
 				f.hurt(70.0 * dt)
 				f.burning = 3.0
 				if randf() < dt * 6.0:
@@ -140,7 +142,10 @@ static func hazards(w: World, dt: float) -> void:
 				if randf() < dt * 6.0:
 					w.fx_event("fizz", {"p": f.center()})
 			"water":
-				f.burning = 0.0
+				if f.burning > 0.0:
+					f.burning = 0.0
+					w.fx_event("steam", {"p": f.center()})
+				f.wet = 1.0
 	for t in w.toys():
 		if t.freeze:
 			continue
@@ -162,11 +167,20 @@ static func hazards(w: World, dt: float) -> void:
 	for z in w.fires:
 		z.t -= dt
 		for f in w.fighters():
-			if f.alive() and f.center().distance_to(z.p) < z.r:
-				f.burning = maxf(f.burning, 1.5)
+			if f.alive() and f.burning < 1.0 and f.center().distance_to(z.p) < z.r:
+				f.ignite(1.5)
 		if randf() < dt * 10.0:
 			w.fx_event("burn", {"p": z.p + Vector2(randf_range(-z.r, z.r), randf_range(-12, 8))})
 	w.fires = w.fires.filter(func(z): return z.t > 0.0)
+
+
+## How many teams (not counting wild beasts) still have someone standing.
+static func teams_standing(w: World) -> int:
+	var teams := {}
+	for f in w.fighters():
+		if f.team != "wild" and f.alive():
+			teams[f.team] = true
+	return teams.size()
 
 
 ## Which teams still have someone standing? Announces the winner once.

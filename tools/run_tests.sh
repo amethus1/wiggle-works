@@ -9,7 +9,7 @@ set -u
 cd "$(dirname "$0")/.."
 GODOT="${GODOT:-godot}"
 LIMIT=400   # seconds per suite
-ALL="core fight battle b3more b3net vehicles maps history modes net update"
+ALL="core fight battle b3more b3menu b3powers b3puzzle b3modes b3net vehicles maps history modes net toyfight update"
 suites="${*:-$ALL}"
 
 # Runs a command, stopping it after $1 seconds. Uses `timeout` (or gtimeout,

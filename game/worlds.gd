@@ -272,6 +272,11 @@ static func build(world: World, id: String) -> void:
 				# river in the middle
 				if absf(x) < 160.0:
 					y += 90.0 * cos(x / 160.0 * PI * 0.5)
+				# behind each fort the ground rises to a high meadow level with
+				# the tower's top: there used to be a pit behind the tower that
+				# nobody could reach or shoot into, so a fighter thrown there
+				# could stall the whole battle
+				y = lerpf(y, 10.0, smoothstep(1120.0, 1165.0, absf(x)))
 				y -= 520.0 * pow(maxf(0.0, absf(x) - 1500.0) / 400.0, 1.6)
 				return y
 			_ground(world, _strip(-1900, 1900, 1000, land), st)
@@ -409,8 +414,9 @@ static func add_starters(world: World, id: String) -> void:
 		"battle":
 			for i in 5:
 				var ids := ["soldier", "knight", "archer", "soldier", "rocketeer"]
-				world.spawn_fighter(ids[i], Vector2(-1100 + i * 60, 150), "red", "")
-				world.spawn_fighter(ids[i], Vector2(1100 - i * 60, 150), "blue", "")
+				# just in front of the towers (not inside them)
+				world.spawn_fighter(ids[i], Vector2(-1040 + i * 55, 150), "red", "")
+				world.spawn_fighter(ids[i], Vector2(1040 - i * 55, 150), "blue", "")
 			world.spawn_fighter("sniper", Vector2(-680, -40), "red", "defend")
 			world.spawn_fighter("sniper", Vector2(680, -40), "blue", "defend")
 			world.spawn_toy("barrel", Vector2(-500, 260))

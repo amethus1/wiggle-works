@@ -225,6 +225,10 @@ const WEAPONS := {
 	"bayonet": {"type": "melee", "range": 1.9, "dmg": 22.0, "cd": 0.9, "knock": 5.0, "snd": "slash", "anim": "thrust"},
 	"sabre": {"type": "melee", "range": 2.0, "dmg": 21.0, "cd": 0.75, "knock": 5.5, "snd": "slash", "anim": "swing", "charge_dmg": 30.0, "charge_knock": 15.0},
 	"lance": {"type": "melee", "range": 2.8, "dmg": 18.0, "cd": 1.1, "knock": 7.0, "snd": "bonk", "anim": "thrust", "charge_dmg": 44.0, "charge_knock": 18.0},
+	# right-click powers (see B3Player.power): a kick (people) or a shove
+	# (animals) that pushes an enemy back a little. word: pops up on a hit.
+	"kick": {"type": "melee", "range": 1.2, "dmg": 6.0, "cd": 1.2, "knock": 5.5, "snd": "bonk", "anim": "kick", "word": "POW!"},
+	"shove": {"type": "melee", "range": 1.3, "dmg": 6.0, "cd": 1.2, "knock": 5.5, "snd": "bonk", "anim": "bite", "word": "BONK!"},
 	# vehicles (see B3Vehicle)
 	"tank_shell": {"type": "proj", "proj": "tankshell", "range": 26.0, "dmg": 48.0, "cd": 4.0, "speed": 30.0, "radius": 3.0, "power": 11.0, "snd": "cannon", "min": 5.5},
 	"tank_mg": {"type": "gun", "range": 14.0, "dmg": 5.0, "cd": 0.09, "burst": 8, "reload": 1.3, "spread": 0.07, "knock": 1.0, "snd": "gun_mg", "tracer": Color(4.0, 2.4, 0.8)},
@@ -311,6 +315,28 @@ static func team_col(t: String) -> Color:
 	var d: Dictionary = TEAM.get(t, TEAM.wild)
 	var c: Color = d.col
 	return c
+
+
+## 🪙 What each thing costs in budget battles (🧩 Puzzles, 🌊 Wave Defense):
+## fighters, animals, dinosaurs, vehicles, buildings, pools and booms.
+const COSTS := {
+	"stick": 1, "soldier": 2, "knight": 3, "viking": 3, "archer": 2, "sniper": 4, "rocketeer": 4,
+	"grenadier": 3, "gunner": 4, "medic": 3, "ninja": 3, "giant": 7, "wizard": 6, "robot": 8,
+	"hoplite": 3, "immortal": 2, "legionary": 3, "gaul": 2, "saxon": 2, "longbow": 2, "horseknight": 5,
+	"redcoat": 2, "minuteman": 2, "linesman": 2, "cavalry": 4, "union": 2, "confed": 2, "gi": 2,
+	"dog": 1, "wolf": 2, "bear": 4, "bull": 4, "elephant": 7, "chicken": 1, "gorilla": 6, "mammoth": 9,
+	"trex": 12, "raptor": 3, "trike": 8, "stego": 7, "brachio": 10, "ptero": 4, "dragon": 15,
+	"tank": 15, "jeep": 6, "cannon": 6, "mgnest": 5, "car": 3, "heli": 12, "plane": 14,
+	"block": 1, "wall": 2, "ramp": 1, "tower": 5, "bunker": 6, "bridge": 3, "sandbags": 1, "crates": 1,
+	"lava": 4, "lava_lake": 8, "acid": 4, "acid_swamp": 8,
+	"grenade": 2, "dynamite": 2, "c4": 3, "mine": 2, "xbarrel": 2, "cluster": 5, "napalm": 5,
+	"acidbomb": 5, "airstrike": 10, "artillery": 10, "nuke": 30,
+}
+
+
+## 🪙 The price of `id` in a budget battle (3 if it isn't in COSTS).
+static func cost(id: String) -> int:
+	return int(COSTS.get(id, 3))
 
 
 static func unit_def(kind: String) -> Dictionary:

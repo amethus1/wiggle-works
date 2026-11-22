@@ -29,6 +29,9 @@ var _line: MultiMeshInstance3D
 var _sel_ring: MeshInstance3D
 var _t := 0.0
 var _veh_yaw := INF             # a friend's battle: the car we drive, last frame's heading
+var _round: Array = []          # ⇥ Tab: ids of the teammates played this round (switch_teammate)
+var _round_ms := -100000
+const ROUND_MS := 6000          # ...a new round starts after this long without a press
 
 
 func _ready() -> void:
@@ -97,7 +100,9 @@ func set_team(t: String) -> void:
 
 # --------------------------------------------------------- playing a fighter
 ## Take control of `u` (see B3Player). Starts the battle if it hasn't begun.
-func play_as(u: B3Unit, fp := false, jumped := false) -> void:
+## `jumped`: you came straight from another fighter (knocked out, or ⇥ Tab),
+## so just a short `msg` (the knock-out one if empty) instead of the full help.
+func play_as(u: B3Unit, fp := false, jumped := false, msg := "") -> void:
 	if u == null or not is_instance_valid(u) or u.dead:
 		return
 	if u.ctl != null and u.ctl != B3Player.me:
@@ -125,11 +130,13 @@ func play_as(u: B3Unit, fp := false, jumped := false) -> void:
 	if jumped:
 		battle.snd("boing", null, 0.5, 1.3)
 		if battle.ui:
-			battle.ui.toast("💫 Knocked out! Now you're the %s %s. Keep going!" % [u.def.icon, u.def.name], false)
+			if msg == "":
+				msg = "💫 Knocked out! Now you're the %s %s. Keep going!" % [u.def.icon, u.def.name]
+			battle.ui.toast(msg, false)
 		return
 	battle.snd("battle_start", null, 0.5)
 	if battle.ui:
-		battle.ui.toast("🎮 You're the %s!  WASD to move · mouse to aim · click to attack · Space to jump · V first person · Esc to stop" % u.def.name, false)
+		battle.ui.toast("🎮 You're the %s %s! Your keys are at the top of the screen." % [u.def.icon, u.def.name], false)
 
 
 ## The fighter or vehicle you were playing is gone (knocked out, wrecked).
@@ -149,7 +156,9 @@ func player_lost() -> void:
 
 ## The teammate closest to where you were: standing fighters first, and the
 ## same sort as before (a fighter for a fighter, a vehicle for a vehicle).
-func next_teammate() -> B3Unit:
+## ⇥ Tab passes `same_sort` false (a tank or plane is fair game) and the ids
+## of the teammates it has already been round (`skip`).
+func next_teammate(skip: Array = [], same_sort := true) -> B3Unit:
 	var best: B3Unit = null
 	var bd := INF
 	for o: B3Unit in battle.units:
@@ -157,15 +166,45 @@ func next_teammate() -> B3Unit:
 			continue
 		if o.team == "wild" and o.kind != B3Player.kind:
 			continue      # wild animals and monsters are each on their own side
+		if skip.has(o.get_instance_id()):
+			continue
 		var d := o.global_position.distance_to(B3Player.last_pos)
 		if o.down:
 			d += 500.0
-		if (o is B3Vehicle) != B3Player.was_vehicle:
+		if same_sort and (o is B3Vehicle) != B3Player.was_vehicle:
 			d += 250.0
 		if d < bd:
 			bd = d
 			best = o
 	return best
+
+
+## ⇥ Tab (or N) while playing: jump into the nearest teammate you're not
+## playing, in first person or overhead. Pressing it again moves on to the
+## nearest one you haven't been yet, round and round. In a friend's battle
+## play_as asks the host.
+func switch_teammate() -> void:
+	if not B3Player.active():
+		return
+	var u := B3Player.unit
+	var now := Time.get_ticks_msec()
+	if now - _round_ms > ROUND_MS:
+		_round.clear()      # a while since the last press: start a new round from here
+	_round_ms = now
+	if not _round.has(u.get_instance_id()):
+		_round.append(u.get_instance_id())
+	B3Player.last_pos = u.global_position
+	var next := next_teammate(_round, false)
+	if next == null and _round.size() > 1:
+		_round = [u.get_instance_id()]       # been round everyone: start again
+		next = next_teammate(_round, false)
+	if next == null:
+		battle.snd("nope", null, 0.5)
+		if battle.ui:
+			battle.ui.toast("Nobody else on your team to jump into!", false)
+		return
+	_round.append(next.get_instance_id())
+	play_as(next, B3Player.me.fp, true, "⇥ Now you're the %s %s!" % [next.def.icon, next.def.name])
 
 
 ## True if someone else (a friend 👥) is already playing `u`.
@@ -185,6 +224,8 @@ func set_first_person(on: bool) -> void:
 	var u := B3Player.unit
 	if on and (u == null or not is_instance_valid(u)):
 		on = false
+	if u != null and is_instance_valid(u) and B3Player.power(u) == "scope":
+		B3Player.me.fire2 = false      # the sniper's scope comes out when you switch views
 	B3Player.me.fp = on
 	if on:
 		B3Player.me.look_yaw = u.facing
@@ -331,7 +372,7 @@ func _player_input(e: InputEvent) -> bool:
 		var mm := e as InputEventMouseMotion
 		_mouse = mm.position
 		if me.fp:
-			var k := 0.0032 * Settings.b3_mouse_k
+			var k: float = 0.0032 * Settings.b3_mouse_k * battle.cam.look_k()     # slower through a sniper's scope
 			me.look_yaw = wrapf(me.look_yaw - mm.relative.x * k, -PI, PI)
 			me.look_pitch = clampf(me.look_pitch - mm.relative.y * k, -1.35, 1.35)
 		return true
@@ -344,7 +385,13 @@ func _player_input(e: InputEvent) -> bool:
 				_capture_mouse(true)     # clicking back into the game grabs the mouse again
 			return true
 		if mb.button_index == MOUSE_BUTTON_RIGHT:
-			me.fire2 = mb.pressed
+			if me.fp and B3Player.power(B3Player.unit) == "scope":
+				# a sniper in first person: each right-click puts the scope in or takes it out
+				if mb.pressed:
+					me.fire2 = not me.fire2
+					Sfx.play("click", null, 0.5, 1.5 if me.fire2 else 1.1)
+			else:
+				me.fire2 = mb.pressed      # a power (B3Player.power) or a vehicle's second gun
 			return true
 		if me.fp and mb.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 			return true
@@ -359,6 +406,9 @@ func _player_input(e: InputEvent) -> bool:
 				return true
 			KEY_V, KEY_C:
 				set_first_person(not me.fp)
+				return true
+			KEY_TAB, KEY_N:
+				switch_teammate()      # (not playing, Tab shows or hides the Toy Box: _key)
 				return true
 			KEY_F:
 				me.fire = true
@@ -501,7 +551,17 @@ func _place(a: Vector3, b: Vector3, dragged: bool, box: bool) -> void:
 			"dragged": dragged, "box": box, "yaw": deg_to_rad(battle.cam.yaw) + struct_yaw})
 		battle.snd("spawn", b, 0.5)
 		return
+	# 🪙 budget battles: only on your side, only what you can pay for
+	var tm: String = battle.build_team if battle.build_team != "" else team
+	var why: String = battle.can_place(id, a)
+	if why != "":
+		if battle.ui:
+			battle.ui.toast(why, false)
+		battle.snd("nope", a, 0.6)
+		return
 	if B3Defs.UNITS.has(id):
+		if battle.budget >= 0:
+			place_size = 1.0      # 🪙 budget battles: Normal size only (a Huge knight costs the same)
 		var spots := _line_spots(a, b, dragged, box)
 		var room: int = MAX_UNITS - battle.units.size()
 		if room <= 0:
@@ -513,8 +573,13 @@ func _place(a: Vector3, b: Vector3, dragged: bool, box: bool) -> void:
 			if n >= room:
 				break
 			var sp: Vector3 = p
-			battle.spawn_unit(id, team, sp, pers, INF, place_size)
+			if battle.can_place(id, sp) != "":
+				continue       # outside your side, or out of points
+			var nu: B3Unit = battle.spawn_unit(id, tm, sp, pers, INF, place_size)
+			battle.buy(nu, id)
 			n += 1
+		if id == "trex" and n > 0:
+			Settings.award("dino")      # 🦖 the Jurassic sticker, like a T-Rex in the 2D playground
 		battle.fx.poof(b + Vector3(0, 0.5, 0), 0.6)
 		battle.snd("spawn", b, 0.7)
 		if battle.ui:
@@ -524,31 +589,33 @@ func _place(a: Vector3, b: Vector3, dragged: bool, box: bool) -> void:
 		var r := float(d.radius)
 		if dragged:
 			r = clampf(Vector2(b.x - a.x, b.z - a.z).length(), 1.5, 12.0)
-		battle.spawn_hazard(String(d.kind), a, r)
+		battle.buy(battle.spawn_hazard(String(d.kind), a, r), id)
 		battle.snd("splash", a, 0.8)
 	elif B3Defs.STRUCTS.has(id):
 		var flat := Vector3(b.x - a.x, 0, b.z - a.z)
 		var len_ := flat.length()
 		var yaw: float = deg_to_rad(battle.cam.yaw) + struct_yaw
+		var st: B3Struct = null
 		match id:
 			"wall":
 				if dragged and len_ > 1.5:
-					battle.spawn_struct("wall", (a + b) * 0.5, atan2(-flat.z, flat.x), len_)
+					st = battle.spawn_struct("wall", (a + b) * 0.5, atan2(-flat.z, flat.x), len_)
 				else:
-					battle.spawn_struct("wall", a, yaw, 6.0)
+					st = battle.spawn_struct("wall", a, yaw, 6.0)
 			"ramp":
 				if dragged and len_ > 1.0:
 					var dir := flat / len_
-					battle.spawn_struct("ramp", a + dir * 3.0, atan2(dir.x, dir.z))
+					st = battle.spawn_struct("ramp", a + dir * 3.0, atan2(dir.x, dir.z))
 				else:
-					battle.spawn_struct("ramp", a, yaw + PI)
+					st = battle.spawn_struct("ramp", a, yaw + PI)
 			"bridge":
 				if dragged and len_ > 1.0:
-					battle.spawn_struct("bridge", (a + b) * 0.5, atan2(flat.x, flat.z))
+					st = battle.spawn_struct("bridge", (a + b) * 0.5, atan2(flat.x, flat.z))
 				else:
-					battle.spawn_struct("bridge", a, yaw + PI * 0.5)
+					st = battle.spawn_struct("bridge", a, yaw + PI * 0.5)
 			_:
-				battle.spawn_struct(id, a, yaw)
+				st = battle.spawn_struct(id, a, yaw)
+		battle.buy(st, id)
 
 
 func _line_spots(a: Vector3, b: Vector3, dragged: bool, box: bool) -> Array:

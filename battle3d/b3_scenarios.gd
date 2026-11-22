@@ -1,16 +1,81 @@
 class_name B3Scenarios
-## Ready-made battles for screenshots, tests and showing off
-## (`--battle3d --scenario=NAME`). Each one starts the fight by itself.
+## Ready-made battles. Kids pick them in the 📜 pop-up's 🎯 Ready-made tab
+## (setup: everything waits for ▶ Fight!); screenshots and tests use
+## `--battle3d --scenario=NAME` (run: the fight starts by itself).
 ##   skirmish, dinos, nuke, hazards, structures, animals, chaos, big, c4,
 ##   vehicles, monsters, airshow (planes and helicopters over two armies),
-##   roadtrip (race cars bumping soldiers)
-##   (lineup / closeup / showcase / garage / hangar: models only, no fight)
+##   roadtrip (race cars bumping soldiers), hangar (every vehicle parked),
+##   waves (🌊 Wave Defense; waves:N starts at wave N, waves:0 waits for
+##   Fight! like the 🎯 card does; see B3Modes)
+##   (lineup / closeup / showcase / garage / firebreath: models only, no fight)
 
 const R := Vector3(0.7071, 0, -0.7071)    # screen-right on the ground (default view)
 const F := Vector3(-0.7071, 0, -0.7071)   # screen-up (away from the camera)
 
+## Set up, but nobody fights (close-ups of the models for screenshots).
+const STILL := ["hangar", "showcase", "garage", "firebreath", "lineup", "closeup"]
+
+## The 🎯 Ready-made tab, in this order: a card each (icon, name, who's
+## fighting, what happens).
+const MENU := [
+	{"id": "skirmish", "icon": "⚔️", "name": "Skirmish",
+		"sides": "🔴 Knights, soldiers and archers vs 🔵 Vikings, ninjas and rocketeers",
+		"desc": "Two armies meet in the middle, with sandbags, crates and boom barrels to fight around."},
+	{"id": "waves", "icon": "🌊", "name": "Wave Defense",
+		"sides": "🔴 You and your fort vs 🔵 wave after wave of attackers",
+		"desc": "Spend 🪙 points on defenders, walls, towers and mines, then hold the fort! Every wave is stronger, with a boss every 5th. Jump in and fight too!"},
+	{"id": "dinos", "icon": "🦖", "name": "Dino Attack",
+		"sides": "🐾 A T-Rex, raptors and more vs 🔵 Soldiers",
+		"desc": "A herd of dinosaurs charges at a line of soldiers behind sandbags."},
+	{"id": "nuke", "icon": "☢️", "name": "Nuke!",
+		"sides": "🔴 Red army vs 🔵 Blue army",
+		"desc": "Two big armies, a tower and a bunker... and a nuke falls as soon as you press Fight!"},
+	{"id": "hazards", "icon": "🌋", "name": "Lava Bridge",
+		"sides": "🔴 Vikings, knights and archers vs 🔵 Soldiers and stick figures",
+		"desc": "Fight over a bridge across a lava pool, with acid pools on both sides. Don't fall in!"},
+	{"id": "structures", "icon": "🏰", "name": "Storm the Fort",
+		"sides": "🔴 Knights, vikings and giants vs 🔵 Archers in towers",
+		"desc": "Archers and a sniper hold two towers and a bunker. Can the red army break in?"},
+	{"id": "animals", "icon": "🐺", "name": "Wild Animals",
+		"sides": "🐾 Wolves, a bear and a bull vs 🟢 An elephant, dogs and soldiers",
+		"desc": "A fight in the snow, with chickens running around in the middle."},
+	{"id": "chaos", "icon": "🌀", "name": "Total Chaos",
+		"sides": "🔴 🔵 🟢 🟡 Every kind of fighter, on four teams",
+		"desc": "A big circle of everyone around a lava pool. Which team will be the last one standing?"},
+	{"id": "big", "icon": "🎖️", "name": "Huge Battle",
+		"sides": "🔴 75 fighters vs 🔵 75 fighters",
+		"desc": "150 fighters in two giant armies. It's a big one, so it may be slow on some computers."},
+	{"id": "c4", "icon": "📟", "name": "C4 Surprise",
+		"sides": "🔴 Soldiers vs 🔵 Soldiers",
+		"desc": "Two lines of soldiers with C4 hidden between them. It goes off 2 seconds after you press Fight!"},
+	{"id": "vehicles", "icon": "🚜", "name": "Tank Line",
+		"sides": "🔴 Tanks, jeeps, a cannon and machine guns vs 🔵 Army",
+		"desc": "Red's vehicles hold the line against an army with rockets and a giant."},
+	{"id": "monsters", "icon": "🐉", "name": "Monster Mash",
+		"sides": "🐾 A dragon · 🟢 Gorillas and mammoths · 🔴 Wizards, robots and knights",
+		"desc": "A wild dragon breathes fire on everyone while gorillas and mammoths charge the wizards."},
+	{"id": "airshow", "icon": "✈️", "name": "Air Show",
+		"sides": "🔴 vs 🔵 Fighter planes, helicopters and two armies",
+		"desc": "Planes and helicopters dogfight in the sky over 60 fighters."},
+	{"id": "roadtrip", "icon": "🏎️", "name": "Road Trip",
+		"sides": "🔴 Race cars and stick figures vs 🔵 Soldiers, knights and jeeps",
+		"desc": "Race cars zoom into the soldiers and BONK them sky-high. There are ramps to jump, too!"},
+	{"id": "hangar", "icon": "🛩️", "name": "Hangar",
+		"sides": "Every vehicle, parked up close",
+		"desc": "Pick a tank, car, helicopter or plane and press 🎮 Play as me! to drive or fly it."},
+]
+
+
+## The 🎯 Ready-made card for `sc` ({} if there isn't one).
+static func info(sc: String) -> Dictionary:
+	for d in MENU:
+		var e: Dictionary = d
+		if String(e.id) == sc:
+			return e
+	return {}
+
 static func map_for(sc: String) -> String:
-	match sc:
+	match sc.get_slice(":", 0):
 		"hazards":
 			return "volcano"
 		"nuke":
@@ -35,7 +100,59 @@ static func line(b, kind: String, team: String, x: float, y0: float, y1: float, 
 		b.spawn_unit(kind, team, at(b, x, y), pers)
 
 
+## Builds `sc` on the map that's loaded and starts the fight a moment
+## later (--scenario=NAME for screenshots and tests).
 static func run(b, sc: String) -> void:
+	if not _build(b, sc) or sc in STILL or sc == "waves:0":
+		return
+	on_fight(b, sc)
+	b.later(0.5, func(): b.set_fighting(true))
+
+
+## 🎯 Ready-made: loads the right map and sets `sc` up the same way, then
+## waits for ▶ Fight! (the nuke or the C4 goes off once it's pressed, see
+## on_fight). False if there's no such battle.
+static func setup(b, sc: String) -> bool:
+	if info(sc).is_empty():
+		return false
+	if b.tools:
+		b.tools.stop_playing()
+	b.set_fighting(false)
+	if b.paused:
+		b.set_paused(false)
+	b.load_map(map_for(sc))
+	b.apply_rules()
+	# the layouts are made for the usual view
+	b.cam.yaw = 45.0
+	b.cam.yaw_target = 45.0
+	_build(b, sc)
+	b.ready_id = sc
+	b.scenario = sc
+	if b.ui:
+		var d := info(sc)
+		if sc == "waves":
+			b.ui.toast("🌊 Wave Defense! Spend your 🪙 points on defenders, walls and mines in the glowing fort, then press ▶ Fight!")
+		else:
+			b.ui.toast("🎯 %s %s is ready!  Press ▶ Fight! to start, or pick one and play as it!" % [d.icon, d.name])
+		b.ui.refresh()
+	return true
+
+
+## What a ready-made battle does once the fight starts.
+static func on_fight(b, sc: String) -> void:
+	match sc:
+		"nuke":
+			b.later(0.3, func(): b.drop("nuke", at(b, 0, 0)))
+		"c4":
+			b.later(2.0, func():
+				if b.c4_count() > 0:
+					b.detonate_c4())
+
+
+static func _build(b, sc: String) -> bool:
+	if sc == "waves" or sc.begins_with("waves:"):
+		_waves(b, maxi(1, sc.get_slice(":", 1).to_int()) if sc.contains(":") else 1)
+		return true
 	match sc:
 		"skirmish":
 			_skirmish(b)
@@ -65,28 +182,66 @@ static func run(b, sc: String) -> void:
 			_roadtrip(b)
 		"hangar":
 			_hangar(b)
-			return
 		"showcase":
 			_showcase(b)
-			return
 		"garage":
 			_garage(b)
-			return
 		"firebreath":
 			_firebreath(b)
-			return
 		"lineup":
 			_lineup(b)
-			return
 		"closeup":
 			_lineup(b)
 			b.cam.fit(at(b, -1.5, 6), 9.0)
-			return
 		_:
 			if b.ui:
 				b.ui.toast("Unknown scenario: " + sc)
-			return
-	b.later(0.5, func(): b.set_fighting(true))
+			return false
+	return true
+
+
+## 🌊 Wave Defense: Red's fort (sandbags round a tower and a bunker, with a
+## few defenders), the 🪙 points to spend in it, and waves of attackers from
+## the far side once Fight! is pressed (B3Modes). Laid out square to the
+## map, with the camera turned so the attackers come down the screen.
+static func _waves(b, first: int) -> void:
+	var f: Rect2 = B3Modes.FORT
+	var pts: int = B3Modes.START_POINTS
+	for n in range(1, first):
+		pts += B3Modes.wave_bonus(n) + 6      # (starting later: what the waves before would have given)
+	b.ready_id = "waves"
+	b.set_budget(pts, f, "red")
+	b.modes.begin_waves(first)
+	var g := func(x: float, z: float) -> Vector3:
+		return Vector3(x, b.world.height_at(x, z), z)
+	# sandbags along the front and the sides (their round side faces out)
+	for x in [-7.5, -2.5, 2.5, 7.5]:
+		b.spawn_struct("sandbags", g.call(x, 6.5), PI)
+	for z in [11.0, 16.5]:
+		b.spawn_struct("sandbags", g.call(-12.0, z), -PI * 0.5)
+		b.spawn_struct("sandbags", g.call(12.0, z), PI * 0.5)
+	b.spawn_struct("tower", g.call(-6.0, 19.0), 0.0)
+	b.spawn_struct("bunker", g.call(6.0, 18.0), PI)     # its slits face the attackers
+	for x in [-7.5, -2.5, 2.5, 7.5]:
+		b.spawn_unit("soldier", "red", g.call(x, 8.6), "defend", PI)
+	b.spawn_unit("knight", "red", g.call(-3.5, 12.0), "defend", PI)
+	b.spawn_unit("knight", "red", g.call(3.5, 12.0), "defend", PI)
+	b.spawn_unit("medic", "red", g.call(0.0, 15.0), "defend", PI)
+	b.later(0.15, func():
+		var top: Vector3 = g.call(-6.0, 19.0)
+		for dx in [-0.8, 0.8]:
+			var p := Vector3(top.x + dx, b.surface_y(top + Vector3(dx, 30, 0)), top.z)
+			b.spawn_unit("archer", "red", p, "defend", PI))
+	b.spawn_prop("xbarrel", g.call(-2.0, 3.5))
+	b.spawn_prop("xbarrel", g.call(4.0, 3.0))
+	if b.tools:
+		b.tools.pers = "defend"       # what you buy guards its spot in the fort
+		b.tools.team = "red"
+		if b.ui:
+			b.ui.refresh_palette()
+	b.cam.yaw = 0.0
+	b.cam.yaw_target = 0.0
+	b.cam.fit(Vector3(0, 0, 5), 40.0)
 
 
 static func _army(b, team: String, side: float, mix: Array) -> void:
@@ -136,7 +291,6 @@ static func _nuke(b) -> void:
 	for i in 6:
 		b.spawn_prop("xbarrel", at(b, -4 + i * 1.6, -10))
 	b.spawn_struct("crates", at(b, 4, 8), 0.3)
-	b.later(0.3, func(): b.drop("nuke", at(b, 0, 0)))
 	b.cam.fit(at(b, 0, 2), 64.0)
 
 
@@ -221,7 +375,6 @@ static func _c4(b) -> void:
 	for i in 5:
 		b.spawn_prop("c4", at(b, 0, -6 + i * 3.0))
 	b.spawn_struct("wall", at(b, 0, 10), deg_to_rad(45.0), 10.0)
-	b.later(2.0, func(): b.detonate_c4())
 	b.cam.fit(at(b, 0, 0), 28.0)
 
 

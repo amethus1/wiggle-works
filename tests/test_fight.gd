@@ -70,6 +70,17 @@ func _ready() -> void:
 		await get_tree().physics_frame
 		t += 1
 	check(w.last_winner != "", "a red-vs-blue battle ends with a winner (%s after %.0f s)" % [w.last_winner, t / 120.0])
+	await fresh()
+	# two sharpshooters with a chest-high wall between them: they mustn't just
+	# hop up and down behind it for ever (that stalled Battle Valley)
+	w.apply_command(0, {"cmd": "platform", "x0": -13, "y0": 190, "x1": 13, "y1": 300})
+	w.spawn_fighter("soldier", Vector2(-280, 150), "red", "ranged")
+	w.spawn_fighter("rocketeer", Vector2(280, 150), "blue", "ranged")
+	t = 0
+	while w.last_winner == "" and t < 120 * 40:
+		await get_tree().physics_frame
+		t += 1
+	check(w.last_winner != "", "two shooters behind a wall go round it and fight (%s won after %.0f s)" % [w.last_winner, t / 120.0])
 
 	print("explosions")
 	await fresh()
@@ -287,6 +298,22 @@ func _ready() -> void:
 			if a.id == "arrow" and a.nailed and a.global_position.y < 200.0:
 				floating = true
 	check(not floating, "an arrow that hits a Wiggly bounces off instead of sticking in mid-air")
+
+	print("stand-offs")
+	await fresh()
+	# two guards far out of each other's reach would wait forever
+	w.spawn_fighter("knight", Vector2(-1100, 150), "red", "defend")
+	w.spawn_fighter("knight", Vector2(1100, 150), "blue", "defend")
+	var st_t := 0
+	var charged_at := -1
+	while w.last_winner == "" and st_t < 120 * 60:
+		await get_tree().physics_frame
+		st_t += 1
+		if w.brave and charged_at < 0:
+			charged_at = st_t
+	check(charged_at > 0 and charged_at / 120.0 >= World.QUIET_CHARGE - 1.0, "📣 after %.0f s with nobody hurt, everyone charges (at %.0f s)" % [World.QUIET_CHARGE, charged_at / 120.0])
+	check(w.last_winner != "", "so even two guards far apart finish the battle (%s won after %.0f s)" % [w.last_winner, st_t / 120.0])
+	check(not w.brave and w.quiet_t == 0.0, "and the charge is over once someone wins")
 
 	print("nuke")
 	await fresh()

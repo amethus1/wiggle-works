@@ -296,6 +296,13 @@ const STICKERS := [
 	{"id": "armory", "emoji": "🗡️", "name": "Armory", "desc": "Give 5 weapons or armor to people."},
 	{"id": "builder", "emoji": "🏗️", "name": "Architect", "desc": "Draw 10 platforms."},
 	{"id": "hero", "emoji": "🦸", "name": "Hero", "desc": "Play as a person and knock out 5 enemies."},
+	# ⚔️ 3D Battle (it also gives General, Hero, Big Bada Boom, Boom Boom Boom and Better Together)
+	{"id": "b3win", "emoji": "🏆", "name": "Victory!", "desc": "Fight a 3D Battle until one team wins."},
+	{"id": "ace", "emoji": "✈️", "name": "Ace Pilot", "desc": "Fly a plane or helicopter and knock out 3 enemies."},
+	{"id": "tankbuster", "emoji": "🧨", "name": "Tank Buster", "desc": "Wreck a tank with a boom, or while you play."},
+	{"id": "historybuff", "emoji": "📜", "name": "History Buff", "desc": "Finish 3 different History battles."},
+	{"id": "fphero", "emoji": "👀", "name": "First-Person Hero", "desc": "Win a 3D Battle while you play in first person."},
+	{"id": "puzzles", "emoji": "🧩", "name": "Puzzle Master", "desc": "Solve every 3D Army Puzzle."},
 ]
 
 const PAINT := [

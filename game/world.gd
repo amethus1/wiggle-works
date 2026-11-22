@@ -53,6 +53,12 @@ var _ball_rain_t := 0.0
 var battle_on := true          # fighters fight (off = everyone just stands around)
 var auto_clean := true         # KO'd fighters disappear after a while
 var last_winner := ""
+## Stand-offs: seconds of battle with nobody hurt. After a while everyone gets
+## `brave` and charges straight at their enemy (hopping off towers and walls),
+## so two shooters with a wall between them can't stall a battle forever.
+const QUIET_CHARGE := 15.0
+var quiet_t := 0.0
+var brave := false
 var fires: Array = []          # burning ground: {p, r, t}
 var liquid_kinds: Array = []   # kind of each water rect: water | lava | acid
 var liquid_groups: Array = []  # which placed tub each liquid belongs to (0 = part of the world)
@@ -62,6 +68,8 @@ var fighter_layer: Node2D
 var _battle_t := 0.0
 var _strikes: Array = []       # bombs and shells still to drop: {t, p, kind}
 var _impacts: Array = []       # collisions waiting to be handled (see queue_impact)
+var cars_on := 0               # go-karts and monster trucks driving (last step)
+var _jelly_q: PhysicsShapeQueryParameters2D = null
 
 
 func _ready() -> void:
@@ -228,6 +236,13 @@ func gravity_dir() -> Vector2:
 	if magic.has("float"):
 		return Vector2.ZERO
 	return g.normalized() if g != Vector2.ZERO else Vector2.ZERO
+
+
+## Gravity right now, in px/s² (Float Away makes it a gentle pull upward).
+func gravity_vec() -> Vector2:
+	if magic.has("float"):
+		return Vector2(0, -60)
+	return Catalog.gravity_def(gravity_id).g
 
 
 func set_night(on: bool) -> void:
@@ -442,6 +457,8 @@ func _clear_all() -> void:
 	fires.clear()
 	_strikes.clear()
 	last_winner = ""
+	quiet_t = 0.0
+	brave = false
 	for l in links:
 		l.destroy()
 	links.clear()
@@ -583,7 +600,7 @@ func apply_command(pid: int, c: Dictionary) -> void:
 				ToyLogic.use(self, t)
 			elif t is Wiggly:
 				t.use_special()
-			elif t is Fighter and t.state == "stand":
+			elif t is Fighter and t.state == "stand" and not t.helpless():
 				var en = t._nearest(func(o): return t.enemy_of(o), 900.0)
 				var aim_at: Vector2 = en.center() if en else t.center() + Vector2(t.facing * 200.0, -20)
 				t.aim = t._aim_at(aim_at, t._wtype())
@@ -799,6 +816,8 @@ func grab_start(pid: int, t, at: Vector2) -> void:
 		t.grabbed_by[pid] = true
 		t.idle_t = 0.0
 	elif t is Fighter:
+		if t.frozen_t > 0.0:
+			t.thaw(true)   # grabbing an ice block cracks it open
 		if t.state == "stand":
 			t.ragdoll()
 		var part: PhysicsBody2D = t.body_near(at)
@@ -966,6 +985,7 @@ func resize_wiggly(w: Wiggly, s: float) -> void:
 
 func zap_area(c: Vector2, rad: float, from: Wiggly) -> void:
 	var hits: Array = []
+	var zapped: Array = []
 	for t in things.values():
 		if t == from:
 			continue
@@ -979,7 +999,44 @@ func zap_area(c: Vector2, rad: float, from: Wiggly) -> void:
 		elif t is Wiggly:
 			t.electric = 1.2
 			hits.append(p)
+		elif t is Fighter and t.alive() and t.frozen_t <= 0.0:
+			zapped.append(t)
+			hits.append(p)
 	fx_event("zap", {"p": c, "hits": hits, "r": rad})
+	if not zapped.is_empty():
+		_zap_chain(zapped)
+
+
+## Zappy's zap jumps on from soldier to soldier, further through wet ones
+## (a whole pond of them) and ones in metal armor. Up to 12 in all.
+func _zap_chain(first: Array) -> void:
+	var hit := {}
+	for f in first:
+		hit[f] = true
+	var others: Array = fighters().filter(func(o): return o.alive() and o.frozen_t <= 0.0 and not hit.has(o))
+	var queue: Array = first.duplicate()
+	var pairs: Array = []
+	var i := 0
+	while i < queue.size() and hit.size() < 12:
+		var a: Fighter = queue[i]
+		i += 1
+		var ac := a.center()
+		var reach := 70.0 + a.radius() * 0.5 + (110.0 if a.wet > 0.2 else 0.0) + 30.0 * minf(2.0, a.metal())
+		for o in others:
+			if hit.has(o):
+				continue
+			var oc: Vector2 = o.center()
+			var r2 := reach + (60.0 if o.wet > 0.2 and a.wet > 0.2 else 0.0) + 20.0 * minf(2.0, o.metal())
+			if ac.distance_to(oc) < r2:
+				hit[o] = true
+				queue.append(o)
+				pairs.append([ac, oc])
+				if hit.size() >= 12:
+					break
+	for f in hit:
+		f.zap()
+	if not pairs.is_empty():
+		fx_event("zap_chain", {"p": pairs[0][0], "pairs": pairs})
 
 
 func heat_area(c: Vector2, rad: float, from: Wiggly) -> void:
@@ -995,6 +1052,8 @@ func heat_area(c: Vector2, rad: float, from: Wiggly) -> void:
 			ToyLogic.heat(self, t)
 		elif t is Wiggly and t.frozen_t > 0.0:
 			t.set_frozen(0.0)
+		elif t is Fighter:
+			t.ignite(3.0)   # (melts the ice instead if it's frozen)
 	fx_event("heat", {"p": c, "r": rad})
 
 
@@ -1015,6 +1074,10 @@ func freeze_area(c: Vector2, rad: float, sec: float, from = null) -> void:
 			if not t.grounded:
 				mid_air = true
 			t.set_frozen(sec)
+		elif t is Fighter and t.alive():
+			if t.state == "stand" and not t.grounded and not t.def.get("flies", false):
+				mid_air = true
+			t.set_frozen(sec)
 	if mid_air:
 		Settings.award("freeze")
 	fx_event("freeze", {"p": c, "r": rad})
@@ -1022,6 +1085,17 @@ func freeze_area(c: Vector2, rad: float, sec: float, from = null) -> void:
 
 func ground_pound(c: Vector2, rad: float, from: Wiggly) -> void:
 	push_away(c, rad, 950.0, from)
+	# squads standing nearby get launched (a T-Rex only wobbles unless it's right there)
+	var power := 1000.0 * sqrt(from.size) if from else 1000.0
+	var up := -gravity_dir() if gravity_dir() != Vector2.ZERO else Vector2.UP
+	for f in fighters():
+		var d: Vector2 = f.center() - c
+		var dist := d.length()
+		if dist > rad + f.radius() * 0.5:
+			continue
+		var k := pow(clampf(1.0 - dist / (rad + f.radius() * 0.5), 0.0, 1.0), 0.7)
+		var dir := ((d / dist if dist > 1.0 else up) + up * 0.9).normalized()
+		f.shove(dir * power * k / sqrt(f._mass_k()), 8.0 * k)
 	fx_event("pound", {"p": c, "r": rad})
 
 
@@ -1048,6 +1122,41 @@ func push_away(c: Vector2, rad: float, power: float, skip = null) -> void:
 				t.dizzy_t = 2.0
 
 
+## Wigglies don't push standing fighters around (a squishy jelly on a soldier's
+## head would bounce them about), but a big or fast one rolling into them
+## bowls them over, and a sticky Gummy grabs on. One shape check per Wiggly
+## that's moving fast enough (or sticky), so even a big army costs little.
+func _wigglies_vs_fighters() -> void:
+	for w in wiggly_layer.get_children():
+		if not (w is Wiggly) or things.get(w.uid) != w or w.points.is_empty() or w.frozen_t > 0.0:
+			continue
+		var sticky: bool = w.kind == "gummy" and w.special_t > 0.0 and w.stuck_links < 3
+		var m: float = float(w.def.mass) * Wiggly.N * w.size * w.size
+		var spd: float = w.com_vel.length()
+		if not sticky and spd * m / (m + 1.0) < 120.0:
+			continue   # too small or slow to bump anybody
+		if _jelly_q == null:
+			_jelly_q = PhysicsShapeQueryParameters2D.new()
+			_jelly_q.shape = CircleShape2D.new()
+			_jelly_q.collision_mask = Fighter.LAYER
+		(_jelly_q.shape as CircleShape2D).radius = w.radius() * 0.95 + 4.0
+		_jelly_q.transform = Transform2D(0.0, w.com)
+		for hit in get_world_2d().direct_space_state.intersect_shape(_jelly_q, 8):
+			var b = hit.collider
+			if not (b is FighterPart) or b.part != "body" or b.fighter == null:
+				continue
+			var f: Fighter = b.fighter
+			var d: Vector2 = f.center() - w.com
+			var dir := d.normalized() if d.length() > 1.0 else Vector2(signf(w.com_vel.x), 0)
+			if sticky:
+				var jp: JellyPoint = w.points[w.nearest_point(f.center())]
+				if not links.any(func(l): return l.a == jp and l.b == b):
+					sticky_touch(w, jp, b, jp.global_position)
+			var rel: float = (w.com_vel - (b as RigidBody2D).linear_velocity).dot(dir)
+			if rel > 60.0:
+				f.jelly_bump(w, rel, dir)
+
+
 func sticky_touch(w: Wiggly, p: JellyPoint, other, at: Vector2) -> void:
 	if w.stuck_links >= 3 or not (other is PhysicsBody2D):
 		return
@@ -1062,6 +1171,8 @@ func sticky_touch(w: Wiggly, p: JellyPoint, other, at: Vector2) -> void:
 	if l:
 		w.stuck_links += 1
 		fx_event("glue", {"p": at})
+		if other is FighterPart and other.fighter:
+			other.fighter.stick(3.0)   # and it stays slow while Gummy hangs on (see _physics_process)
 
 
 # -------------------------------------------------------------- impacts
@@ -1090,7 +1201,7 @@ func _handle_impacts() -> void:
 					a.wiggly.on_point_impact(a, other, e[3], e[4])
 			"fighter":
 				if a.fighter and is_instance_valid(a.fighter):
-					a.fighter.on_part_impact(a, other, e[3], e[4])
+					a.fighter.on_part_impact(a, other, e[3], e[4], e[5])
 
 
 func on_impact(t: Toy, other, closing: float, at: Vector2, _n: Vector2) -> void:
@@ -1166,6 +1277,7 @@ func _physics_process(dt: float) -> void:
 		# a Wiggly being removed can share its id with its replacement (undo, loads)
 		if w is Wiggly and things.get(w.uid) == w and not w.points.is_empty():
 			w.physics_step(dt)
+	_wigglies_vs_fighters()
 	for f in fighters():
 		f.physics_step(dt)
 	Combat.hazards(self, dt)
@@ -1175,14 +1287,29 @@ func _physics_process(dt: float) -> void:
 	if _battle_t <= 0.0:
 		_battle_t = 0.5
 		Combat.battle_check(self)
+	if battle_on and last_winner == "" and not paused:
+		quiet_t += dt
+		if quiet_t > QUIET_CHARGE and not brave and Combat.teams_standing(self) >= 2:
+			brave = true
+			fx_event("charge_all", {})
+	elif last_winner != "":
+		quiet_t = 0.0
+		brave = false
 	_drive_grabs(dt)
 	for l in links:
 		if not l.broken and not l.step(dt):
 			fx_event("snap", {"p": l.world_b() if is_instance_valid(l.b) else Vector2.ZERO})
 			l.destroy()
+		elif l.kind == "glue" and l.a is JellyPoint and l.b is FighterPart and l.b.fighter:
+			l.b.fighter.goo_t = maxf(l.b.fighter.goo_t, 0.3)   # a Wiggly stuck on: slow going
+			if l.a.wiggly.special_t <= 0.0 and randf() < dt * 0.4:
+				# Sticky Mode is over: sooner or later they shake the Gummy off
+				fx_event("snap", {"p": l.world_b()})
+				l.destroy()
 	if links.any(func(l): return l.broken):
 		links = links.filter(func(l): return not l.broken)
 	_step_power()
+	cars_on = 0
 	for t in things.values():
 		if t is Toy:
 			ToyLogic.step(self, t, dt)
@@ -1344,14 +1471,27 @@ func _step_magic(dt: float) -> void:
 				t.linear_velocity.x += wind_dir * 900.0 * dt * clampf(2.0 / t.mass, 0.1, 1.0)
 			elif t is Wiggly and t.frozen_t <= 0.0:
 				t.add_velocity(Vector2(wind_dir * 700.0 * dt * (2.0 if t.kind == "puffy" else 1.0), 0))
+			elif t is Fighter:
+				t.blow(Vector2(wind_dir * 240.0, 0), dt)   # armies lean into it; chickens tumble away
 	if magic.has("wobble"):
 		for t in things.values():
-			if randf() < 0.08:
+			if t is Fighter:
+				# now and then the ground bucks under someone's feet
+				if randf() < 0.012:
+					t.shove(Vector2(randf_range(-160, 160), randf_range(-260, -120)))
+			elif randf() < 0.08:
 				var kick := Vector2(randf_range(-260, 260), randf_range(-420, -120))
 				if t is Toy and not t.freeze:
 					t.linear_velocity += kick * clampf(3.0 / t.mass, 0.2, 1.0)
 				elif t is Wiggly:
 					t.add_velocity(kick)
+	if magic.has("rain"):
+		# everyone gets wet: burning fighters fizzle out, and the napalm fires die down
+		for t in things.values():
+			if t is Fighter or t is Toy:
+				t.wet = 1.0
+		for z in fires:
+			z.t -= dt * 2.5
 	if magic.has("float"):
 		for w in wigglies():
 			w.add_velocity(Vector2(0, -30.0 * dt))

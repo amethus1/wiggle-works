@@ -132,6 +132,9 @@ func _build_ui() -> void:
 	root.add_child(ver)
 	if Updater.auto_check_wanted() and not Updater.prompted:
 		_auto_update_check()
+	# --menu --open=stickers (screenshots)
+	if main and String(main.args.get("open", "")) == "stickers":
+		_stickers()
 
 
 ## 🔄 When the game starts: is there a newer version on GitHub?
@@ -271,28 +274,42 @@ func _together() -> void:
 
 
 func _stickers() -> void:
-	var v := _modal("📒 Sticker Book", 760)
+	var got_n := 0
+	for s in Catalog.STICKERS:
+		if Settings.stickers.has(s.id):
+			got_n += 1
+	var v := _modal("📒 Sticker Book  (%d / %d)" % [got_n, Catalog.STICKERS.size()], 760)
+	modal.set_meta("stickers", true)
+	# more stickers than fit on the screen: they scroll
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sc.custom_minimum_size.y = clampf(get_viewport().get_visible_rect().size.y - 220.0, 240.0, 640.0)
+	v.add_child(sc)
 	var g := GridContainer.new()
 	g.columns = 4
 	g.add_theme_constant_override("h_separation", 10)
 	g.add_theme_constant_override("v_separation", 10)
-	v.add_child(g)
+	sc.add_child(g)
 	for s in Catalog.STICKERS:
 		var got: bool = Settings.stickers.has(s.id)
+		var p := PanelContainer.new()
+		p.add_theme_stylebox_override("panel", UI.box(UI.PANEL2 if got else UI.PANEL2.darkened(0.35), 16, 3, UI.ACCENT if got else UI.LINE, 10))
+		p.custom_minimum_size = Vector2(170, 130)
 		var cell := VBoxContainer.new()
-		cell.custom_minimum_size = Vector2(170, 100)
-		var e := UI.label(s.emoji if got else "❔", 36)
+		cell.alignment = BoxContainer.ALIGNMENT_CENTER
+		p.add_child(cell)
+		var e := UI.label(s.emoji if got else "❔", 40)
 		e.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		cell.add_child(e)
-		var n := UI.label(s.name, 14, UI.TEXT if got else UI.MUTED)
+		var n := UI.label(s.name, 15, UI.TEXT if got else UI.MUTED)
 		n.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		cell.add_child(n)
 		var d := UI.label(s.desc, 12, UI.MUTED)
 		d.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD
-		d.custom_minimum_size.x = 160
+		d.custom_minimum_size.x = 150
 		cell.add_child(d)
-		g.add_child(cell)
+		g.add_child(p)
 
 
 func _settings() -> void:

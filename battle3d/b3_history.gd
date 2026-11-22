@@ -7,35 +7,37 @@ class_name B3History
 ## Every battle is laid out along a line: `a` metres from the first army (on
 ## the left of the screen) toward the second, `s` metres across.
 
+## won / lost: the team that won in real life, and the one that lost (the
+## ⭐ Change history star is for making `lost` win).
 const LIST := [
-	{"id": "thermopylae", "name": "Thermopylae", "year": -480, "place": "Greece", "icon": "🏛️", "map": "pass",
+	{"id": "thermopylae", "name": "Thermopylae", "year": -480, "place": "Greece", "icon": "🏛️", "map": "pass", "won": "blue", "lost": "red",
 		"sides": "🔴 Greeks (Spartans) vs 🔵 Persians",
 		"blurb": "In 480 BC, King Leonidas with his 300 Spartans and a few thousand other Greeks held a narrow mountain pass against the huge army of the Persian king Xerxes. For three days they stood shoulder to shoulder behind their big round shields in a wall called a phalanx. Watch the red shield wall try to hold the gap!"},
-	{"id": "alesia", "name": "Alesia", "year": -52, "place": "Gaul (France)", "icon": "🦅", "map": "grassland",
+	{"id": "alesia", "name": "Alesia", "year": -52, "place": "Gaul (France)", "icon": "🦅", "map": "grassland", "won": "red", "lost": "blue",
 		"sides": "🔴 Romans vs 🔵 Gauls",
 		"blurb": "In 52 BC, Julius Caesar trapped the Gaulish chief Vercingetorix in the hill town of Alesia. The Romans built miles of walls, ditches and sharp stakes, and held them when a huge Gaulish army attacked. Watch the Romans lock their big rectangular shields together!"},
-	{"id": "hastings", "name": "Hastings", "year": 1066, "place": "England", "icon": "👑", "map": "grassland",
+	{"id": "hastings", "name": "Hastings", "year": 1066, "place": "England", "icon": "👑", "map": "grassland", "won": "blue", "lost": "red",
 		"sides": "🔴 Saxons vs 🔵 Normans",
 		"blurb": "In 1066, King Harold's Saxons made a wall of round shields along the top of a hill near Hastings. Duke William's Normans attacked again and again with archers, foot soldiers and knights on horseback, and William became King of England. Watch the knights charge up the hill at the shield wall!"},
-	{"id": "agincourt", "name": "Agincourt", "year": 1415, "place": "France", "icon": "🏹", "map": "farmland",
+	{"id": "agincourt", "name": "Agincourt", "year": 1415, "place": "France", "icon": "🏹", "map": "farmland", "won": "red", "lost": "blue",
 		"sides": "🔴 English vs 🔵 French",
 		"blurb": "In 1415, King Henry V's small, tired English army met a much bigger French army in a muddy field in France. English longbowmen stood behind sharp wooden stakes, and the heavy French knights got stuck in the deep mud. Watch the clouds of arrows from the longbows!"},
-	{"id": "bunkerhill", "name": "Bunker Hill", "year": 1775, "place": "Boston, America", "icon": "🔔", "map": "grassland",
+	{"id": "bunkerhill", "name": "Bunker Hill", "year": 1775, "place": "Boston, America", "icon": "🔔", "map": "grassland", "won": "red", "lost": "blue",
 		"sides": "🔴 British redcoats vs 🔵 American militia",
 		"blurb": "In 1775, American militia dug a fort of earth on Breed's Hill, next to Bunker Hill, in just one night. British redcoats marched up the hill in long straight lines three times before the Americans ran out of gunpowder and had to leave. Watch the redcoats climb toward the dirt walls!"},
-	{"id": "waterloo", "name": "Waterloo", "year": 1815, "place": "Belgium", "icon": "🥁", "map": "farmland",
+	{"id": "waterloo", "name": "Waterloo", "year": 1815, "place": "Belgium", "icon": "🥁", "map": "farmland", "won": "red", "lost": "blue",
 		"sides": "🔴 British vs 🔵 French",
 		"blurb": "In 1815, Napoleon's French army fought the Duke of Wellington's British and allied army near Waterloo. The British soldiers stood in hollow squares facing outward, so charging horsemen couldn't get behind them, and Napoleon lost his last battle. Watch the French cavalry thunder around the red squares!"},
-	{"id": "gettysburg", "name": "Gettysburg", "year": 1863, "place": "Pennsylvania, USA", "icon": "🌾", "map": "farmland",
+	{"id": "gettysburg", "name": "Gettysburg", "year": 1863, "place": "Pennsylvania, USA", "icon": "🌾", "map": "farmland", "won": "blue", "lost": "yellow",
 		"sides": "🔵 Union vs 🟡 Confederates",
 		"blurb": "On July 3, 1863, about 12,000 Confederate soldiers marched across an open field at Gettysburg toward Union soldiers behind a low stone wall on Cemetery Ridge. It was called Pickett's Charge, and the Union line held. Watch the long grey lines cross the field!"},
-	{"id": "britain", "name": "Battle of Britain", "year": 1940, "place": "the skies over England", "icon": "✈️", "map": "grassland",
+	{"id": "britain", "name": "Battle of Britain", "year": 1940, "place": "the skies over England", "icon": "✈️", "map": "grassland", "won": "blue", "lost": "red",
 		"sides": "🔵 Royal Air Force vs 🔴 German air force",
 		"blurb": "In the summer of 1940, the pilots of the Royal Air Force defended Britain against waves of German planes. They flew up again and again, and the Germans had to give up their plan to invade. Watch the fighter planes twist and turn in the sky!"},
-	{"id": "dday", "name": "D-Day: Omaha Beach", "year": 1944, "place": "Normandy, France", "icon": "🌊", "map": "beach",
+	{"id": "dday", "name": "D-Day: Omaha Beach", "year": 1944, "place": "Normandy, France", "icon": "🌊", "map": "beach", "won": "blue", "lost": "red",
 		"sides": "🔵 Americans vs 🔴 Germans",
 		"blurb": "On June 6, 1944, called D-Day, Allied soldiers crossed the sea in landing boats to free France. At Omaha Beach, American troops ran across the sand, past steel obstacles, toward bunkers on the bluffs, and by nightfall they held the beach. Watch the tanks and soldiers storm the shore!"},
-	{"id": "bulge", "name": "Battle of the Bulge", "year": 1944, "place": "the Ardennes, Belgium", "icon": "❄️", "map": "snow",
+	{"id": "bulge", "name": "Battle of the Bulge", "year": 1944, "place": "the Ardennes, Belgium", "icon": "❄️", "map": "snow", "won": "blue", "lost": "red",
 		"sides": "🔵 Americans vs 🔴 Germans",
 		"blurb": "In the snowy winter of 1944, German tanks made a surprise attack through the Ardennes forest. American soldiers held on at the town of Bastogne, even when they were surrounded, until help arrived. Watch the tanks roll through the snow!"},
 ]
@@ -178,6 +180,71 @@ static func available() -> Array:
 			continue
 		out.append(e)
 	return out
+
+
+# ------------------------------------------------------------ ⭐ stars
+## The three stars each battle gives (saved in Settings.b3_hist_stars):
+## [id, name, how to get it].
+const STARS := [
+	["finish", "Finish it", "Play the battle until someone wins."],
+	["change", "Change history", "Make the side that lost long ago win this time."],
+	["hero", "Hero", "Your side wins while you play a fighter in first person (👀 V)."],
+]
+
+
+## Which of `id`'s stars you have: {"finish": true, ...}.
+static func stars_of(id: String) -> Dictionary:
+	var v: Variant = Settings.b3_hist_stars.get(id, {})
+	return v if v is Dictionary else {}
+
+
+static func star_count(id: String) -> int:
+	var got := stars_of(id)
+	var n := 0
+	for s in STARS:
+		if got.has(String(s[0])):
+			n += 1
+	return n
+
+
+## "🔴 Greeks (Spartans)": the side that lost long ago, as the sides line says it.
+static func loser_name(id: String) -> String:
+	var d := info(id)
+	var icon := String(B3Defs.TEAM.get(String(d.get("lost", "")), {}).get("icon", ""))
+	for part in String(d.get("sides", "")).split(" vs "):
+		if icon != "" and part.begins_with(icon):
+			return part
+	return icon
+
+
+## History battle `id` just ended and `win` won (a team, "wild:kind" or
+## "nobody"): ⭐ someone won, ⭐ the side that lost in real life won,
+## ⭐ your side won while you played in first person.
+static func earn_stars(b, id: String, win: String) -> void:
+	var d := info(id)
+	if d.is_empty() or win == "" or win == "nobody":
+		return
+	var got: Array[String] = []
+	if Settings.history_star(id, "finish"):
+		got.append("Finish it")
+	if win == String(d.get("lost", "")) and Settings.history_star(id, "change"):
+		got.append("Change history")
+	if _hero_won(win) and Settings.history_star(id, "hero"):
+		got.append("Hero")
+	if got.is_empty() or b == null or b.ui == null:
+		return
+	var txt := "⭐ New star%s for %s: %s!  (%d of 3)" % ["" if got.size() == 1 else "s", d.name, " and ".join(got), star_count(id)]
+	b.later(2.0, func():
+		if is_instance_valid(b) and b.ui:
+			b.ui.toast(txt, false))
+
+
+## You're playing a fighter in first person and its side is `win`.
+static func _hero_won(win: String) -> bool:
+	if not (B3Player.active() and B3Player.me.fp and B3Player.unit.ctl == B3Player.me):
+		return false
+	var me := B3Player.unit
+	return (me.team if me.team != "wild" else "wild:" + me.kind) == win
 
 
 static func map_for(id: String) -> String:

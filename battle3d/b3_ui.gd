@@ -2,7 +2,8 @@ extends CanvasLayer
 ## The 3D Battle HUD, built with the game's UI kit: top bar (home, Fight /
 ## Pause, slow-mo, clear, maps, team counts, help), left palette (tabs, team
 ## and personality pickers, item buttons), tool dock, unit inspector,
-## winner banner, toasts and the nuke's white flash.
+## winner banner and 🏆 scoreboard, toasts, sticker pops and the nuke's
+## white flash.
 
 const TOOLS := [
 	{"id": "place", "icon": "➕", "name": "Place", "key": "1", "tip": "Click the ground to place. Drag for a line. Shift-drag for a block."},
@@ -20,6 +21,7 @@ var slow_btn: Button
 var map_btn: Button
 var c4_btn: Button
 var counts_box: HBoxContainer
+var coin_lbl: Label           # 🪙 points left in a budget battle (🧩 Puzzles, 🌊 Wave Defense)
 var counts_dirty := true
 var cat := "people"
 var cat_btns := {}
@@ -57,7 +59,13 @@ var insp_hp: ProgressBar
 var insp_team := {}
 var insp_pers := {}
 var banner_lbl: Label
+var score_card: PanelContainer     # 🏆 the scoreboard under the winner banner
+var score_box: VBoxContainer
+var _score_shut := false           # ✖ was pressed: keep the card away until the next banner
+var hist_tab := "history"          # the 📜 pop-up's tab: "history" or "ready" (🎯 Ready-made)
 var toasts: VBoxContainer
+var sticker_box: VBoxContainer     # 📒 new-sticker messages, top right (clear of the winner banner)
+var mode_hud: B3ModeHud = null     # 🏁 the battle goal's panel (B3ModeHud)
 var flash_rect: ColorRect
 var popup: Control = null
 var help: PanelContainer = null
@@ -90,6 +98,18 @@ func _ready() -> void:
 	toasts.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	toasts.add_theme_constant_override("separation", 6)
 	root.add_child(toasts)
+	sticker_box = VBoxContainer.new()
+	sticker_box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	sticker_box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	sticker_box.offset_right = -10
+	sticker_box.offset_left = -10
+	sticker_box.offset_top = 80
+	sticker_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sticker_box.add_theme_constant_override("separation", 6)
+	root.add_child(sticker_box)
+	mode_hud = B3ModeHud.new()       # 🏁 Kings' health, hill scores, 🌊 waves (top right; stickers go under it)
+	mode_hud.ui = self
+	root.add_child(mode_hud)
 	banner_lbl = Label.new()
 	banner_lbl.add_theme_font_size_override("font_size", 64)
 	banner_lbl.add_theme_color_override("font_color", UI.ACCENT)
@@ -104,6 +124,8 @@ func _ready() -> void:
 	banner_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	banner_lbl.visible = false
 	banner_lbl.pivot_offset = Vector2(500, 40)
+	# the scoreboard rides along after the headline (see banner()): only the headline shows
+	banner_lbl.visible_characters_behavior = TextServer.VC_CHARS_BEFORE_SHAPING
 	again_btn = UI.button("⏮  Play it again", Color("2f9e4f"), 22, 260)
 	again_btn.tooltip_text = "Everyone goes back to where they started"
 	again_btn.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -112,6 +134,7 @@ func _ready() -> void:
 	again_btn.pressed.connect(func(): battle.reset_battle())
 	root.add_child(banner_lbl)
 	root.add_child(again_btn)
+	_build_score()
 	play_lbl = UI.label("", 17)
 	play_lbl.add_theme_constant_override("outline_size", 10)
 	play_lbl.add_theme_color_override("font_outline_color", Color("2a1f5a"))
@@ -185,12 +208,18 @@ func _build_top() -> void:
 	net_lbl = UI.label("", 16)
 	net_lbl.visible = false
 	g3.add_child(net_lbl)
+	coin_lbl = UI.label("", 19, Color("ffcf4a"))
+	coin_lbl.tooltip_text = "Points left to spend"
+	coin_lbl.mouse_filter = Control.MOUSE_FILTER_PASS
+	coin_lbl.visible = false
+	g3.add_child(coin_lbl)
+	battle.budget_changed.connect(refresh_coins)
 	counts_box = HBoxContainer.new()
 	counts_box.add_theme_constant_override("separation", 6)
 	g3.add_child(counts_box)
 	var g4 := _pill(top)
 	net_btn = _btn(g4, "👥", "Play together with friends on the same Wi-Fi", _show_net, 52)
-	hist_btn = _btn(g4, "📜", "History: set up a famous battle from long ago", _show_history, 52)
+	hist_btn = _btn(g4, "📜", "Pick a battle: a famous one from history, or a 🎯 ready-made one", _show_history, 52)
 	surprise_btn = _btn(g4, "🎲", "Surprise Battle! A random battlefield and armies", func(): B3Surprise.run(battle), 52)
 	saves_btn = _btn(g4, "💾", "Save or load a battle", _show_saves, 52)
 	rules_btn = _btn(g4, "⚙️", "Battle Rules: gravity, explosions, night, weather and more", _show_rules, 52)
@@ -357,6 +386,17 @@ func toggle_slowmo() -> void:
 func _style(b: Button, col: Color) -> void:
 	b.add_theme_stylebox_override("normal", UI.box(col, 14, 2, col.lightened(0.18), 12))
 	b.add_theme_stylebox_override("hover", UI.box(col.lightened(0.12), 14, 2, col.lightened(0.35), 12))
+
+
+## 🪙 "12 / 20": points left in a budget battle (hidden when things are free).
+func refresh_coins() -> void:
+	if coin_lbl == null:
+		return
+	var on: bool = battle.budget >= 0
+	coin_lbl.visible = on
+	if on:
+		coin_lbl.text = "🪙 %d / %d" % [battle.points_left(), battle.budget]
+	_price_tags()
 
 
 func _refresh_counts() -> void:
@@ -550,6 +590,7 @@ func set_cat(c: String) -> void:
 		var first := String(ids[0]) if not ids.is_empty() else ""
 		if B3Defs.item_cat(battle.tools.place_id) != c and first != "":
 			battle.tools.choose(first)
+	_price_tags()      # 🪙 prices while there's a budget
 	refresh_palette()
 
 
@@ -882,53 +923,328 @@ static func year_text(y: int) -> String:
 	return B3History.year_text(y)
 
 
-func _show_history() -> void:
-	var v := _popup_panel("📜 Battles from history")
+## 📜 Pick a battle: two tabs, 📜 History (real battles from long ago) and
+## 🎯 Ready-made (B3Scenarios.MENU). `tab` "" opens the one used last.
+func _show_history(tab := "") -> void:
+	if tab == "history" or tab == "ready" or tab == "puzzles":
+		hist_tab = tab
+	var v := _popup_panel("📜 Pick a battle")
 	popup.custom_minimum_size = Vector2(760, 0)     # grows evenly both ways, so it stays centred
-	v.add_child(UI.label("Real battles from long ago, set up and ready. Press Fight! to watch, or play as one of the soldiers.", 15, UI.MUTED))
+	var tabs := HBoxContainer.new()
+	tabs.add_theme_constant_override("separation", 8)
+	v.add_child(tabs)
+	for tb in [["history", "📜 History", "Real battles from long ago"], ["ready", "🎯 Ready-made", "Ready-made battles to try"],
+			["puzzles", "🧩 Puzzles", "Beat an army with the points you have"]]:
+		var tid := String(tb[0])
+		var b := UI.button(String(tb[1]), UI.PANEL2, 18, 190)
+		b.custom_minimum_size.y = 44
+		b.tooltip_text = String(tb[2])
+		b.name = "Tab_" + tid
+		UI.set_on(b, tid == hist_tab)
+		b.pressed.connect(func():
+			if tid != hist_tab:
+				battle.snd("tick", null, 0.5)
+				_show_history(tid))
+		tabs.add_child(b)
+	var ready_tab := hist_tab == "ready"
+	var intro := UI.label("Ready-made battles to try. Set one up, then press ▶ Fight! to watch, or pick a fighter and play as it." if ready_tab
+		else "Real battles from long ago, set up and ready. Press Fight! to watch, or play as one of the soldiers.", 15, UI.MUTED)
+	if hist_tab == "puzzles":
+		intro.text = _puzzle_intro()
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	intro.custom_minimum_size.x = 740
+	v.add_child(intro)
 	var sc := ScrollContainer.new()
-	sc.custom_minimum_size = Vector2(740, minf(560.0, get_viewport().get_visible_rect().size.y - 230.0))
+	sc.custom_minimum_size = Vector2(740, minf(520.0, get_viewport().get_visible_rect().size.y - 290.0))
 	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	v.add_child(sc)
 	var list := VBoxContainer.new()
 	list.add_theme_constant_override("separation", 8)
 	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list.name = "Cards"
 	sc.add_child(list)
+	if hist_tab == "puzzles":
+		_puzzle_cards(list)
+		return
+	if ready_tab:
+		for e in B3Scenarios.MENU:
+			var d: Dictionary = e
+			var rid := String(d.id)
+			var md: Dictionary = B3Defs.MAPS[B3Scenarios.map_for(rid)]
+			var pick := func():
+				close_top()
+				battle.snd("whoosh", null, 0.6)
+				battle.run_ready(rid)
+				refresh()
+			_battle_card(list, String(d.icon), "%s  ·  %s %s" % [d.name, md.icon, md.name], String(d.sides), String(d.desc), pick)
+		return
 	var items := history_list()
 	if items.is_empty():
 		list.add_child(UI.label("(No history battles yet.)", 16, UI.MUTED))
 	for e in items:
 		var d: Dictionary = e
-		var card := PanelContainer.new()
-		card.add_theme_stylebox_override("panel", UI.box(UI.PANEL2, 14, 0, Color.TRANSPARENT, 10))
-		list.add_child(card)
-		var h := HBoxContainer.new()
-		h.add_theme_constant_override("separation", 12)
-		card.add_child(h)
-		var ic := UI.label(String(d.get("icon", "📜")), 44)
-		ic.custom_minimum_size.x = 60
-		ic.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		h.add_child(ic)
-		var col := VBoxContainer.new()
-		col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		col.add_theme_constant_override("separation", 2)
-		h.add_child(col)
-		col.add_child(UI.label("%s  ·  %s%s" % [d.get("name", "?"), year_text(int(d.get("year", 0))),
-			("  ·  " + String(d.place)) if d.has("place") else ""], 19, UI.ACCENT))
-		col.add_child(UI.label(String(d.get("sides", "")), 16))
-		var bl := UI.label(String(d.get("blurb", "")), 14, UI.MUTED)
-		bl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		bl.custom_minimum_size.x = 480
-		col.add_child(bl)
-		var go := UI.button("▶ Set it up", Color("2f9e4f"), 17, 130)
-		go.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		var hid := String(d.get("id", ""))
-		go.pressed.connect(func():
+		var pick := func():
 			close_top()
 			battle.snd("whoosh", null, 0.6)
 			battle.run_history(hid)
+			refresh()
+		var head := "%s  ·  %s%s" % [d.get("name", "?"), year_text(int(d.get("year", 0))), ("  ·  " + String(d.place)) if d.has("place") else ""]
+		_battle_card(list, String(d.get("icon", "📜")), head, String(d.get("sides", "")), String(d.get("blurb", "")), pick, _history_stars(hid))
+
+
+## One battle in the 📜 pop-up: a big picture, its name, who's fighting, a
+## few words about it, and ▶ Set it up (`go_txt`). `extra` goes under the
+## words (the ⭐ stars). Returns the ▶ button.
+func _battle_card(list: Control, icon: String, head: String, sides: String, blurb: String, go_fn: Callable, extra: Control = null, go_txt := "▶ Set it up") -> Button:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", UI.box(UI.PANEL2, 14, 0, Color.TRANSPARENT, 10))
+	list.add_child(card)
+	var h := HBoxContainer.new()
+	h.add_theme_constant_override("separation", 12)
+	card.add_child(h)
+	var ic := UI.label(icon, 44)
+	ic.custom_minimum_size.x = 60
+	ic.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	h.add_child(ic)
+	var col := VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 2)
+	h.add_child(col)
+	col.add_child(UI.label(head, 19, UI.ACCENT))
+	var sl := UI.label(sides, 16)
+	sl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sl.custom_minimum_size.x = 480
+	col.add_child(sl)
+	var bl := UI.label(blurb, 14, UI.MUTED)
+	bl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	bl.custom_minimum_size.x = 480
+	col.add_child(bl)
+	if extra:
+		col.add_child(extra)
+	var go := UI.button(go_txt, Color("2f9e4f"), 17, 130)
+	go.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	go.name = "Go"
+	go.pressed.connect(go_fn)
+	h.add_child(go)
+	return go
+
+
+## 📜 A History card's three ⭐ (the ones you have light up; hover for how to get each).
+func _history_stars(hid: String) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
+	row.name = "Stars"
+	var got := B3History.stars_of(hid)
+	for s in B3History.STARS:
+		var sid := String(s[0])
+		var on := got.has(sid)
+		var l := UI.label("⭐ " + String(s[1]), 15, UI.ACCENT if on else UI.MUTED)
+		l.modulate.a = 1.0 if on else 0.45
+		l.tooltip_text = ("Got it! " if on else "") + String(s[2])
+		l.mouse_filter = Control.MOUSE_FILTER_STOP
+		l.name = sid + ("_on" if on else "_off")
+		row.add_child(l)
+	return row
+
+
+# ------------------------------------------------------- 🧩 Army Puzzles
+var puzzle_box: PanelContainer = null     # the puzzle's goal and hint, at the top of the Toy Box
+var puzzle_lbl: Label = null
+var puzzle_card: PanelContainer = null    # ⭐ (or Try again) under the winner banner
+
+
+func _puzzle_intro() -> String:
+	var total := 0
+	for st in B3Puzzles.STAGES:
+		total += B3Puzzles.stars(String((st as Dictionary).id))
+	return "Beat the blue army with the 🪙 points you have! Buy your army from the Toy Box, put it in the glowing area, then press ▶ Fight!.  Spend less for more stars.   ⭐ %d of %d" % [total, B3Puzzles.STAGES.size() * 3]
+
+
+## The 🧩 tab: a card for each stage, with its goal, points, the star rule
+## and the stars you've got. Locked ones open when you win the one before.
+func _puzzle_cards(list: Control) -> void:
+	for i in B3Puzzles.STAGES.size():
+		var st: Dictionary = B3Puzzles.STAGES[i]
+		var pid := String(st.id)
+		var md: Dictionary = B3Defs.MAPS[String(st.map)]
+		var open := B3Puzzles.unlocked(pid)
+		var pick := func():
+			close_top()
+			battle.snd("whoosh", null, 0.6)
+			B3Puzzles.start(battle, pid)
+			refresh()
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
+		row.name = "Stars"
+		var bits := B3Puzzles.star_bits(B3Puzzles.stars(pid))
+		var lit := UI.label(bits[0], 22)
+		row.add_child(lit)
+		var dim := UI.label(bits[1], 22)
+		dim.modulate.a = 0.25
+		row.add_child(dim)
+		var rule := UI.label(B3Puzzles.rule_text(st), 14, UI.MUTED)
+		rule.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		rule.size_flags_vertical = Control.SIZE_FILL
+		row.add_child(rule)
+		var head := "%d. %s  ·  %s %s  ·  🪙 %d" % [i + 1, st.name, md.icon, md.name, int(st.budget)]
+		var go := _battle_card(list, String(st.icon) if open else "🔒", head, String(st.goal),
+			String(st.hint) if open else "Win the puzzle before this one to open it.", pick, row, "▶ Play" if open else "🔒")
+		go.disabled = not open
+		go.tooltip_text = "" if open else "Win puzzle %d first!" % i
+		if not open:
+			go.add_theme_stylebox_override("disabled", UI.box(UI.PANEL2.darkened(0.25), 14, 0, UI.LINE, 12))
+			go.text = "🔒 Locked"
+		(go.get_parent().get_parent() as Control).name = "Puzzle_" + pid
+
+
+## Shows the 🧩 puzzle that's on (its goal at the top of the Toy Box), or
+## hides it all when there isn't one. The ⭐ card hides until the fight ends.
+func show_puzzle() -> void:
+	var pz = battle.puzzle if battle else null
+	if puzzle_card and (pz == null or not pz.over):
+		puzzle_card.visible = false
+	if pz == null:
+		if puzzle_box:
+			puzzle_box.visible = false
+		again_btn.text = "⏮  Play it again"
+		return
+	if puzzle_box == null and palette and palette.get_child_count() > 0:
+		puzzle_box = PanelContainer.new()
+		puzzle_box.name = "PuzzleBox"
+		puzzle_box.add_theme_stylebox_override("panel", UI.box(Color("3a2f12"), 12, 2, UI.ACCENT, 8))
+		puzzle_lbl = UI.label("", 14)
+		puzzle_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		puzzle_lbl.custom_minimum_size.x = 250
+		puzzle_box.add_child(puzzle_lbl)
+		var v: Node = palette.get_child(0)
+		v.add_child(puzzle_box)
+		v.move_child(puzzle_box, 0)
+	if puzzle_box:
+		var st: Dictionary = pz.stage
+		var c := B3Puzzles.star_costs(st)
+		puzzle_lbl.text = "🧩 %d. %s\n%s\n💡 %s\n⭐⭐ spend %d or less · ⭐⭐⭐ %d or less" % [B3Puzzles.index_of(pz.id) + 1, st.name, st.goal, st.hint, c[0], c[1]]
+		puzzle_box.visible = true
+
+
+## 🧩 The fight's over: ⭐ for a win (and how to get more), or Try again.
+## Takes the 🏆 scoreboard's place under the banner.
+func puzzle_result(won: int, best: int, next: String) -> void:
+	var pz = battle.puzzle
+	if pz == null:
+		return
+	_score_shut = true
+	if score_card:
+		score_card.visible = false
+	again_btn.text = "⏮  Try again" if won == 0 else ("⏮  Play it again" if won == 3 else "⏮  Try for more ⭐")
+	if puzzle_card == null:
+		puzzle_card = PanelContainer.new()
+		puzzle_card.name = "PuzzleCard"
+		puzzle_card.add_theme_stylebox_override("panel", UI.box(UI.PANEL, 20, 3, UI.ACCENT, 16))
+		puzzle_card.set_anchors_preset(Control.PRESET_CENTER_TOP)
+		puzzle_card.grow_horizontal = Control.GROW_DIRECTION_BOTH
+		puzzle_card.offset_left = 0      # grows evenly both ways, so it stays centred
+		puzzle_card.offset_right = 0
+		puzzle_card.offset_top = 278
+		puzzle_card.custom_minimum_size = Vector2(470, 0)
+		root.add_child(puzzle_card)
+	for c in puzzle_card.get_children():
+		puzzle_card.remove_child(c)
+		c.queue_free()
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	puzzle_card.add_child(v)
+	var st: Dictionary = pz.stage
+	var hb := HBoxContainer.new()
+	v.add_child(hb)
+	var t := UI.title("🧩 Puzzle solved!" if won > 0 else "😵 Not this time!", 24)
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hb.add_child(t)
+	var x := UI.button("✖", UI.PANEL2, 14, 36)
+	x.pressed.connect(func(): puzzle_card.visible = false)
+	hb.add_child(x)
+	var sr := HBoxContainer.new()
+	sr.alignment = BoxContainer.ALIGNMENT_CENTER
+	sr.name = "Stars"
+	v.add_child(sr)
+	for i in 3:
+		var s := UI.label("⭐", 46)
+		s.modulate.a = 1.0 if i < won else 0.2
+		sr.add_child(s)
+	var c := B3Puzzles.star_costs(st)
+	var lines: Array[String] = []
+	if won > 0:
+		lines.append("You spent 🪙 %d of %d.%s" % [int(battle.spent), int(st.budget), "  New best! 🎉" if won > best else ""])
+		if B3Puzzles.next_id(pz.id) == "":
+			lines.append("🏆 That was the last one. You beat every puzzle!")
+		if won < 3:
+			lines.append("Spend %d or less for ⭐⭐⭐ (%d or less for ⭐⭐)." % [c[1], c[0]] if won == 1 else "Spend %d or less for ⭐⭐⭐." % c[1])
+	else:
+		lines.append("The blue army won this time.")
+		lines.append("⏮ Try again puts them back and keeps your army, so you can change it.")
+		lines.append("💡 " + String(st.hint))
+	for ln in lines:
+		var l := UI.label(ln, 17)
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		l.custom_minimum_size.x = 440
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		v.add_child(l)
+	var br := HBoxContainer.new()
+	br.alignment = BoxContainer.ALIGNMENT_CENTER
+	br.add_theme_constant_override("separation", 10)
+	v.add_child(br)
+	if next != "":
+		var nb := UI.button("▶ Next puzzle", Color("2f9e4f"), 19, 190)
+		nb.name = "Next"
+		nb.pressed.connect(func():
+			battle.snd("whoosh", null, 0.6)
+			B3Puzzles.start(battle, next)
 			refresh())
-		h.add_child(go)
+		br.add_child(nb)
+	var lb := UI.button("🧩 All puzzles", UI.PANEL2, 19, 190)
+	lb.pressed.connect(func(): _show_history("puzzles"))
+	br.add_child(lb)
+	puzzle_card.visible = true
+
+
+## 🪙 While there's a budget: each Toy Box card shows its price (dimmed if
+## you can't pay for it), and fighters are Normal size on your team (a Huge
+## knight would cost the same as a normal one).
+func _price_tags() -> void:
+	if battle == null:
+		return
+	var on: bool = battle.budget >= 0
+	var left: int = battle.points_left()
+	for id in item_btns:
+		var bt: Button = item_btns[id]
+		var tag: Label = bt.get_node_or_null("Price")
+		if on and tag == null:
+			tag = UI.label("", 14, UI.ACCENT)
+			tag.name = "Price"
+			tag.add_theme_constant_override("outline_size", 6)
+			tag.add_theme_color_override("font_outline_color", Color("1d1b3a"))
+			tag.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+			tag.offset_left = -60
+			tag.offset_right = -6
+			tag.offset_top = 2
+			tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			bt.add_child(tag)
+		var price := B3Defs.cost(String(id))
+		if tag:
+			tag.visible = on
+			tag.text = "🪙 %d" % price
+		bt.modulate = Color(1, 1, 1, 0.45) if on and price > left else Color.WHITE
+	var team_lock: String = battle.build_team if on else ""
+	for t in team_btns:
+		(team_btns[t] as Control).visible = team_lock == "" or t == team_lock
+	for k in size_btns:
+		var sb: Button = size_btns[k]
+		sb.disabled = on and absf(float(k) - 1.0) > 0.01
+		sb.tooltip_text = "Fighters are Normal size when you have points to spend" if on else "Place fighters at this size (vehicles stay normal)"
+	if on and battle.tools and float(battle.tools.place_size) != 1.0:
+		battle.tools.place_size = 1.0
+		refresh_palette()
 
 
 ## ⚙️ Battle Rules: one row of choices per rule (see B3Rules).
@@ -1073,7 +1389,7 @@ func toggle_help() -> void:
 		"👀 Press V while playing to look through its eyes (first person). The mouse looks around; Esc stops.",
 		"🚁 Drive tanks, jeeps and cars, and fly helicopters and planes the same way.",
 		"⏮ Reset puts everyone back where they started, so you can play the same battle again.",
-		"📜 History sets up famous battles from long ago.  🎲 Surprise Battle makes a random one.",
+		"📜 Battles from history, and 🎯 ready-made ones.  🎲 Surprise Battle makes a random one.",
 		"👥 Play together with friends on the same Wi-Fi: one hosts, the others join.",
 		"🎥 Follow (F) keeps the camera on a fighter.  💾 Save your battles.",
 		"⚙️ Battle Rules: moon gravity, MEGA explosions, night, rain, snow, screen shake and more.",
@@ -1121,29 +1437,192 @@ func toast(txt: String, share := true) -> void:
 		c.queue_free()
 
 
-func banner(txt: String, col: Color) -> void:
-	banner_lbl.text = txt
+## The winner banner, with the 🏆 scoreboard under it. `score` is
+## B3Battle.scoreboard(): its lines go into the label's text after the
+## headline, and only the headline shows. A friend's copy gets the banner's
+## text from the host (B3Net), so it shows the same scoreboard.
+func banner(txt: String, col: Color, score := PackedStringArray()) -> void:
+	var lines := txt.split("\n")
+	var head := lines[0]
+	var rest := lines.slice(1)
+	rest.append_array(score)
+	if not (banner_lbl.visible and banner_lbl.text.split("\n")[0] == head):
+		_banner_t = 0.0        # a new banner bounces in (just a new scoreboard doesn't)
+		_score_shut = false
+	banner_lbl.text = head if rest.is_empty() else head + "\n" + "\n".join(rest)
+	banner_lbl.visible_characters = head.length()
 	banner_lbl.add_theme_color_override("font_color", col)
 	banner_lbl.visible = true
-	_banner_t = 0.0
 	again_btn.visible = can_reset()
+	var info := B3Battle.read_score(rest)
+	_show_score(info)
+	if battle.puppet:
+		battle.victory_stickers(info)
 	refresh()
+
+
+## The battle's over but the 🏆 scoreboard changed (a winner still burning
+## got knocked out...): same banner, new numbers.
+func update_score(score: PackedStringArray) -> void:
+	if not banner_lbl.visible or banner_lbl.text.split("\n").slice(1) == score:
+		return
+	var col: Color = banner_lbl.get_theme_color("font_color")
+	banner(banner_lbl.text.split("\n")[0], col, score)
 
 
 func hide_banner() -> void:
 	banner_lbl.visible = false
 	again_btn.visible = false
+	if score_card:
+		score_card.visible = false
+	if puzzle_card:
+		puzzle_card.visible = false
 	_banner_t = -1.0
 
 
+func _build_score() -> void:
+	score_card = PanelContainer.new()
+	score_card.add_theme_stylebox_override("panel", UI.box(UI.PANEL, 20, 3, UI.ACCENT, 16))
+	score_card.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	score_card.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	score_card.offset_left = 0      # grows evenly both ways, so it stays centred
+	score_card.offset_right = 0
+	score_card.offset_top = 278
+	score_card.custom_minimum_size = Vector2(470, 0)
+	score_card.visible = false
+	root.add_child(score_card)
+	score_box = VBoxContainer.new()
+	score_box.add_theme_constant_override("separation", 8)
+	score_card.add_child(score_box)
+
+
+## Fills in the 🏆 scoreboard card from B3Battle.read_score() (hidden if {}).
+func _show_score(sc: Dictionary) -> void:
+	for c in score_box.get_children():
+		score_box.remove_child(c)
+		c.queue_free()
+	if sc.is_empty():
+		score_card.visible = false
+		return
+	var head := HBoxContainer.new()
+	score_box.add_child(head)
+	var t := UI.title("🏆 Scoreboard", 22)
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(t)
+	var x := UI.button("✖", UI.PANEL2, 14, 36)
+	x.tooltip_text = "Hide the scoreboard"
+	x.pressed.connect(func():
+		_score_shut = true
+		score_card.visible = false)
+	head.add_child(x)
+	if int(sc.secs) >= 0:
+		score_box.add_child(UI.label("⏱️ The battle took %s." % B3Battle.time_text(int(sc.secs)), 16, UI.MUTED))
+	var win := String(sc.win)
+	var g := GridContainer.new()
+	g.columns = 3
+	g.add_theme_constant_override("h_separation", 14)
+	g.add_theme_constant_override("v_separation", 6)
+	score_box.add_child(g)
+	for te: Dictionary in sc.teams:
+		var tid := String(te.team)
+		var col := B3Defs.team_col(tid)
+		var won := win == tid or (tid == "wild" and win.begins_with("wild:"))
+		var pc := PanelContainer.new()
+		pc.add_theme_stylebox_override("panel", UI.box(col.darkened(0.15), 12, 3 if won else 2, Color.WHITE if won else col.lightened(0.3), 8))
+		var nl := UI.label("%s%s%s" % ["🐾 " if tid == "wild" else "", B3Defs.TEAM[tid].name, "  🏆" if won else ""], 17, Color.WHITE)
+		nl.add_theme_constant_override("outline_size", 5)
+		nl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.4))
+		nl.custom_minimum_size.x = 104
+		nl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pc.add_child(nl)
+		g.add_child(pc)
+		var brought := int(te.brought)
+		var left := int(te.left)
+		var ll := UI.label("🧍 %d of %d left" % [left, brought] if brought >= left and brought > 0 else "🧍 %d left" % left, 17)
+		ll.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		ll.size_flags_vertical = Control.SIZE_FILL
+		g.add_child(ll)
+		var kl := UI.label("💥 %s" % _kos_text(int(te.kos)), 17)
+		kl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		kl.size_flags_vertical = Control.SIZE_FILL
+		g.add_child(kl)
+	if int(sc.others) > 0:
+		score_box.add_child(UI.label("💣 Booms, lava and falls: %s" % _kos_text(int(sc.others)), 16, UI.MUTED))
+	var top: Array = sc.top
+	if not top.is_empty():
+		score_box.add_child(UI.label("⭐ Top fighters", 18, UI.ACCENT))
+		var g2 := GridContainer.new()
+		g2.columns = 3
+		g2.add_theme_constant_override("h_separation", 12)
+		g2.add_theme_constant_override("v_separation", 2)
+		score_box.add_child(g2)
+		var medals := ["🥇", "🥈", "🥉"]
+		for i in top.size():
+			var e: Dictionary = top[i]
+			var tid := String(e.team)
+			var d := B3Defs.unit_def(String(e.kind))
+			g2.add_child(UI.label(String(medals[i]), 20))
+			var who := UI.label("%s %s %s" % [d.icon, "Wild" if tid == "wild" else String(B3Defs.TEAM[tid].name), d.name], 17,
+				B3Defs.team_col(tid).lightened(0.35))
+			who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			who.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			g2.add_child(who)
+			var kl := UI.label(_kos_text(int(e.kos)), 16, UI.MUTED)
+			kl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			g2.add_child(kl)
+	score_card.visible = not _score_shut
+
+
+static func _kos_text(n: int) -> String:
+	return "%d knock-out%s" % [n, "" if n == 1 else "s"]
+
+
+## 📒 A sticker was just earned (on this computer): a golden message at the top right.
+func sticker_pop(id: String) -> void:
+	var s: Dictionary = {}
+	for x in Catalog.STICKERS:
+		var d: Dictionary = x
+		if String(d.id) == id:
+			s = d
+	if s.is_empty():
+		return
+	Sfx.play("sticker", null, 1.0)
+	var p := PanelContainer.new()
+	p.add_theme_stylebox_override("panel", UI.box(Color(0.1, 0.09, 0.22, 0.92), 16, 3, UI.ACCENT, 12))
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var h := HBoxContainer.new()
+	h.add_theme_constant_override("separation", 12)
+	p.add_child(h)
+	var em := UI.label(String(s.emoji), 40)
+	em.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	h.add_child(em)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	h.add_child(col)
+	col.add_child(UI.label("📒 New sticker!", 15, UI.ACCENT))
+	col.add_child(UI.label(String(s.name), 21))
+	col.add_child(UI.label(String(s.desc), 14, UI.MUTED))
+	p.set_meta("t", 5.0)
+	p.set_meta("sticker", id)
+	sticker_box.add_child(p)
+	while sticker_box.get_child_count() > 3:
+		var c := sticker_box.get_child(0)
+		sticker_box.remove_child(c)
+		c.queue_free()
+
+
 ## The keys line under "You're the ...". Vehicles can describe their own (controls_help(fp)).
+## Two lines: moving and attacking, then the right-click power and the keys
+## for switching (Tab), the view (V) and stopping (Esc).
 func controls_help(u: B3Unit) -> String:
 	var fp := B3Player.me.fp
+	var pw := B3Player.power_help(u)
+	var keys := ("%s · " % pw if pw != "" else "") + "Tab next teammate · V %s · Esc stop" % ("overhead view" if fp else "👀 first person")
 	if u.has_method("controls_help"):
-		return String(u.call("controls_help", fp)) + " · V %s · Esc stop" % ("overhead view" if fp else "👀 first person")
+		return String(u.call("controls_help", fp)) + "\n" + keys
 	if fp:
-		return "WASD move · mouse look · click attack · Space jump · V overhead view · Esc stop"
-	return "WASD move · mouse aim · click attack · Space jump · V 👀 first person · Esc stop"
+		return "WASD move · mouse look · click attack · Space jump\n" + keys
+	return "WASD move · mouse aim · click attack · Space jump\n" + keys
 
 
 ## Shows the crosshair and the right help line for how you're playing.
@@ -1194,6 +1673,10 @@ func _process(_d: float) -> void:
 		var ty := (play_lbl.position.y + play_lbl.size.y + 8.0) if play_lbl.visible else 80.0
 		if toasts.position.y != ty:
 			toasts.position.y = ty
+	# a pop-up (📜, 💾, ⚙️…) sits right where messages go: they wait behind it
+	var pop_open := popup != null and is_instance_valid(popup) and popup.visible
+	if toasts.visible == pop_open:
+		toasts.visible = not pop_open
 	if _flash > 0.0:
 		_flash = maxf(0.0, _flash - dt * 0.7)
 		flash_rect.color = Color(1, 1, 0.95, clampf(_flash * 1.3, 0.0, 1.0))
@@ -1204,7 +1687,7 @@ func _process(_d: float) -> void:
 		var s := 1.0 + 0.35 * exp(-_banner_t * 5.0) * sin(_banner_t * 18.0)
 		banner_lbl.scale = Vector2(s, s)
 		banner_lbl.rotation = sin(_banner_t * 2.0) * 0.02
-	for c in toasts.get_children():
+	for c in toasts.get_children() + sticker_box.get_children():
 		var t: float = c.get_meta("t", 3.0)
 		t -= dt
 		c.set_meta("t", t)

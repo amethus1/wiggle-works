@@ -7,6 +7,11 @@ const FUSED := ["firework", "paint_bomb", "bubble_bomb", "glue_bomb", "freeze_bo
 const FUSE_TIME := {"firework": 1.0, "paint_bomb": 0.7, "bubble_bomb": 0.7, "glue_bomb": 0.7, "freeze_bomb": 0.7, "boom_barrel": 0.9, "mega_boom": 1.6,
 	"grenade": 2.0, "dynamite": 3.0, "cluster": 1.2, "napalm": 1.0, "acid_bomb": 1.0, "nuke": 4.0, "barrel": 0.8}
 const GLOWS := ["lamp", "firework", "saucer"]
+## Booms that go off when power reaches them (a wire from a battery, switch, big
+## button or timer, or a Zappy zap): build battle traps!
+const WIRED_BOOMS := {"c4": true, "dynamite": true, "landmine": true, "barrel": true, "grenade": true, "cluster": true,
+	"napalm": true, "acid_bomb": true, "nuke": true, "boom_barrel": true, "mega_boom": true, "firework": true,
+	"paint_bomb": true, "bubble_bomb": true, "glue_bomb": true, "freeze_bomb": true, "confetti": true}
 
 
 static func is_source(t: Toy) -> bool:
@@ -140,6 +145,15 @@ static func step(world: World, t: Toy, dt: float) -> void:
 		_projectile(world, t, dt)
 		if not world.things.has(t.uid):
 			return
+	if WIRED_BOOMS.has(t.id):
+		# power arriving (not staying on) sets it off, once
+		var live := t.powered or t.zap_power > 0.0
+		if live and not bool(t.extra.get("was_live", false)):
+			t.extra.was_live = true
+			_power_boom(world, t)
+			if not world.things.has(t.uid):
+				return
+		t.extra.was_live = live
 	if t.def.has("lift") and t.bubble_t <= 0.0:
 		t.apply_central_force(Vector2(0, -float(t.def.lift) * t.mass))
 	if t.id == "envelope":
@@ -158,11 +172,14 @@ static func step(world: World, t: Toy, dt: float) -> void:
 					world.fx_event("tick", {"p": t.global_position})
 		"button":
 			var pressed := false
-			for b in t.get_colliding_bodies():
-				var bp: Vector2 = b.global_position
-				if (bp - t.global_position).dot(up) > 2.0:
-					pressed = true
-					break
+			if t.freeze:
+				pressed = _pressed_from_above(world, t, up)   # nailed down: it can't feel its own contacts
+			else:
+				for b in t.get_colliding_bodies():
+					var bp: Vector2 = b.global_position
+					if (bp - t.global_position).dot(up) > 2.0:
+						pressed = true
+						break
 			if pressed != bool(t.extra.get("pressed", false)):
 				t.extra.pressed = pressed
 				t.extra.art = "down" if pressed else "up"
@@ -218,6 +235,30 @@ static func step(world: World, t: Toy, dt: float) -> void:
 					break
 
 
+## A wire (or a zap) brought power to a boom: off it goes.
+static func _power_boom(world: World, t: Toy) -> void:
+	if t.id == "confetti":
+		use(world, t)
+	elif t.fuse < 0.0:
+		world.fx_event("spark", {"p": t.global_position})
+		trigger(world, t)
+
+
+static var _plate_q: PhysicsShapeQueryParameters2D = null
+
+
+## A nailed-down Big Button (a pressure plate): is anything standing on it?
+static func _pressed_from_above(world: World, t: Toy, up: Vector2) -> bool:
+	if _plate_q == null:
+		_plate_q = PhysicsShapeQueryParameters2D.new()
+		_plate_q.shape = RectangleShape2D.new()
+		_plate_q.collision_mask = Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | Toy.LAYER_FIGHTERS
+	(_plate_q.shape as RectangleShape2D).size = Vector2(t.w * t.size_scale * 0.9, 8.0)
+	_plate_q.transform = Transform2D(t.rotation, t.global_position + up * (t.h * t.size_scale * 0.5 + 5.0))
+	_plate_q.exclude = [t.get_rid()]
+	return not world.get_world_2d().direct_space_state.intersect_shape(_plate_q, 1).is_empty()
+
+
 static func _count_boom() -> void:
 	Settings.count("booms", "boom", 10)
 
@@ -267,6 +308,8 @@ static func _blow(world: World, t: Toy, dir: Vector2, dt: float) -> void:
 			o.linear_velocity += dir * f * clampf(1.6 / o.mass, 0.08, 1.2)
 		elif o is Wiggly and o.frozen_t <= 0.0:
 			o.add_velocity(dir * f * (1.6 if o.kind == "puffy" else 0.8))
+		elif o is Fighter:
+			o.blow(dir * (1.0 - dist / reach) * 600.0, dt)   # (lighter ones go further)
 	if randf() < 0.35:
 		world.fx_event("wind", {"p": c + dir * 30.0, "dir": dir})
 
@@ -274,6 +317,12 @@ static func _blow(world: World, t: Toy, dir: Vector2, dt: float) -> void:
 static func _magnet(world: World, t: Toy, dt: float) -> void:
 	var c := t.global_position
 	for o in world.things.values():
+		if o is Fighter:
+			# metal armor gets pulled, metal weapons get yanked out of their hands
+			var fd: float = o.center().distance_to(c)
+			if fd < 380.0:
+				o.magnetize(c, 1.0 - fd / 380.0, dt)
+			continue
 		if o == t or not (o is Toy) or not o.def.get("metal", false) or o.freeze:
 			continue
 		var d: Vector2 = c - o.global_position
@@ -314,6 +363,8 @@ static func _hover(world: World, t: Toy, dt: float) -> void:
 			elif o is Wiggly:
 				for jp in o.points:
 					jp.linear_velocity = jp.linear_velocity.lerp(Vector2(-d.x * 1.5, -260.0), dt * 3.0)
+			elif o is Fighter:
+				o.beam(Vector2(-d.x * 1.5, -260.0), dt)   # beam me up! (dinos too, just slower)
 
 
 static func _blow_bubble(world: World, t: Toy, dir: Vector2) -> void:
@@ -333,6 +384,9 @@ static func _blow_bubble(world: World, t: Toy, dir: Vector2) -> void:
 		if o is Wiggly and o.size < 1.2 and o.bubble_t <= 0.0:
 			o.set_bubble(6.0)
 			return
+		if o is Fighter and o.state == "stand" and o.alive() and o.bubble_t <= 0.0 and o.weight() <= 3.6:
+			o.set_bubble(4.5)   # people and small animals (a T-Rex is too big)
+			return
 
 
 static func _bubble(_world: World, t: Toy, sec: float) -> void:
@@ -347,6 +401,8 @@ static func _unbubble(world: World, t: Toy) -> void:
 
 
 static func _drive(world: World, t: Toy, on: bool, dt: float) -> void:
+	if on:
+		world.cars_on += 1
 	var speed := 26.0 if t.id == "go_kart" else 15.0
 	for o in world.things.values():
 		if o is Toy and o.parent_uid == t.uid and o.id == "wheel":
@@ -467,6 +523,8 @@ static func _go_off(world: World, t: Toy) -> void:
 					_bubble(world, o, 6.0)
 				elif o is Wiggly:
 					o.set_bubble(6.0)
+				elif o is Fighter:
+					o.set_bubble(5.0)   # even a T-Rex
 			world.fx_event("bubble_burst", {"p": p, "r": 210.0})
 			_count_boom()
 			world.remove(t.uid, false)
@@ -487,6 +545,9 @@ static func _go_off(world: World, t: Toy) -> void:
 						best = b
 				if best:
 					world.add_link("glue", a, best, (a.global_position + best.global_position) * 0.5, (a.global_position + best.global_position) * 0.5)
+			for f in world.fighters():
+				if f.center().distance_to(p) < 180.0:
+					f.stick(6.0)   # gooey feet: slow going for a while
 			world.fx_event("glue_splat", {"p": p, "r": 160.0})
 			_count_boom()
 			world.remove(t.uid, false)
@@ -577,6 +638,8 @@ static func impact(world: World, t: Toy, other, closing: float, at: Vector2) -> 
 	if t.id == "landmine" and (other is FighterPart or (other is Toy and closing > 80.0) or other is JellyPoint):
 		trigger(world, t)
 		return
+	if other is FighterPart and other.fighter and other.fighter.frozen_t > 0.0 and closing * t.mass > 1500.0:
+		other.fighter.thaw(true)   # something heavy smashes the ice block
 	if t.id in ["barrel", "dynamite", "nuke", "c4"] and closing > 900.0:
 		trigger(world, t)
 		return

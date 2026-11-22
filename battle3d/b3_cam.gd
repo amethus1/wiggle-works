@@ -26,7 +26,9 @@ var max_size := 160.0
 var fp_unit: B3Unit = null      # first person: whose eyes we look through
 var fp_ctl: B3Ctl = null
 var fov := 72.0
+const SCOPE_FOV := 25.0         # a sniper looking through its scope (right-click, B3Player.scoped)
 var hands: B3FPView = null      # the weapon in your hands in first person
+var _scope: MeshInstance3D = null   # the scope's round black edge
 var battle = null
 var _hidden_near: Array = []    # teammates right in front of your face (hidden in first person)
 var _hid: Array = []            # the meshes of your own body we hid (they go with it into a ragdoll)
@@ -91,6 +93,8 @@ func set_first_person(u: B3Unit, c: B3Ctl) -> void:
 		if hands:
 			hands.queue_free()
 			hands = null
+		if _scope:
+			_scope.visible = false
 		cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 		cam.near = 1.0
 		cam.far = 700.0
@@ -178,6 +182,7 @@ func _process(_d: float) -> void:
 		var p := fp_unit.global_position
 		focus = Vector3(p.x, 0, p.z)
 		_hide_near(p)
+		_zoom(dt)
 	elif not _hidden_near.is_empty():
 		_hide_near(Vector3(INF, 0, INF))
 	elif follow != null:
@@ -215,6 +220,58 @@ func _hide_near(at: Vector3) -> void:
 	for r in keep:
 		(r as Node3D).visible = false
 	_hidden_near = keep
+
+
+## 🔭 A sniper's scope (right-click in first person): the view zooms in
+## smoothly and a round black edge closes in around it.
+func _zoom(dt: float) -> void:
+	var want := SCOPE_FOV if B3Player.scoped(fp_unit, fp_ctl) else fov
+	if absf(cam.fov - want) > 0.05:
+		cam.fov = move_toward(cam.fov, want, dt * 300.0)
+	var k := clampf((fov - cam.fov) / (fov - SCOPE_FOV), 0.0, 1.0)
+	if k > 0.01 and _scope == null:
+		_scope = _make_scope()
+		cam.add_child(_scope)
+	if _scope:
+		_scope.visible = k > 0.01
+		_scope.set_instance_shader_parameter("amount", k)
+
+
+## How fast the mouse turns the first-person view: slower while zoomed in.
+func look_k() -> float:
+	if not first_person() or cam.projection != Camera3D.PROJECTION_PERSPECTIVE:
+		return 1.0
+	return clampf(cam.fov / fov, 0.2, 1.0)
+
+
+func _make_scope() -> MeshInstance3D:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+render_mode unshaded, cull_disabled, depth_test_disabled, depth_draw_never, shadows_disabled;
+instance uniform float amount = 1.0;
+void fragment() {
+	vec2 p = (SCREEN_UV - 0.5) * vec2(VIEWPORT_SIZE.x / VIEWPORT_SIZE.y, 1.0);
+	float r = length(p);
+	float edge = mix(0.9, 0.44, amount);
+	float dark = smoothstep(edge - 0.01, edge + 0.01, r);
+	float rim = smoothstep(edge - 0.05, edge, r) * 0.55;
+	ALBEDO = vec3(0.02, 0.02, 0.03);
+	ALPHA = max(dark, rim) * min(amount * 2.0, 1.0);
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.render_priority = 100
+	var q := MeshInstance3D.new()
+	var qm := QuadMesh.new()
+	qm.size = Vector2(1.0, 1.0)
+	q.mesh = qm
+	q.material_override = m
+	q.position = Vector3(0, 0, -0.12)       # just in front of the eye, filling the view
+	q.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	q.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	return q
 
 
 func shake(a: float) -> void:

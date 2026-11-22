@@ -191,6 +191,34 @@ func handle(name: String, a: Dictionary) -> void:
 		"thaw":
 			burst(p, 6, Vector2(20, 60), Vector2(0.3, 0.6), Vector2(2, 4), Color(0.7, 0.9, 1.0), "dot", 1.0)
 			Sfx.play("thaw", p, 0.6)
+		"ice_pop":
+			# a frozen fighter breaks out of its ice block
+			var ir := clampf(float(a.get("r", 40.0)), 20.0, 140.0)
+			for i in int(10 + ir * 0.15):
+				_p(p + Vector2(randf_range(-ir, ir) * 0.5, randf_range(-ir, ir) * 0.6), Vector2(randf_range(-280, 280), randf_range(-360, -40)), randf_range(0.5, 1.0), randf_range(4, 9), Color(0.8, 0.95, 1.0, 0.9), "shard", 1.0)
+			ring(p, ir * 1.2, Color(0.85, 0.97, 1.0, 0.9), 0.3, 4.0)
+			pop(p + Vector2(0, -ir - 20), "CRACK!" if a.get("smash", false) else "POP!", Color("8fe8ff"), 28)
+			Sfx.play("glass" if a.get("smash", false) else "thaw", p, 0.8, 1.2)
+		"zap_chain":
+			# Zappy's zap jumping from soldier to soldier
+			for pr in a.get("pairs", []):
+				if pr is Array and pr.size() == 2 and pr[0] is Vector2 and pr[1] is Vector2:
+					_bolt(pr[0], pr[1])
+					burst(pr[1], 4, Vector2(60, 200), Vector2(0.1, 0.25), Vector2(1.5, 3), Color(1.6, 2.0, 2.6), "spark", 0.4, true)
+			Sfx.play("zap", p, 0.5, 1.3)
+		"spark":
+			burst(p, 8, Vector2(60, 220), Vector2(0.1, 0.3), Vector2(1.5, 3), Color(2.4, 2.0, 0.9), "spark", 0.5, true)
+			Sfx.play("zap", p, 0.35, 1.6)
+		"yoink":
+			# a magnet pulls a weapon out of someone's hands
+			burst(p, 6, Vector2(40, 160), Vector2(0.2, 0.4), Vector2(1.5, 3), Color(2.0, 0.8, 0.8), "dot", 0.0, true)
+			pop(p + Vector2(0, -30), "YOINK!", Color("e74c3c"), 26)
+			Sfx.play("clink", p, 0.8, 1.3)
+		"bowled":
+			# something heavy knocked a fighter flat
+			pop(p + Vector2(0, -50), ["BONK!", "WHAM!", "BOWLED!"][randi() % 3], Color("ffd43b"), 28)
+			burst(p, 6, Vector2(60, 200), Vector2(0.2, 0.4), Vector2(3, 5), Color(2.0, 1.8, 0.6), "star", 0.2, true)
+			Sfx.play("bonk", p, clampf(float(a.get("v", 300.0)) / 500.0, 0.4, 1.0))
 		"pound":
 			ring(p, float(a.get("r", 220.0)), Color(0.95, 0.9, 0.8, 0.8), 0.45, 10.0)
 			cone(p, Vector2.UP, PI * 0.5, 22, Vector2(80, 300), Vector2(0.4, 0.8), Vector2(10, 20), Color(0.8, 0.75, 0.65, 0.5), "soft", 0.2)
@@ -418,6 +446,9 @@ func handle(name: String, a: Dictionary) -> void:
 		"battle_start":
 			pop(view_rect.get_center() + Vector2(0, -view_rect.size.y * 0.25), "⚔️ FIGHT!", Color("ffd43b"), 64)
 			Sfx.play("battle_start", null, 1.0)
+		"charge_all":
+			pop(view_rect.get_center() + Vector2(0, -view_rect.size.y * 0.25), "📣 CHARGE!", Color("ff8a3d"), 56)
+			Sfx.play("battle_start", null, 0.8, 1.2)
 		"nuke":
 			var r := float(a.get("r", 1000.0))
 			do_flash(Color(1, 0.98, 0.9), 1.0)

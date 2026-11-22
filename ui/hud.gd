@@ -277,6 +277,12 @@ func _fighter_info(t: Fighter) -> String:
 	var info := "%s  ·  %s" % [t.display_name(), "KO'd" if not t.alive() else ("%d/%d ❤️" % [int(t.hp), int(t.max_hp)])]
 	if t.weapon_id != "":
 		info += "  ·  " + String(Catalog.toy(t.weapon_id).get("name", ""))
+	# what toys and Wiggly powers are doing to it right now
+	for e in [["ice", "🧊"], ["bubble", "🫧"], ["zap", "⚡"], ["goo", "🍬"], ["wet", "💧"]]:
+		if t.shows(String(e[0])):
+			info += " " + String(e[1])
+	if t.burning > 0.0 and t.alive():
+		info += " 🔥"
 	return info
 
 
