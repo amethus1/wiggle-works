@@ -51,7 +51,7 @@ const STAGES := [
 		"goal": "Break the shield wall of 5 knights.",
 		"hint": "Shields stop swords and arrows, but rockets blast right past them.",
 		"zone": Rect2(-34, -12, 20, 24),
-		"enemy": [["knight", 16, 0, 5, 1, 1.4, "attack"]]},
+		"enemy": [["knight", 22, 0, 5, 1, 1.4, "attack"]]},
 	{"id": "dragon", "icon": "🐉", "name": "Dragon Attack", "map": "snow", "budget": 24,
 		"goal": "Beat the dragon and its viking friends.",
 		"hint": "Dragons fly! Swords can't reach them, but machine guns and helicopters can.",
@@ -94,7 +94,7 @@ const STAGES := [
 		"enemy": [["tank", 22, 0, 3, 1, 7.0, "attack"]]},
 	{"id": "trex", "icon": "🦖", "name": "T-Rex!", "map": "farmland", "budget": 36,
 		"goal": "Beat the T-Rex and its raptor pack.",
-		"hint": "It takes someone just as big to stand up to a T-Rex. How about a mammoth?",
+		"hint": "It takes someone just as big to stand up to a T-Rex. How about a mammoth, with snipers at the back for the raptors?",
 		"zone": Rect2(-36, -14, 22, 28),
 		"enemy": [["trex", 24, 0, 1, 1, 2.0, "attack"], ["raptor", 18, 0, 4, 1, 2.2, "attack"]]},
 	{"id": "beach", "icon": "🏖️", "name": "Storm the Beach", "map": "beach", "budget": 48,
@@ -127,10 +127,10 @@ const SOLUTIONS := {
 	"stampede": [["mgnest", -20, -4], ["mgnest", -20, 0], ["mgnest", -20, 4]],
 	"town": [["sniper", -26, -2], ["sniper", -26, 0], ["sniper", -26, 2]],
 	"bridge": [["elephant", -11, -1.5], ["elephant", -11, 1.5]],
-	"tanks": [["heli", -28, 0], ["cannon", -24, 0]],
-	"trex": [["mammoth", -20, -3], ["mammoth", -20, 3]],
+	"tanks": [["heli", -34, 0], ["cannon", -22, 0]],
+	"trex": [["mammoth", -20, 0], ["sniper", -32, -3], ["sniper", -32, 3]],
 	"beach": [["heli", 0, 24], ["sniper", -4, 22], ["sniper", 0, 22], ["sniper", 4, 22]],
-	"finale": [["heli", -28, -4], ["heli", -28, 4], ["mgnest", -22, -3], ["mgnest", -22, 3], ["sniper", -36, 0]],
+	"finale": [["heli", -28, -5], ["heli", -28, 0], ["heli", -28, 5]],
 }
 
 var b = null                  # the battle

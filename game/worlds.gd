@@ -268,7 +268,9 @@ static func build(world: World, id: String) -> void:
 		"battle":
 			var st := {"fill": Color("8d6e4b"), "fill2": Color("5d4630"), "top": Color("6ab04c"), "top_w": 14.0, "tuft": "grass", "dot": Color(0, 0, 0, 0.08)}
 			var land := func(x: float) -> float:
-				var y := 300.0 - 30.0 * sin(x * 0.003)
+				# the same rolling hills on both sides (a plain sine wave put blue
+				# up to 60 px above red, shooting downhill, and blue always won)
+				var y := 300.0 - 30.0 * sin(absf(x) * 0.003)
 				# river in the middle
 				if absf(x) < 160.0:
 					y += 90.0 * cos(x / 160.0 * PI * 0.5)

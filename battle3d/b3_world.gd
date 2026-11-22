@@ -41,6 +41,12 @@ const NO_SHADOW := ["tuft", "pebble", "wheat", "corn", "cabbage"]
 const DETAIL_FAR := {"tuft": 75.0, "pebble": 75.0, "cabbage": 95.0, "wheat": 125.0, "corn": 155.0}
 const DETAIL_FADE := 20.0
 const DETAIL_CELL := 48.0
+## Overhead, zoomed out past DETAIL_LO_ZOOM (the view's height in metres),
+## ground detail switches to simpler meshes (kind_mesh(kind + "_lo")): crops
+## are a dozen pixels tall by then. Zooming back in past DETAIL_LO_BACK
+## switches back (a bit lower, so it doesn't flick to and fro at the edge).
+const DETAIL_LO_ZOOM := 95.0
+const DETAIL_LO_BACK := 90.0
 ## Per map: fog distance (first person, by day), height of the far
 ## mountains, snow line, and the ring's mid / rock colours.
 const CFG := {
@@ -98,6 +104,7 @@ var _detail: Array[MultiMeshInstance3D] = []     # ground detail chunks (tufts, 
 var _detail_fp: Array[MultiMeshInstance3D] = []  # first person: the same in finer pieces that fade out
 var _detail_inst := {}           # kind -> its [transform, colour, ...] (for _detail_fp)
 var _detail_mm: Array[MultiMesh] = []    # _detail_fp's MultiMeshes, kept for the next time
+var _detail_lo := false          # _detail is showing the simpler meshes (zoomed out)
 # only used while building a map
 var _d: Dictionary = {}
 var _cols := PackedColorArray()
@@ -371,6 +378,19 @@ func _process(_dt: float) -> void:
 		_apply_fog()
 		_apply_shadows()
 		_apply_detail()
+	var lo := v == 0 and cam.size > (DETAIL_LO_BACK if _detail_lo else DETAIL_LO_ZOOM)
+	if lo != _detail_lo:
+		_detail_lo = lo
+		_apply_lod()
+
+
+## Zoomed right out overhead, tufts and crops are a few pixels each, and
+## there are thousands: the simpler meshes look the same from there.
+func _apply_lod() -> void:
+	for m in _detail:
+		if is_instance_valid(m) and m.multimesh.has_meta("kind"):
+			var kind := String(m.multimesh.get_meta("kind"))
+			m.multimesh.mesh = kind_mesh(kind + "_lo" if _detail_lo else kind)
 
 
 ## Overhead: the ground detail in its big chunks. First person: in finer
@@ -672,6 +692,7 @@ func _instantiate(dat: Dictionary) -> void:
 	_detail_fp.clear()
 	_detail_inst = {}
 	_detail_mm.clear()
+	_detail_lo = false       # (the new chunks start detailed; _process switches them if zoomed out)
 	heights = dat.heights
 	builtin_pools = (dat.pools as Array).duplicate(true)
 	waters = dat.waters
@@ -793,6 +814,8 @@ func _make_instances(inst: Dictionary) -> void:
 				var e2: Array = grp[j]
 				mm.set_instance_transform(j, e2[0])
 				mm.set_instance_color(j, e2[1])
+			if not shadow:
+				mm.set_meta("kind", kind)      # (_apply_lod)
 			var mmi := MultiMeshInstance3D.new()
 			mmi.multimesh = mm
 			mmi.material_override = mat
@@ -2875,8 +2898,9 @@ class Builder:
 		return B3World._mesh(v, n, c, ix)
 
 
-## Mesh arrays of a unit-sized primitive: "box", "sph:<segs>",
-## "cyl:<segs>:<top/bottom>", "prism", "cap:<r>:<h>".
+## Mesh arrays of a unit-sized primitive: "box", "sph:<segs>[:<rings>]",
+## "cyl:<segs>:<top/bottom>", "prism", "cap:<r>:<h>", "oct" (a smooth
+## octahedron: 8 triangles, for far-away detail).
 static func prim(key: String) -> Array:
 	var a: Array = _prims.get(key, [])
 	if not a.is_empty():
@@ -2884,6 +2908,10 @@ static func prim(key: String) -> Array:
 	var s := key.split(":")
 	var m: PrimitiveMesh = null
 	match s[0]:
+		"oct":
+			a = _octahedron()
+			_prims[key] = a
+			return a
 		"box":
 			m = BoxMesh.new()
 		"sph":
@@ -2891,7 +2919,7 @@ static func prim(key: String) -> Array:
 			sm.radius = 0.5
 			sm.height = 1.0
 			sm.radial_segments = s[1].to_int()
-			sm.rings = maxi(3, s[1].to_int() >> 1)
+			sm.rings = maxi(3, s[1].to_int() >> 1) if s.size() < 3 else s[2].to_int()
 			m = sm
 		"cyl":
 			var cm := CylinderMesh.new()
@@ -2915,7 +2943,38 @@ static func prim(key: String) -> Array:
 	return a
 
 
+## Mesh arrays of an octahedron with its points 0.5 out along each axis,
+## shaded smooth (each corner's normal points out of it), so from far away it
+## passes for a little ball, cone or leaf.
+static func _octahedron() -> Array:
+	var v := PackedVector3Array([Vector3(0.5, 0, 0), Vector3(-0.5, 0, 0), Vector3(0, 0.5, 0), Vector3(0, -0.5, 0), Vector3(0, 0, 0.5), Vector3(0, 0, -0.5)])
+	var n := PackedVector3Array()
+	for p in v:
+		n.append(p.normalized())
+	var ix := PackedInt32Array()
+	for xi in [0, 1]:
+		for yi in [2, 3]:
+			for zi in [4, 5]:
+				var a: int = xi
+				var b: int = yi
+				var c: int = zi
+				# front faces wind clockwise seen from outside (as Godot's own meshes do)
+				if (v[b] - v[a]).cross(v[c] - v[a]).dot(v[a] + v[b] + v[c]) > 0.0:
+					var t := b
+					b = c
+					c = t
+				ix.append_array(PackedInt32Array([a, b, c]))
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = v
+	arr[Mesh.ARRAY_NORMAL] = n
+	arr[Mesh.ARRAY_INDEX] = ix
+	return arr
+
+
 ## The merged mesh of one kind of tree, rock, bush or crop (made once).
+## "<kind>_lo": a simpler one for far away (DETAIL_LO_ZOOM), each piece with
+## about the same outline and colour as the detailed one.
 static func kind_mesh(kind: String) -> ArrayMesh:
 	var m: ArrayMesh = _kmesh.get(kind)
 	if m != null:
@@ -2991,6 +3050,28 @@ static func kind_mesh(kind: String) -> ArrayMesh:
 			b.add(prim("cyl:4:0"), _xf(Vector3(0, 1.85, 0), Vector3(0.1, 0.3, 0.1)), Color("d8c070"))
 		"cabbage":
 			b.add(prim("sph:7"), _xf(Vector3(0, 0.15, 0), Vector3(0.7, 0.45, 0.7)), Color("7cc45a"))
+		# far away (zoomed right out): cones and leaves become octahedra the same
+		# size (a diamond has the same outline area as a cone, and a leaf's
+		# diamond is made wider to match its oval), balls get fewer sides
+		# (and are made a little wider to make up for it)
+		"tuft_lo":
+			# (a cone still: a pixel-sized diamond loses its thin ends, a cone keeps its foot)
+			b.add(prim("cyl:4:0"), _xf(Vector3(0, 0.175, 0), Vector3(0.18, 0.35, 0.18)), Color.WHITE)
+		"pebble_lo":
+			b.add(prim("sph:4:2"), _xf(Vector3.ZERO, Vector3(0.28, 0.24, 0.28)), Color.WHITE)
+		"wheat_lo":
+			for i in 4:
+				var a4 := TAU * i / 4.0
+				b.add(prim("oct"), _xf(Vector3(sin(a4) * 0.14, 0.4, cos(a4) * 0.14), Vector3(0.14, 0.8, 0.14), Vector3(sin(a4) * 8.0, 0, cos(a4) * 8.0)), Color("e8c45a"))
+		"corn_lo":
+			b.add(prim("box"), _xf(Vector3(0, 0.85, 0), Vector3(0.09, 1.7, 0.09)), Color("5f9e3a"))
+			b.add(prim("oct"), _xf(Vector3(0, 0.9, 0.3), Vector3(0.19, 0.06, 0.8), Vector3(-25, 0, 0)), Color("6aa83e"))
+			b.add(prim("oct"), _xf(Vector3(0, 1.2, -0.3), Vector3(0.19, 0.06, 0.8), Vector3(25, 0, 0)), Color("6aa83e"))
+			b.add(prim("oct"), _xf(Vector3(0.09, 1.15, 0), Vector3(0.21, 0.34, 0.21)), Color("f2d24a"))
+			b.add(prim("oct"), _xf(Vector3(0, 1.85, 0), Vector3(0.1, 0.3, 0.1)), Color("d8c070"))
+		"cabbage_lo":
+			# (two rings: the widest one is a bit in from the middle, so it's made wider)
+			b.add(prim("sph:6:2"), _xf(Vector3(0, 0.15, 0), Vector3(0.82, 0.47, 0.82)), Color("7cc45a"))
 		"bale":
 			b.add(prim("cyl:12:1"), _xf(Vector3(0, 0.75, 0), Vector3(1.5, 1.3, 1.5), Vector3(0, 0, 90)), Color("e2c26a"))
 	m = b.commit()

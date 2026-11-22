@@ -332,11 +332,26 @@ func _lists() -> void:
 	var low := 1 << 30
 	for e in ts_saved:
 		low = mini(low, int(e.uid))
+	var n_saved: int = saved.toys.size() + saved.wigglies.size() + saved.fighters.size()
 	w._clear_all()
+	await frames(2)   # (the old ones are gone at the end of the frame)
 	w.next_uid = low - 1
 	w.restore(saved)
 	await frames(2)
 	check(_same_lists(w), "and after loading a save whose numbers clash with the new things' (%d things)" % w.things.size())
+	check(w.things.size() == n_saved and _strays(w) == 0, "loading it brings back all %d things and leaves no strays behind (%d back, %d strays)" % [n_saved, w.things.size(), _strays(w)])
+	# undo straight after, with a broken save that has a number twice
+	var twice := w.serialize()
+	if twice.toys.size() >= 2:
+		twice.toys[1].uid = twice.toys[0].uid
+	w.restore(twice)
+	await frames(2)
+	check(_same_lists(w) and _strays(w) == 0 and w.toys().size() == twice.toys.size(), "and a broken save with a number used twice loads everything, with no strays (%d toys, %d strays)" % [w.toys().size(), _strays(w)])
+	w.push_undo()
+	w.apply_command(0, {"cmd": "spawn", "id": "f:viking", "x": 0, "y": 0})
+	w.undo()
+	await frames(2)
+	check(_same_lists(w) and _strays(w) == 0, "↩️ undo leaves no strays either (%d strays)" % _strays(w))
 	var lost := w.spawn_toy("marble", Vector2(0, -100))
 	lost.global_position = Vector2(0, w.bounds.end.y + 400.0)
 	await frames(2)
@@ -381,6 +396,16 @@ class _Fake extends RefCounted:
 class _FakeNet extends RefCounted:
 	func players_snapshot() -> Array:
 		return []
+
+
+## Toy, Wiggly and fighter nodes in the world that it doesn't know about.
+func _strays(wd: World) -> int:
+	var n := 0
+	for layer: Node in [wd.bodies, wd.wiggly_layer, wd.fighter_layer]:
+		for c in layer.get_children():
+			if (c is Toy or c is Wiggly or c is Fighter) and not c.is_queued_for_deletion() and wd.things.get(c.uid) != c:
+				n += 1
+	return n
 
 
 func _same_lists(wd: World) -> bool:

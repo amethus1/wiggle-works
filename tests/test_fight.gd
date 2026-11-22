@@ -23,7 +23,25 @@ func fresh() -> void:
 	w._clear_all()
 	w.clear_placed()
 	w.battle_on = true
+	w.set_gravity("normal")
 	await frames(2)
+
+
+## Waits up to `sec` seconds for `cond` to come true.
+func wait_for(cond: Callable, sec: float) -> bool:
+	for i in int(sec * 120.0):
+		if cond.call():
+			return true
+		await get_tree().physics_frame
+	return bool(cond.call())
+
+
+var bumps := 0   # "thud" and "clink" puffs (see _count_bumps)
+
+
+func _count_bumps(name: String, _a: Dictionary) -> void:
+	if name == "thud" or name == "clink":
+		bumps += 1
 
 
 func _ready() -> void:
@@ -35,6 +53,7 @@ func _ready() -> void:
 	fx.world = w
 	add_child(fx)
 	w.fx.connect(fx.handle)
+	w.fx.connect(_count_bumps)
 	w.load_world("canvas", false)
 
 	print("everyone")
@@ -315,6 +334,8 @@ func _ready() -> void:
 	check(w.last_winner != "", "so even two guards far apart finish the battle (%s won after %.0f s)" % [w.last_winner, st_t / 120.0])
 	check(not w.brave and w.quiet_t == 0.0, "and the charge is over once someone wins")
 
+	await _knocked_out()
+
 	print("nuke")
 	await fresh()
 	for i in 6:
@@ -334,3 +355,134 @@ func _ready() -> void:
 
 	print("test_fight: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+## A heap of knocked-out fighters stops moving (their bodies freeze where they
+## lie), but still reacts to everything that used to move it.
+func _knocked_out() -> void:
+	print("knocked out")
+	await fresh()
+	w.battle_on = false
+	var heap: Array[Fighter] = []
+	for i in 14:
+		heap.append(w.spawn_fighter(["soldier", "knight", "viking", "wolf", "archer", "ninja", "bear"][i % 7], Vector2(-250 + (i % 7) * 45, 150 - (i / 7) * 100), "red", "peaceful"))
+	await frames(2)
+	for f in heap:
+		f.hurt(99999.0, Vector2(0, -150))
+	var all_still := func() -> bool: return heap.all(func(f): return f.is_resting())
+	var rested: bool = await wait_for(all_still, 15.0)
+	check(rested, "a heap of %d knocked-out fighters comes to rest (%d lying still)" % [heap.size(), heap.filter(func(f): return f.is_resting()).size()])
+	var spots := _spots(heap)
+	bumps = 0
+	await frames(120)
+	# (a dropped weapon or two may still rattle about for a moment: it used to be hundreds of bumps a second)
+	check(bumps <= 10 and _moved(heap, spots) < 0.5, "and stays quiet: hardly a bump or a puff, nothing moves (%d bumps, moved %.1f px)" % [bumps, _moved(heap, spots)])
+	check(heap.all(func(f): return f.state == "dead" and f.face() == "ko"), "still knocked out (X eyes and stars)")
+	check(heap.all(func(f): return f._supported()), "and every one of them lies on something (nobody stuck in mid-air)")
+
+	# a blast throws them about
+	spots = _spots(heap)
+	Combat.blast(w, Vector2(-100, 290), 260.0, 1200.0, 10.0)
+	await frames(30)
+	var thrown := heap.filter(func(f): return f.center().distance_to(spots[f]) > 30.0).size()
+	check(thrown >= heap.size() / 2, "a blast still throws them about (%d of %d moved)" % [thrown, heap.size()])
+	await wait_for(all_still, 15.0)
+
+	# the grab tool drags one away (and the ones it was holding up fall)
+	var f0: Fighter = heap[heap.size() - 1]
+	var c0 := f0.center()
+	w.apply_command(0, {"cmd": "grab", "uid": f0.uid, "x": c0.x, "y": c0.y})
+	for i in 40:
+		w.apply_command(0, {"cmd": "drag", "x": c0.x + 300.0, "y": c0.y - 150.0})
+		await get_tree().physics_frame
+	w.apply_command(0, {"cmd": "release"})
+	check(f0.center().distance_to(c0) > 150.0, "you can still drag one away (moved %.0f px)" % f0.center().distance_to(c0))
+	await frames(120)
+	check(heap.all(func(f): return f.is_resting() == false or f._supported()), "and nobody it held up is left hanging in mid-air")
+	await wait_for(all_still, 15.0)
+
+	# the gravity turns upside down
+	var ys := _spots(heap)
+	w.set_gravity("flip")
+	await frames(40)
+	var risen := heap.filter(func(f): return f.center().y < ys[f].y - 20.0).size()
+	check(risen >= heap.size() - 1, "turning gravity upside down lifts them off the floor (%d of %d)" % [risen, heap.size()])
+	w.set_gravity("normal")
+	await wait_for(all_still, 15.0)
+
+	# a fan switched on next to them
+	spots = _spots(heap)
+	var fan := w.spawn_toy("fan", Vector2(-480, 250))
+	fan.nailed = true
+	fan.update_freeze()
+	w.apply_command(0, {"cmd": "use", "uid": fan.uid})
+	await frames(90)
+	var blown := heap.filter(func(f): return f.center().x > spots[f].x + 10.0).size()
+	check(blown >= 1, "a fan still blows them along (%d moved)" % blown)
+	w.remove(fan.uid, false)
+
+	# Revive brings one back up
+	var back: Fighter = heap[1]
+	w.apply_command(0, {"cmd": "revive", "uid": back.uid})
+	await frames(30)
+	check(back.state == "stand" and not back.is_resting(), "💖 Revive gets one back on its feet")
+
+	# the ground going: a platform, and a toy, under them
+	await fresh()
+	w.battle_on = false
+	w.apply_command(0, {"cmd": "platform", "x0": -400, "y0": 60, "x1": 0, "y1": 80})
+	var shelf := w.spawn_toy("metal_beam", Vector2(300, 180), 0.0, 1.6)
+	shelf.nailed = true
+	shelf.update_freeze()
+	var up_top: Array[Fighter] = []
+	for i in 3:
+		up_top.append(w.spawn_fighter("soldier", Vector2(-330 + i * 110, -40), "red", "peaceful"))
+	var on_shelf := w.spawn_fighter("soldier", Vector2(300, 100), "red", "peaceful")
+	await frames(30)
+	for f in up_top + [on_shelf]:
+		f.hurt(99999.0)
+	await wait_for(func(): return (up_top + [on_shelf]).all(func(f): return f.is_resting()), 12.0)
+	check(up_top.all(func(f): return f.is_resting() and f.center().y < 70.0), "knocked out on a platform, they lie still on it")
+	w.apply_command(0, {"cmd": "unplatform", "x": -200, "y": 70})
+	await frames(90)
+	check(up_top.all(func(f): return f.center().y > 150.0), "erasing the platform under them drops them (lowest at y %.0f)" % up_top.map(func(f): return f.center().y).min())
+	await wait_for(func(): return on_shelf.is_resting(), 6.0)   # (erasing the platform woke everyone)
+	var y_shelf := on_shelf.center().y
+	check(on_shelf.is_resting() and y_shelf < 180.0, "one knocked out on a nailed-down beam lies still on it")
+	w.apply_command(0, {"cmd": "erase", "uid": shelf.uid})
+	await frames(90)
+	check(on_shelf.center().y > y_shelf + 40.0, "erasing the beam drops it (%.0f px)" % (on_shelf.center().y - y_shelf))
+	# something thrown at one lying on its own
+	var lone := w.spawn_fighter("soldier", Vector2(700, 150), "red", "peaceful")
+	await frames(2)
+	lone.hurt(99999.0)
+	await wait_for(func(): return lone.is_resting(), 8.0)
+	var c1 := lone.center()
+	var ball := w.spawn_toy("bowling_ball", c1 + Vector2(-300, -10))
+	ball.linear_velocity = Vector2(900, 0)
+	await frames(60)
+	check(lone.center().distance_to(c1) > 30.0, "a bowling ball thrown at one lying still knocks it along (%.0f px)" % lone.center().distance_to(c1))
+	# nobody rests on a Wiggly: it would hop out from under them
+	var jelly := w.spawn_wiggly("boulder", Vector2(-200, 200), 1.6)
+	jelly.player_id = 99   # keeps still
+	await frames(120)
+	var on_jelly := w.spawn_fighter("knight", jelly.com + Vector2(0, -jelly.radius() - 60.0), "red", "peaceful")
+	await frames(2)
+	on_jelly.hurt(99999.0)
+	await frames(360)
+	check(not on_jelly.is_resting() or on_jelly.center().distance_to(jelly.com) > jelly.radius() + 50.0, "and one lying on a Wiggly doesn't freeze there (it could hop away)")
+
+
+func _spots(fs: Array) -> Dictionary:
+	var d := {}
+	for f in fs:
+		d[f] = f.center()
+	return d
+
+
+func _moved(fs: Array, spots: Dictionary) -> float:
+	var most := 0.0
+	for f in fs:
+		most = maxf(most, f.center().distance_to(spots[f]))
+	return most
+

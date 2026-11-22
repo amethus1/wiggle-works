@@ -8,17 +8,22 @@ var part := "body"
 var half := Vector2(6, 10)   # half size (box parts), or radius in x (round parts)
 var round_part := false
 var _prev := {}
+var on_moving := false   # touching a Wiggly (it could hop out from under us: see Fighter._rest_check)
 
 
 func _integrate_forces(s: PhysicsDirectBodyState2D) -> void:
 	var n := s.get_contact_count()
+	on_moving = false
 	if n == 0:
 		_prev.clear()
 		return
 	var seen := {}
+	var dead: bool = fighter != null and fighter.state == "dead"
 	for i in n:
 		var oid := s.get_contact_collider_id(i)
 		seen[oid] = true
+		if dead and not on_moving and s.get_contact_collider_object(i) is JellyPoint:
+			on_moving = true
 		var car := false
 		if fighter and fighter.world and fighter.world.cars_on > 0:
 			# a driving car keeps bumping whatever it pushes, even slowly (see Fighter._bump)

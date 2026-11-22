@@ -14,6 +14,7 @@ extends Node
 ##   vehicles   🚜 Tank Line (tanks, jeeps, cannon, MG nests and an army)
 ##   airshow    ✈️ Air Show (6 planes, 4 helicopters, 60 fighters)
 ##   farmland   the farmland map (crops, grass) overhead, zoomed out, and
+##   farm_far   zoomed right out (simpler crops and grass), and
 ##   farm_fp    looking out of a fighter's eyes on it
 ##   rain, snow the Huge Battle in the rain / snow
 ##   fp         the Huge Battle in first person
@@ -35,9 +36,10 @@ extends Node
 ## closeup, lineup, garage, showcase, vehicles, monsters, big, king (crowns),
 ## fp (playing a fighter in first person), ko (knocked-out ragdolls with X
 ## eyes), wreck (a tank and a jeep blown apart), poses (raised shields, a kick,
-## hit flashes, a fighter that changed team), rain, snow, farm_fp, hangar
+## hit flashes, a fighter that changed team), rain, snow, farm_fp, hangar,
+## farm_near / farm_edge / farm_far (farmland overhead at zoom 60, 100, 150)
 
-const ALL := ["big", "army400", "vehicles", "airshow", "farmland", "farm_fp", "rain", "snow", "fp"]
+const ALL := ["big", "army400", "vehicles", "airshow", "farmland", "farm_far", "farm_fp", "rain", "snow", "fp"]
 
 var _rows: Array[Dictionary] = []
 
@@ -52,6 +54,9 @@ func _ready() -> void:
 		print("b3render needs a window: run it without --headless")
 		get_tree().quit(1)
 		return
+	# someone may be using the computer: their keys and clicks mustn't land in here
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true)
 	if args.has("shots"):
 		await _shots(String(args.shots), Array(String(args.get("only", "")).split(",", false)))
 		get_tree().quit(0)
@@ -94,10 +99,10 @@ func _scene(id: String, secs: float) -> void:
 		"vehicles", "airshow":
 			sc = id
 			map = B3Scenarios.map_for(id)
-		"farmland":
+		"farmland", "farm_far":
 			map = "farmland"
 			sc = "farm"
-			zoom = 110.0
+			zoom = 110.0 if id == "farmland" else 160.0
 		"farm_fp":
 			map = "farmland"
 			sc = "farm"
@@ -113,6 +118,7 @@ func _scene(id: String, secs: float) -> void:
 	var b = load("res://battle3d/battle3d.gd").new()
 	add_child(b)
 	b.begin({"seed": 7, "map": map})
+	_deaf(b)
 	match sc:
 		"army400":
 			_army400(b)
@@ -222,7 +228,7 @@ func _avg(a: Array[float]) -> float:
 
 # ------------------------------------------------------------- screenshots
 const SHOTS := ["closeup", "lineup", "garage", "showcase", "vehicles", "monsters", "big", "king", "fp",
-	"ko", "wreck", "poses", "rain", "snow", "farm_fp", "hangar"]
+	"ko", "wreck", "poses", "rain", "snow", "farm_fp", "hangar", "farm_near", "farm_edge", "farm_far"]
 
 
 func _shots(dir: String, only: Array) -> void:
@@ -248,11 +254,12 @@ func _shot(id: String, path: String) -> void:
 	match id:
 		"vehicles", "garage", "hangar":
 			map = B3Scenarios.map_for("vehicles")
-		"farm_fp":
+		"farm_fp", "farm_near", "farm_edge", "farm_far":
 			map = "farmland"
 	var b = load("res://battle3d/battle3d.gd").new()
 	add_child(b)
 	b.begin({"seed": 7, "map": map})
+	_deaf(b)
 	var frames := 150
 	match id:
 		"closeup", "lineup", "garage", "showcase", "vehicles", "monsters", "big", "hangar":
@@ -278,6 +285,10 @@ func _shot(id: String, path: String) -> void:
 				for i in 20:
 					await get_tree().process_frame
 				b.set_paused(true)      # (playing presses Fight!: pause it so every run looks the same)
+		"farm_near", "farm_edge", "farm_far":
+			_farm(b)
+			b.cam.fit(Vector3(20, 0, -60), {"farm_near": 60.0, "farm_edge": 100.0, "farm_far": 150.0}[id])
+			frames = 60
 		"ko":
 			var kinds := ["soldier", "knight", "robot", "horseknight", "wolf", "trex", "chicken", "gorilla", "hoplite", "wizard"]
 			for i in kinds.size():
@@ -341,3 +352,12 @@ func _shot(id: String, path: String) -> void:
 	b.queue_free()
 	for i in 3:
 		await get_tree().process_frame
+
+
+## Keys and the mouse do nothing in the battle (nobody's playing it here).
+func _deaf(b) -> void:
+	for n in [b, b.tools, b.ui, b.cam]:
+		if n != null:
+			(n as Node).set_process_input(false)
+			(n as Node).set_process_unhandled_input(false)
+			(n as Node).set_process_unhandled_key_input(false)

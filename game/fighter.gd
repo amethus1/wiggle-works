@@ -11,6 +11,19 @@ const RAG_PARTS := ["head", "torso", "uarm_b", "larm_b", "thigh_b", "shin_b", "t
 const METAL_HELMETS := ["army", "knight", "viking"]
 const TUMBLE_WIND := 430.0    # px/s: wind this strong blows a standing fighter off its feet
 const MAX_FREEZE := 4.0       # fighters only stay frozen this long (then the ice pops)
+# A knocked-out ragdoll that has come to a stop lies still: its bodies are
+# frozen in place, so a heap of them costs nothing until something moves them
+# (see _rest_check and wake). Left alone they never quite stopped: their
+# joints, the ground and their neighbours kept nudging each other, and every
+# bump made a puff of dust. (Their speed jumps about too much to go by, so it
+# goes by how far they get.)
+const REST_BODY := 15.0       # px: the torso stays this close to where it was...
+const REST_LIMB := 30.0       # ...and every other part this close...
+const REST_AFTER := 1.0       # ...for this long, and it lies still.
+const REST_ROAM := 80.0       # Or the torso stays this close (a limb that won't stop
+const REST_STUBBORN := 3.0    # twitching, or a heap that keeps jostling) for this long.
+const REST_GRAVITY := 100.0   # no lying still in (nearly) zero-G: it would hang in mid-air
+const REST_CHECK := 0.5       # s: how often one lying still checks it's still lying on something
 
 var uid := 0
 var world: Node = null
@@ -88,6 +101,13 @@ var _soft := false             # knocked over by a toy or power: bumps hurt less
 var _launch_t := -1.0          # when a driving car last flipped us
 var _jelly_t := -1.0           # when a Wiggly last bumped into us
 var _blind_t := 0.0            # how long a wall has blocked our shot
+var _resting := false          # knocked out and lying still: our bodies are frozen
+var _rest_t := 0.0             # how long every part has stayed put
+var _still_t := 0.0            # how long the torso has stayed put
+var _rest_at := {}             # where each part was when it started staying put
+var _roam_at := Vector2.INF    # where the torso was when it started staying put
+var _support_t := 0.0          # lying still: time until we check we're still lying on something
+static var _touch_q: PhysicsShapeQueryParameters2D = null
 
 
 func setup(w: Node, fighter_type: String, pos: Vector2, team_id := "", personality := "", s := 1.0) -> void:
@@ -236,6 +256,7 @@ func make_standing(at: Vector2, vel := Vector2.ZERO) -> void:
 
 
 func free_bodies() -> void:
+	_resting = false
 	if is_instance_valid(body):
 		body.queue_free()
 	body = null
@@ -323,6 +344,7 @@ func ragdoll(impulse := Vector2.ZERO, soft := false) -> void:
 		pop_bubble(false)
 	var c := body.global_position if is_instance_valid(body) else center()
 	var v := body.linear_velocity if is_instance_valid(body) else Vector2.ZERO
+	var held := weapon_toy
 	_drop_weapon(v + impulse * 0.6)
 	if is_instance_valid(body):
 		body.queue_free()
@@ -331,6 +353,12 @@ func ragdoll(impulse := Vector2.ZERO, soft := false) -> void:
 		_beast_ragdoll(c, v, impulse)
 	else:
 		_person_ragdoll(c, v, impulse)
+	# The weapon we just let go of starts out in our hand, right inside our
+	# arm: it mustn't push against our own limbs. (It used to get wedged among
+	# them, and a knocked-out fighter's arms and legs never stopped twitching.)
+	if held and is_instance_valid(held):
+		for p in parts.values():
+			held.add_collision_exception_with(p)
 	state = "ragdoll" if hp > 0.0 else "dead"
 	down_t = 0.0
 	swing = 0.0
@@ -499,6 +527,7 @@ func _solve_limits(dt: float) -> void:
 func stand_up() -> void:
 	if state != "ragdoll" or hp <= 0.0:
 		return
+	_resting = false
 	var c := center()
 	var v: Vector2 = parts.torso.linear_velocity if parts.has("torso") and is_instance_valid(parts.torso) else Vector2.ZERO
 	for j in pins:
@@ -628,6 +657,7 @@ func hurt(amount: float, knock := Vector2.ZERO, from = null) -> void:
 	if puppet or amount <= 0.0 and knock == Vector2.ZERO:
 		return
 	if state == "dead":
+		wake()
 		for p in all_bodies():
 			p.apply_central_impulse(knock * p.mass * 0.6)
 		return
@@ -711,8 +741,8 @@ func revive() -> void:
 ## `hit`: how fast the other thing was coming at us, pointing at us (its own
 ## speed, so walking into a resting bowling ball doesn't knock us over).
 func on_part_impact(_p: FighterPart, other, closing: float, at: Vector2, hit := Vector2.ZERO) -> void:
-	if puppet:
-		return
+	if puppet or _resting:
+		return   # (lying still: a bump from just before we froze)
 	if bubble_t > 0.0 and closing > 200.0:
 		pop_bubble()   # bumped into something: pop!
 	if state == "stand":
@@ -868,6 +898,7 @@ func shove(dv: Vector2, dmg := 0.0, from = null) -> void:
 			body.linear_velocity += dv * 0.5
 	else:
 		_soft = true
+		wake()
 		for p in all_bodies():
 			p.linear_velocity += dv * 0.8
 
@@ -882,6 +913,7 @@ func blow(push: Vector2, dt: float) -> void:
 		_wind_next += push * k
 	else:
 		_soft = true
+		wake()
 		for p in all_bodies():
 			p.linear_velocity += push * k * dt * 3.0
 
@@ -898,6 +930,7 @@ func beam(want: Vector2, dt: float) -> void:
 			charge_t = 0.0
 	if state != "stand":
 		_soft = true   # (dropped from up there: a soft landing)
+		wake()
 	var lift := clampf(sqrt(6.0 / weight()), 0.35, 1.0)
 	var to := Vector2(want.x, want.y * lift)
 	var g: Vector2 = world.gravity_vec() * dt
@@ -1132,9 +1165,20 @@ func _step(dt: float) -> void:
 	match state:
 		"dead":
 			dead_t += dt
-			_solve_limits(dt)
 			if dead_t > 90.0 and world.auto_clean:
 				world.remove(uid, false)
+				return
+			if _resting:
+				# lying still: nothing to do until something moves us (wake), but now and
+				# then check that whatever we lie on is still there
+				_support_t -= dt
+				if _support_t <= 0.0:
+					_support_t = REST_CHECK
+					if not _supported():
+						wake()
+				return
+			_solve_limits(dt)
+			_rest_check(dt)
 			return
 		"ragdoll":
 			if frozen_t > 0.0:
@@ -1199,6 +1243,126 @@ func _step(dt: float) -> void:
 	else:
 		move = move_toward(move, 0.0, dt * 4.0)
 	_locomote(dt)
+
+
+## Knocked out: once we've come to a stop (and nothing's holding, burning,
+## beaming or tying us, and we aren't lying on something that moves), our
+## bodies freeze where they are until wake().
+func _rest_check(dt: float) -> void:
+	if puppet or not held_by.is_empty() or burning > 0.0 or acid > 0.0 or lift_t > 0.0 or frozen_t > 0.0 \
+			or parts.is_empty() or not parts.has("torso") or world.gravity_vec().length() < REST_GRAVITY:
+		_rest_t = 0.0
+		_still_t = 0.0
+		_rest_at.clear()
+		_roam_at = Vector2.INF
+		return
+	var calm := _rest_at.size() == parts.size()
+	var on_moving := false
+	for k in parts:
+		var p = parts[k]
+		if not is_instance_valid(p):
+			continue
+		if p.on_moving:
+			on_moving = true
+		if calm and p.global_position.distance_to(_rest_at[k]) > (REST_BODY if k == "torso" else REST_LIMB):
+			calm = false
+	if on_moving:
+		# lying on (or against) a Wiggly: it could hop out from under us
+		_rest_t = 0.0
+		_still_t = 0.0
+		_rest_at.clear()
+		_roam_at = Vector2.INF
+		return
+	if calm:
+		_rest_t += dt
+	else:
+		_rest_t = 0.0
+		_rest_at.clear()
+		for k in parts:
+			if is_instance_valid(parts[k]):
+				_rest_at[k] = parts[k].global_position
+	var tor := center()
+	if _roam_at == Vector2.INF or tor.distance_to(_roam_at) > REST_ROAM:
+		_roam_at = tor
+		_still_t = 0.0
+	else:
+		_still_t += dt
+	if (_rest_t >= REST_AFTER or _still_t >= REST_STUBBORN) and world.links_of(uid).is_empty():
+		_resting = true
+		for k in parts:
+			if is_instance_valid(parts[k]):
+				_rest_at[k] = parts[k].global_position
+		_support_t = REST_CHECK * (0.5 + float(uid % 7) / 7.0)   # (spread out over the steps)
+		for p in parts.values():
+			if is_instance_valid(p):
+				p.linear_velocity = Vector2.ZERO
+				p.angular_velocity = 0.0
+				p.freeze_mode = RigidBody2D.FREEZE_MODE_STATIC
+				p.freeze = true
+
+
+## Lying still: is any of our parts still touching the ground, a platform, a
+## toy or someone else (a couple of pixels in the direction of gravity)?
+## If what we lay on went (a toy knocked away, a Wiggly hopping off), we fall.
+func _supported() -> bool:
+	if _touch_q == null:
+		_touch_q = PhysicsShapeQueryParameters2D.new()
+		_touch_q.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | LAYER
+	var down: Vector2 = world.gravity_vec().normalized() * 3.0
+	var mine: Array[RID] = []
+	for p in parts.values():
+		if is_instance_valid(p):
+			mine.append(p.get_rid())
+	_touch_q.exclude = mine
+	var space: PhysicsDirectSpaceState2D = world.get_world_2d().direct_space_state
+	for p in parts.values():
+		if not is_instance_valid(p) or p.get_child_count() == 0:
+			continue
+		var cs := p.get_child(0) as CollisionShape2D
+		if cs == null or cs.shape == null:
+			continue
+		_touch_q.shape = cs.shape
+		_touch_q.transform = p.global_transform.translated(down)
+		if not space.intersect_shape(_touch_q, 1).is_empty():
+			return true
+	return false
+
+
+## Something hit us while we lay still (World._handle_impacts): wake up and
+## take some of the blow, as if we'd been loose all along. `from` is where it
+## came from, `m` how heavy it is.
+func knocked_while_resting(from: Vector2, closing: float, m: float) -> void:
+	wake()
+	var dir := (center() - from).normalized()
+	var dv := dir * closing * m / (m + weight())
+	for p in all_bodies():
+		p.linear_velocity += dv
+
+
+## A knocked-out ragdoll lying still moves again: a blast or a bump, a fan,
+## a beam, a grab, the gravity changing, the ground (or whatever it lay on)
+## going. Frozen bodies don't feel any of that by themselves, so everything
+## that can move them calls this first (see also World.wake_resting and
+## World._handle_impacts).
+func wake(and_neighbours := true) -> void:
+	if not _resting:
+		return
+	_resting = false
+	_rest_t = 0.0
+	_still_t = 0.0
+	_rest_at.clear()
+	_roam_at = Vector2.INF
+	for p in parts.values():
+		if is_instance_valid(p):
+			p.freeze = false
+	# anyone lying on (or right next to) us moves too; further into a heap,
+	# _supported() notices soon enough if we were holding someone up
+	if and_neighbours:
+		world.wake_resting(center(), radius() * 1.5, false)
+
+
+func is_resting() -> bool:
+	return _resting
 
 
 func _swing_angle() -> float:

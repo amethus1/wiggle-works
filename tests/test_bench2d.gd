@@ -7,13 +7,14 @@ extends Node
 ## It isn't part of the test suite.
 ##
 ##   godot --headless --path . --fixed-fps 120 -- --test=bench2d
-##       [--fighters=160] [--secs=20] [--seed=7] [--world=battle] [--calm] [--prof] [--verbose]
+##       [--fighters=160] [--secs=20] [--seed=7] [--world=battle] [--calm | --ko] [--prof] [--verbose]
 ##   godot --path . --fixed-fps 120 -- --test=bench2d --secs=3 --shot=big.png   (a picture of it)
 ##
 ## --fixed-fps 120 runs exactly one physics step per frame, as fast as the
 ## computer can, so every run plays out the same battle: the "fingerprint" at
 ## the end only changes if the game behaves differently (or the seed changes).
 ## --calm is just the battle: no toys, Wigglies, machines, magic or powers.
+## --ko is the aftermath: everyone is knocked out at the start, in heaps.
 ## --prof also shows which part of the world's physics step the time goes to,
 ## --verbose prints how things stand every second, and --shot=file.png (in a
 ## window, not --headless) saves what it looks like at the end.
@@ -82,8 +83,12 @@ func _ready() -> void:
 	cam.fit(w.view_rect, get_viewport().get_visible_rect().size)
 	fx.view_rect = w.view_rect
 	w.max_fighters = maxi(n_fighters, World.MAX_FIGHTERS)
-	_build(n_fighters, args.has("calm"))
+	_build(n_fighters, args.has("calm") or args.has("ko"))
 	w.battle_on = true
+	if args.has("ko"):
+		await get_tree().physics_frame
+		for f in w.fighters():
+			f.hurt(1e9, Vector2(randf_range(-250, 250), randf_range(-400, -100)))
 
 	var first := Stamp.new()
 	first.process_physics_priority = -1000000000
@@ -107,7 +112,7 @@ func _ready() -> void:
 	add_child(last)
 
 	# warm up for a second, then measure
-	var timeline := _events() if not args.has("calm") else []
+	var timeline := _events() if not (args.has("calm") or args.has("ko")) else []
 	var steps_total := int(secs * Engine.physics_ticks_per_second)
 	var step := 0
 	var warm := Engine.physics_ticks_per_second
@@ -118,7 +123,8 @@ func _ready() -> void:
 			w.prof.clear()
 		var sim_t := float(step) / Engine.physics_ticks_per_second
 		if args.has("verbose") and step % 120 == 0:
-			print("  %.0f s: %d fighters, %d toys, %d particles, %d ms since start" % [sim_t, w.fighters().size(), w.toys().size(), fx.particle_count(), Time.get_ticks_msec()])
+			var lying := w.fighters().filter(func(f): return f.has_method("is_resting") and f.is_resting()).size()
+			print("  %.0f s: %d fighters (%d lying still), %d toys, %d particles, %d ms since start" % [sim_t, w.fighters().size(), lying, w.toys().size(), fx.particle_count(), Time.get_ticks_msec()])
 		while not timeline.is_empty() and float(timeline[0][0]) <= sim_t:
 			(timeline.pop_front()[1] as Callable).call()
 		step += 1
@@ -284,11 +290,18 @@ func _report(n_fighters: int, secs: float, sd: int, wid: String, fixed: bool) ->
 	var sc := _stats(_script)
 	var fr := _stats(_frame)
 	var up := {}
+	var ko := 0
+	var resting := 0
 	for f in w.fighters():
 		if f.alive():
 			up[f.team] = int(up.get(f.team, 0)) + 1
-	print("bench2d: %d fighters on %s%s, %.0f s, seed %d%s" % [n_fighters, wid, " (calm)" if args.has("calm") else "", secs, sd, "" if fixed else "  (add --fixed-fps 120 for the same battle every run)"])
-	print("  now: %d fighters (%s still up), %d toys, %d Wigglies, %d links, %d particles" % [w.fighters().size(), str(up), w.toys().size(), w.wigglies().size(), w.links.size(), fx.particle_count()])
+		else:
+			ko += 1
+			if f.has_method("is_resting") and f.is_resting():
+				resting += 1
+	var scene := " (calm)" if args.has("calm") else (" (all knocked out)" if args.has("ko") else "")
+	print("bench2d: %d fighters on %s%s, %.0f s, seed %d%s" % [n_fighters, wid, scene, secs, sd, "" if fixed else "  (add --fixed-fps 120 for the same battle every run)"])
+	print("  now: %d fighters (%s still up, %d knocked out, %d of them lying still), %d toys, %d Wigglies, %d links, %d particles" % [w.fighters().size(), str(up), ko, resting, w.toys().size(), w.wigglies().size(), w.links.size(), fx.particle_count()])
 	print("  physics step: avg %.2f ms, p99 %.2f ms, worst %.2f ms   (%d steps)" % [ph.avg, ph.p99, ph.max, _phys.size()])
 	print("    _physics_process scripts: avg %.2f ms, p99 %.2f ms, worst %.2f ms" % [sc.avg, sc.p99, sc.max])
 	print("    physics engine and callbacks: avg %.2f ms" % [ph.avg - sc.avg])

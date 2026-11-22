@@ -76,6 +76,20 @@ func _ready() -> void:
 		if not f.center().is_finite() or not w.bounds.has_point(f.center()):
 			ok = false
 	check(ok, "Battle Valley loads with its two armies (%d fighters)" % fs.size())
+	# fair ground: the left (red) and right (blue) sides are mirror images
+	var space := w.get_world_2d().direct_space_state
+	var worst := 0.0
+	var found := 0
+	for x in [300.0, 420.0, 600.0, 760.0, 1300.0, 1600.0]:
+		var ys := []
+		for sx in [-x, x]:
+			var hit := space.intersect_ray(PhysicsRayQueryParameters2D.create(Vector2(sx, -800), Vector2(sx, 1400)))
+			if not hit.is_empty() and hit.collider is StaticBody2D:
+				ys.append(hit.position.y)
+		if ys.size() == 2:
+			found += 1
+			worst = maxf(worst, absf(ys[0] - ys[1]))
+	check(found == 6 and worst < 3.0, "and its ground is the same height on both sides (%d spots, %.1f px apart at most)" % [found, worst])
 	w.battle_on = true
 	var t := 0
 	while w.last_winner == "" and t < 120 * 60:

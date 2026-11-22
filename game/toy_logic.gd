@@ -50,6 +50,7 @@ static func on_remove(_world: World, _t: Toy) -> void:
 
 ## Use (F / the Use button).
 static func use(world: World, t: Toy) -> void:
+	world.wake_resting(t.global_position, t.bound_radius() + 40.0)   # (a conveyor or cart starting under someone knocked out)
 	match t.id:
 		"switch", "lamp", "fan", "magnet", "motor", "rocket", "propeller", "conveyor", "bubbler", "go_kart", "monster_truck", "saucer":
 			t.on = not t.on

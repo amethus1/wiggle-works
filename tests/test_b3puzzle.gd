@@ -9,6 +9,10 @@ extends Node
 ## leaving a puzzle, History stars (finish, change history, hero) and saving
 ## them all.
 ## godot --headless --path . -- --test=b3puzzle
+## PUZZLE_SEEDS=10 godot --headless --path . -- --test=b3puzzle
+##     only fights every stage's test army with 10 different seeds and checks
+##     it wins at least 9 of them (about 15 minutes; see _win_rates). Run it
+##     after changing a stage or its test army.
 
 const SPEED := 6.0
 
@@ -22,16 +26,17 @@ func check(cond: bool, msg: String) -> void:
 		fails += 1
 
 
-func fresh(map := "grassland") -> void:
+## A new battle on `map`. `sd` picks other random numbers (_win_rates).
+func fresh(map := "grassland", sd := 0) -> void:
 	if b and is_instance_valid(b):
 		B3Player.stop()
 		b.queue_free()
 		await get_tree().physics_frame
 		await get_tree().physics_frame
-	seed(99)
+	seed(99 + sd)
 	b = load("res://battle3d/battle3d.gd").new()
 	add_child(b)
-	b.begin({"seed": 777, "map": map})
+	b.begin({"seed": 777 + sd * 104729, "map": map})
 	Engine.physics_ticks_per_second = int(60 * SPEED)
 	Engine.time_scale = SPEED
 
@@ -57,6 +62,16 @@ func at(x: float, z: float) -> Vector3:
 func ko(u: B3Unit) -> void:
 	if is_instance_valid(u) and not u.dead:
 		u.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+
+
+## Red's health left, from 0 (nobody standing) to 1 (not a scratch), out of
+## the `placed` fighters it started with.
+func red_health(placed: int) -> float:
+	var h := 0.0
+	for u: B3Unit in b.units:
+		if is_instance_valid(u) and not u.dead and u.team == "red":
+			h += clampf(u.hp / u.max_hp, 0.0, 1.0)
+	return h / maxf(1.0, placed)
 
 
 func live(team := "") -> int:
@@ -96,17 +111,11 @@ func _ready() -> void:
 	var keep_hist: Dictionary = Settings.b3_hist_stars.duplicate(true)
 	Settings.b3_puzzles = {}
 	Settings.b3_hist_stars = {}
-	await _budget()
-	await _data()
-	await _tab()
-	await _setup()
-	await _guard()
-	await _lose_and_retry()
-	await _leave()
-	await _solve_all()
-	await _history_stars()
-	await _surprise()
-	await _saved()
+	var seeds := int(OS.get_environment("PUZZLE_SEEDS"))
+	if seeds > 0:
+		await _win_rates(seeds)
+	else:
+		await _all()
 	B3Player.stop()
 	if b and is_instance_valid(b):
 		b.queue_free()
@@ -119,6 +128,20 @@ func _ready() -> void:
 	B3Rules.reset()
 	print("test_b3puzzle: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+func _all() -> void:
+	await _budget()
+	await _data()
+	await _tab()
+	await _setup()
+	await _guard()
+	await _lose_and_retry()
+	await _leave()
+	await _solve_all()
+	await _history_stars()
+	await _surprise()
+	await _saved()
 
 
 # --------------------------------------------------------------- 🪙 budget
@@ -436,7 +459,7 @@ func _solve_all() -> void:
 		var won: bool = b.winner == "red"
 		await frames(3)
 		var stars := B3Puzzles.stars(id)
-		print("    %s: %d red (🪙 %d of %d) vs %d blue -> %s in %ds, ⭐ %d" % [id, red, spent, int(st.budget), blue, b.winner, roundi(b.fight_end_t - b.fight_t0), stars])
+		print("    %s: %d red (🪙 %d of %d) vs %d blue -> %s in %ds with %.0f%% of red's health left, ⭐ %d" % [id, red, spent, int(st.budget), blue, b.winner, roundi(b.fight_end_t - b.fight_t0), 100.0 * red_health(red), stars])
 		check(won and red > 0 and bad_spot == 0 and spent <= int(st.budget), "%s %s: won with a test army of %d (🪙 %d of %d)%s" % [st.icon, st.name, red, spent, int(st.budget), " on the second try" if tries > 1 else ""])
 		check(spent <= B3Puzzles.star_costs(st)[1], "%s: that army is cheap enough for ⭐⭐⭐" % id)
 		check(stars == B3Puzzles.stars_for(st, spent) and stars >= 1, "%s: ⭐ x%d saved" % [id, stars])
@@ -466,6 +489,33 @@ func _solve_all() -> void:
 	# a better try keeps the best; a worse one doesn't lower it
 	Settings.b3_puzzles = {}
 	check(Settings.puzzle_won("wolves", 1) and Settings.puzzle_won("wolves", 3) and not Settings.puzzle_won("wolves", 2) and B3Puzzles.stars("wolves") == 3, "the best stars are kept")
+
+
+## PUZZLE_SEEDS=N: every stage's test army (B3Puzzles.SOLUTIONS) fights its
+## puzzle N times with different random numbers, with no second tries, and
+## has to win at least 9 times in 10. A test army that only just wins (and so
+## sometimes loses _solve_all's two tries) shows up here first.
+func _win_rates(n: int) -> void:
+	print("every puzzle's test army, %d seeds each" % n)
+	for st: Dictionary in B3Puzzles.STAGES:
+		var id := String(st.id)
+		var wins := 0
+		var health := 0.0
+		var line := ""
+		for i in n:
+			await fresh(String(st.map), i + 1)
+			seed(4242 + i + 1)
+			B3Puzzles.start(b, id)
+			await sim(0.6)
+			B3Puzzles.place_solution(b, id)
+			var red := live("red")
+			await sim(0.3)
+			await fight()
+			if b.winner == "red":
+				wins += 1
+			health += red_health(red)
+			line += "W" if b.winner == "red" else "L"
+		check(wins * 10 >= n * 9, "%s %s: the test army wins %d of %d, with %.0f%% of its health left on average (%s)" % [st.icon, st.name, wins, n, 100.0 * health / n, line])
 
 
 # ------------------------------------------------------ 📜 History stars

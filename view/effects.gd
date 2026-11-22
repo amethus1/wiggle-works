@@ -99,6 +99,8 @@ func clear() -> void:
 
 # ---------------------------------------------------------------- spawning
 func _p(pos: Vector2, vel: Vector2, life: float, r: float, col: Color, kind := "soft", g := 0.0, glow := false, drag := 1.2) -> void:
+	if not (absf(pos.x) < 1e6 and absf(pos.y) < 1e6):
+		return   # (something flung miles out of the world: nobody sees it, and the drawing can't cope)
 	if _n >= MAX_P:
 		# full: the oldest one goes
 		while _dead[_head] != 0:

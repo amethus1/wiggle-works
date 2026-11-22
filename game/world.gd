@@ -213,6 +213,7 @@ func add_platform(poly: PackedVector2Array, style: String, group := 0) -> Ground
 	terrain.add_child(g)
 	platforms.append({"poly": poly, "style": style, "group": group, "node": g})
 	_cut_water()
+	wake_resting()   # (one built right on top of a knocked-out fighter pushes it out)
 	return g
 
 
@@ -242,6 +243,16 @@ func remove_platform_group(group: int) -> void:
 			liquid_kinds.remove_at(i)
 			liquid_groups.remove_at(i)
 	_cut_water.call_deferred()
+	wake_resting()   # knocked-out fighters lying on it fall
+
+
+## Knocked-out ragdolls lying still (frozen, see Fighter._rest_check) move
+## again: all of them, or the ones within `r` of `p`. For the gravity
+## changing, or the ground (or a toy) going from under them.
+func wake_resting(p := Vector2.INF, r := 0.0, and_neighbours := true) -> void:
+	for f in fighters():
+		if f.is_resting() and (p == Vector2.INF or f.center().distance_to(p) < r + f.radius() * 2.0):
+			f.wake(and_neighbours)
 
 
 static func _poly_center(poly: PackedVector2Array) -> Vector2:
@@ -263,6 +274,7 @@ func set_gravity(id: String) -> void:
 	var space := get_world_2d().space
 	PhysicsServer2D.area_set_param(space, PhysicsServer2D.AREA_PARAM_GRAVITY, g.length())
 	PhysicsServer2D.area_set_param(space, PhysicsServer2D.AREA_PARAM_GRAVITY_VECTOR, g.normalized() if g != Vector2.ZERO else Vector2.DOWN)
+	wake_resting()   # knocked-out ragdolls lying still feel the new gravity too
 
 
 func gravity_dir() -> Vector2:
@@ -487,6 +499,13 @@ func renumber(t, uid: int) -> void:
 	_put_thing(uid, t)
 
 
+## Loading: something just made takes its saved number, unless (in a broken
+## save) another loaded thing has it already: then it keeps its new one.
+func _take_saved_number(t, uid: int) -> void:
+	if uid > 0 and not (things.has(uid) and things[uid] != t):
+		renumber(t, uid)
+
+
 ## Takes `uid` out of the world's lists without freeing anything (Wi-Fi puppets).
 func forget(uid: int) -> void:
 	_drop_thing(uid)
@@ -511,6 +530,8 @@ func remove(uid: int, effect := true) -> void:
 		return
 	_drop_thing(uid)
 	var p := _pos_of(t)
+	# whatever was lying on it falls
+	wake_resting(p, (t.bound_radius() if t is Toy else t.radius()) + 60.0)
 	if t is Wiggly:
 		for pid in grabs.keys():
 			if grabs[pid].uid == uid:
@@ -614,6 +635,9 @@ func add_link(kind: String, a: PhysicsBody2D, b: PhysicsBody2D, pa: Vector2, pb:
 		return null
 	l.build(pin_parent)
 	links.append(l)
+	for body in [a, b]:
+		if body is FighterPart and body.fighter:
+			body.fighter.wake()   # (a knocked-out fighter lying still: the rope or glue can move it now)
 	return l
 
 
@@ -920,6 +944,7 @@ func grab_start(pid: int, t, at: Vector2) -> void:
 		t.grabbed_by[pid] = true
 		t.idle_t = 0.0
 	elif t is Fighter:
+		t.wake()
 		if t.frozen_t > 0.0:
 			t.thaw(true)   # grabbing an ice block cracks it open
 		if t.state == "stand":
@@ -943,6 +968,7 @@ func grab_end(pid: int) -> void:
 	if t is Fighter:
 		t.held_by.erase(pid)
 		t.down_t = 0.6
+		t.wake()
 	elif t is Toy and (t.def.has("weapon") or t.def.has("armor")):
 		# drop a weapon or armor on a person to give it to them
 		for f in fighters():
@@ -1014,6 +1040,7 @@ func _drive_grabs(dt: float) -> void:
 		elif t is Toy:
 			var anchor: Vector2 = t.to_global(g.local)
 			var delta: Vector2 = target - anchor
+			wake_resting(t.global_position, t.bound_radius() + 40.0)   # (dragging it out from under one)
 			if t.freeze or paused:
 				t.global_position += delta
 				if t.freeze:
@@ -1296,6 +1323,8 @@ func _handle_impacts() -> void:
 		if not is_instance_valid(a):
 			continue
 		var other = e[2] if is_instance_valid(e[2]) else null
+		if other is FighterPart and other.fighter and other.fighter.is_resting():
+			_bump_resting(e[0], a, other.fighter, float(e[3]))
 		match String(e[0]):
 			"toy":
 				if things.get(a.uid) == a:
@@ -1306,6 +1335,25 @@ func _handle_impacts() -> void:
 			"fighter":
 				if a.fighter and is_instance_valid(a.fighter):
 					a.fighter.on_part_impact(a, other, e[3], e[4], e[5])
+
+
+## Something ran into a knocked-out fighter lying still (its bodies are frozen,
+## so it bounced off): it wakes and takes the knock. Not other knocked-out
+## bodies: a heap of them jostles all the time, and a heap wakes as one anyway.
+func _bump_resting(kind: String, hitter, f: Fighter, closing: float) -> void:
+	var m := 1.0
+	match kind:
+		"toy", "jelly":
+			# (dropped weapons lie about among the bodies and rattle against them:
+			# only one that's thrown counts)
+			if hitter is Toy and (hitter.def.has("weapon") or hitter.def.has("armor")) and closing < 600.0:
+				return
+			m = hitter.mass
+		"fighter":
+			if hitter.fighter == null or not is_instance_valid(hitter.fighter) or not hitter.fighter.alive():
+				return
+			m = hitter.fighter.weight()
+	f.knocked_while_resting(hitter.global_position, closing, m)
 
 
 func on_impact(t: Toy, other, closing: float, at: Vector2, _n: Vector2) -> void:
@@ -1793,6 +1841,13 @@ func restore(d: Dictionary) -> void:
 	if String(d.get("world", world_id)) != world_id:
 		load_world(String(d.world), false)
 	_clear_all()
+	# Each thing is made under a new number and then given its saved one. New
+	# numbers start above every saved one, so a new thing can't land on a number
+	# that something loaded a moment ago already has (that knocked the older one
+	# out of the world, but left it lying there: a stray nobody could touch).
+	for key in ["toys", "wigglies", "fighters"]:
+		for e in d.get(key, []):
+			next_uid = maxi(next_uid, int(e.get("uid", 0)))
 	# placed platforms and tubs
 	for pl in platforms:
 		if is_instance_valid(pl.node):
@@ -1822,7 +1877,7 @@ func restore(d: Dictionary) -> void:
 		var t := spawn_toy(String(e.id), Vector2(e.x, e.y), float(e.a), float(e.get("s", 1.0)), def_o)
 		if t == null:
 			continue
-		renumber(t, int(e.uid))
+		_take_saved_number(t, int(e.uid))
 		t.linear_velocity = Vector2(e.vx, e.vy)
 		t.angular_velocity = float(e.va)
 		if String(e.get("paint", "")) != "":
@@ -1839,7 +1894,7 @@ func restore(d: Dictionary) -> void:
 		var w := spawn_wiggly(String(e.kind), Vector2(e.x, e.y), float(e.get("s", 1.0)))
 		if w == null:
 			continue
-		renumber(w, int(e.uid))
+		_take_saved_number(w, int(e.uid))
 		if String(e.get("paint", "")) != "":
 			w.paint = Color(String(e.paint))
 		var pp: Array = e.get("pts", [])
@@ -1850,7 +1905,7 @@ func restore(d: Dictionary) -> void:
 		var f := spawn_fighter(String(e.type), Vector2(e.x, e.y), String(e.team), String(e.pers), float(e.get("s", 1.0)), false)
 		if f == null:
 			continue
-		renumber(f, int(e.uid))
+		_take_saved_number(f, int(e.uid))
 		f.hp = float(e.get("hp", f.max_hp))
 		f.armor = float(e.get("armor", f.armor))
 		f.helmet = String(e.get("helmet", f.helmet))

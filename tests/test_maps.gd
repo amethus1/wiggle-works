@@ -4,7 +4,8 @@ extends Node
 ## out (±150 m) stand on the ground, the volcano has its pools, beach water
 ## stops walkers, the pass is a narrow gap between cliffs, uprootable
 ## scenery is numbered, and a map is the same every time it's built. Also
-## how they're drawn: ground detail fading out in first person, and the
+## how they're drawn: ground detail fading out in first person and simpler
+## when zoomed right out, and the
 ## fighters' and vehicles' merged models (B3Rig: shared by every team and
 ## skin, greying when knocked out, crowns, wrecks, team changes).
 ## godot --headless --path . -- --test=maps
@@ -73,6 +74,7 @@ func _ready() -> void:
 	await _scenery_numbers()
 	await _uproot_tint()
 	await _detail_fp()
+	await _detail_far()
 	await _models()
 	if b and is_instance_valid(b):
 		b.queue_free()
@@ -302,6 +304,46 @@ func _detail_fp() -> void:
 	for m in w._detail:
 		shown = shown and m.visible
 	check(shown and w._detail_fp.is_empty(), "and back overhead, the big chunks again")
+
+
+## Zoomed right out overhead, tufts and crops switch to simpler meshes (the
+## same plants, far fewer triangles), and back when zooming in again.
+func _detail_far() -> void:
+	print("ground detail zoomed out")
+	await fresh("farmland")
+	var w: B3World = b.world
+	var corn := B3World.kind_mesh("corn").surface_get_arrays(0)
+	var corn_lo := B3World.kind_mesh("corn_lo").surface_get_arrays(0)
+	var t_hi: int = (corn[Mesh.ARRAY_INDEX] as PackedInt32Array).size() / 3
+	var t_lo: int = (corn_lo[Mesh.ARRAY_INDEX] as PackedInt32Array).size() / 3
+	var a_hi: AABB = B3World.kind_mesh("corn").get_aabb()
+	var a_lo: AABB = B3World.kind_mesh("corn_lo").get_aabb()
+	check(t_lo * 3 < t_hi and absf(a_lo.size.y - a_hi.size.y) < 0.05 and absf(a_lo.size.z - a_hi.size.z) < 0.1, "far-away corn is the same size with far fewer triangles (%d, not %d)" % [t_lo, t_hi])
+	var all_lo := func(lo: bool) -> bool:
+		for m in w._detail:
+			var kind := String(m.multimesh.get_meta("kind", ""))
+			if kind == "" or m.multimesh.mesh != B3World.kind_mesh(kind + "_lo" if lo else kind):
+				return false
+		return not w._detail.is_empty()
+	b.cam.fit(Vector3.ZERO, 40.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(all_lo.call(false), "at the usual zoom the tufts and crops are the detailed ones")
+	b.cam.fit(Vector3.ZERO, 150.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var n := 0
+	for m in w._detail:
+		n += m.multimesh.instance_count
+	check(all_lo.call(true) and n > 3000, "zoomed right out they're the simpler ones (all %d of them)" % n)
+	b.cam.fit(Vector3.ZERO, B3World.DETAIL_LO_ZOOM - 2.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(all_lo.call(true), "zooming in a little doesn't flick them back and forth")
+	b.cam.fit(Vector3.ZERO, 60.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(all_lo.call(false), "and closer in they're detailed again")
 
 
 ## The fighters' and vehicles' models are merged into a few meshes each,
