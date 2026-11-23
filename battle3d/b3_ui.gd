@@ -3,7 +3,9 @@ extends CanvasLayer
 ## Pause, slow-mo, clear, maps, team counts, help), left palette (tabs, team
 ## and personality pickers, item buttons), tool dock, unit inspector,
 ## winner banner and 🏆 scoreboard, toasts, sticker pops and the nuke's
-## white flash.
+## white flash. Pop-ups sit on a dimmed backdrop that blocks clicks (a click
+## on it closes them); the bars never take keyboard focus, so Space and Enter
+## stay game keys, but pop-ups do (arrows, Tab or a gamepad).
 
 const TOOLS := [
 	{"id": "place", "icon": "➕", "name": "Place", "key": "1", "tip": "Click the ground to place. Drag for a line. Shift-drag for a block."},
@@ -30,6 +32,7 @@ var palette: Control
 var box_btn: Button
 var rules_btn: Button
 var play_lbl: Label
+var power_pill: PowerPill         # 🖱️ overhead: the power's cooldown, under "You're the ..."
 var crosshair: Control
 var reset_btn: Button
 var net_btn: Button
@@ -43,6 +46,7 @@ var again_btn: Button
 var dock_holder: Control
 var _fp_hidden := false
 var _fp_palette := false
+var mouse_freed := false          # the winner banner let the mouse go in first person (_free_mouse_fp)
 var item_btns := {}
 var team_btns := {}
 var team_box: VBoxContainer
@@ -58,6 +62,7 @@ var insp_info: Label
 var insp_hp: ProgressBar
 var insp_team := {}
 var insp_pers := {}
+var insp_acts := {}      # the Inspector's action buttons: "launch", "heal", "erase", "play" -> Button
 var banner_lbl: Label
 var score_card: PanelContainer     # 🏆 the scoreboard under the winner banner
 var score_box: VBoxContainer
@@ -69,11 +74,18 @@ var mode_hud: B3ModeHud = null     # 🏁 the battle goal's panel (B3ModeHud)
 var flash_rect: ColorRect
 var popup: Control = null
 var help: PanelContainer = null
+var settings_btn: Button           # 🔧 Settings, in the ⚙️ pop-up
+var undo_btn: Button               # ↶ ↷ in the tool dock (B3Undo)
+var redo_btn: Button
+var search: LineEdit               # 🔍 find something in every Toy Box tab
+var box_rect: Panel                # 🔍 Select: the rectangle you drag round fighters
+var _toast_hold := false           # the winner banner is up: messages go under it
 var _last_us := 0
 var _banner_t := -1.0
 var _flash := 0.0
 var _count_t := 0.0
 var _insp_t := 0.0
+var _lay_t := 0.0
 
 
 func _ready() -> void:
@@ -81,6 +93,7 @@ func _ready() -> void:
 	root = Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	UI.no_focus(root)      # Space / Enter are Fight! and Next wave (pop-ups turn focus back on)
 	add_child(root)
 	flash_rect = ColorRect.new()
 	flash_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -150,9 +163,21 @@ func _ready() -> void:
 	crosshair.visible = false
 	root.add_child(crosshair)
 	root.add_child(play_lbl)
+	power_pill = PowerPill.new()
+	power_pill.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	power_pill.position = Vector2(-PowerPill.W * 0.5, 130)
+	power_pill.visible = false
+	root.add_child(power_pill)
+	box_rect = Panel.new()
+	box_rect.add_theme_stylebox_override("panel", UI.box(Color(1.0, 0.85, 0.3, 0.12), 6, 2, Color(1.0, 0.85, 0.3, 0.9), 0))
+	box_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box_rect.visible = false
+	root.add_child(box_rect)
 	_last_us = Time.get_ticks_usec()
 	refresh_palette()
 	refresh_tools()
+	refresh_undo()
+	get_viewport().size_changed.connect(_on_resize)
 
 
 # ------------------------------------------------------------------- top
@@ -167,6 +192,7 @@ func _pill(parent: Control) -> HBoxContainer:
 
 func _btn(parent: Control, txt: String, tip: String, fn: Callable, w := 0.0, col := UI.PANEL2, fs := 18) -> Button:
 	var b := UI.button(txt, col, fs, w)
+	b.set_meta("w", w)      # (the top bar narrows them on a small screen: _fit_top)
 	b.tooltip_text = tip
 	b.pressed.connect(func():
 		battle.snd("click", null, 0.4)
@@ -222,7 +248,7 @@ func _build_top() -> void:
 	hist_btn = _btn(g4, "📜", "Pick a battle: a famous one from history, or a 🎯 ready-made one", _show_history, 52)
 	surprise_btn = _btn(g4, "🎲", "Surprise Battle! A random battlefield and armies", func(): B3Surprise.run(battle), 52)
 	saves_btn = _btn(g4, "💾", "Save or load a battle", _show_saves, 52)
-	rules_btn = _btn(g4, "⚙️", "Battle Rules: gravity, explosions, night, weather and more", _show_rules, 52)
+	rules_btn = _btn(g4, "⚙️", "Battle Rules: gravity, explosions, night, weather and more.\nAnd 🔧 Settings: sound, music, your name and color, the screen", _show_rules, 52)
 	_btn(g4, "❓", "How to play [H]", toggle_help, 52)
 
 
@@ -247,8 +273,9 @@ func refresh() -> void:
 
 
 ## The top bar has to fit across the screen, even with all five teams on the
-## field and friends playing: if it's too wide, the "⚔️ 3D Battle" title
-## steps out first, then the map button shows just the map's picture.
+## field, points to spend and friends playing: if it's too wide, the "⚔️ 3D
+## Battle" title steps out first, then the map button shows just the map's
+## picture, then 🧹 Clear just its broom, then the team counts get smaller.
 func _fit_top() -> void:
 	if top_bar == null or battle == null or not is_inside_tree():
 		return
@@ -256,10 +283,41 @@ func _fit_top() -> void:
 	var md: Dictionary = B3Defs.MAPS[battle.map_id]
 	title_lbl.visible = true
 	map_btn.text = "%s %s" % [md.icon, md.name]
+	clear_btn.text = "🧹 Clear"
+	_compact_top(false)
 	if top_bar.get_combined_minimum_size().x > room:
 		title_lbl.visible = false
 	if top_bar.get_combined_minimum_size().x > room:
 		map_btn.text = String(md.icon)
+	if top_bar.get_combined_minimum_size().x > room:
+		clear_btn.text = "🧹"
+	if top_bar.get_combined_minimum_size().x > room:
+		_compact_top(true)
+
+
+## The top bar squeezed up (a small screen, or ⚙️ Huge buttons): smaller
+## team counts, just "🪙 12" for the points, and narrower buttons.
+func _compact_top(on: bool) -> void:
+	for pc in counts_box.get_children():
+		var l := (pc as Control).get_child(0) as Label if (pc as Control).get_child_count() > 0 else null
+		if l and l.has_meta("team"):
+			l.custom_minimum_size.x = 30.0 if on else 46.0
+			l.add_theme_font_size_override("font_size", 16 if on else 19)
+			var col := B3Defs.team_col(String(l.get_meta("team")))
+			(pc as PanelContainer).add_theme_stylebox_override("panel", UI.box(col.darkened(0.15), 12, 2, col.lightened(0.3), 4 if on else 10))
+	if coin_lbl.visible and battle.budget >= 0:
+		coin_lbl.text = ("🪙 %d" % battle.points_left()) if on else ("🪙 %d / %d" % [battle.points_left(), battle.budget])
+	for g in top_bar.get_children():
+		for b in g.find_children("*", "Button", true, false):
+			var w := float(b.get_meta("w", 0.0))
+			if w > 0.0:
+				(b as Control).custom_minimum_size.x = minf(w, 44.0) if on else w
+
+
+## The window changed size: everything that's placed by hand is placed again.
+func _on_resize() -> void:
+	_fit_top()
+	_layout()
 
 
 ## ⏮ Reset works once Fight! has been pressed. In a friend's battle (👥) the
@@ -288,6 +346,7 @@ func refresh_net() -> void:
 			names.append(String(p.get("name", "?")))
 		net_lbl.tooltip_text = "Playing together: " + ", ".join(names)
 	_fit_top()
+	refresh_undo()      # (↶ ↷ are the host's in a shared battle)
 	if popup and is_instance_valid(popup) and popup.has_meta("net"):
 		_show_net()
 
@@ -307,8 +366,19 @@ func _show_net() -> void:
 		v.add_child(hl)
 		if mode == "host":
 			v.add_child(UI.label("Your address: " + B3Net.address_text(), 15, UI.MUTED))
+			# 🔒 the host decides whether friends may change the battle (B3Net.allow_changes)
+			var lock := CheckBox.new()
+			lock.text = "Friends can place, erase, blow things up and ⏮ reset"
+			lock.button_pressed = n.allow_changes
+			lock.focus_mode = Control.FOCUS_NONE
+			lock.add_theme_font_size_override("font_size", 15)
+			lock.toggled.connect(func(on: bool): n.allow_changes = on)
+			v.add_child(lock)
+			set_meta("net_lock", lock)
 		elif not n.connected:
 			v.add_child(UI.label(n.status, 15, UI.MUTED))
+		elif n.host_locked:
+			v.add_child(UI.label("🔒 The host has locked the battle: you can still pick a fighter and play.", 15, UI.MUTED))
 		v.add_child(UI.title("Players", 18))
 		for p in n.players:
 			var pd: Dictionary = p
@@ -397,6 +467,7 @@ func refresh_coins() -> void:
 	if on:
 		coin_lbl.text = "🪙 %d / %d" % [battle.points_left(), battle.budget]
 	_price_tags()
+	_fit_top()      # (the points take room in the top bar)
 
 
 func _refresh_counts() -> void:
@@ -416,7 +487,8 @@ func _refresh_counts() -> void:
 		var col := B3Defs.team_col(t)
 		var pc := PanelContainer.new()
 		pc.add_theme_stylebox_override("panel", UI.box(col.darkened(0.15), 12, 2, col.lightened(0.3), 10))
-		var l := UI.label("%s %d" % ["🐾" if t == "wild" else "", int(counts[t])], 19, Color.WHITE)
+		var l := UI.label("%s %d" % [UI.team_mark(t), int(counts[t])], 19, Color.WHITE)
+		l.set_meta("team", t)
 		l.add_theme_constant_override("outline_size", 5)
 		l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.4))
 		l.custom_minimum_size = Vector2(46, 30)
@@ -442,6 +514,17 @@ func _build_palette() -> void:
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 8)
 	p.add_child(v)
+	# 🔍 find something by name in every tab
+	search = LineEdit.new()
+	search.name = "Search"
+	search.placeholder_text = "🔍 Find..."
+	search.tooltip_text = "Type a name to find it in every tab"
+	search.clear_button_enabled = true
+	search.add_theme_font_size_override("font_size", 16)
+	UI.focus_on(search)      # (the rest of the bars never take focus)
+	search.text_changed.connect(func(_t: String): _fill_items())
+	search.text_submitted.connect(func(_t: String): search.release_focus())
+	v.add_child(search)
 	var tabs := GridContainer.new()
 	tabs.columns = 3
 	tabs.add_theme_constant_override("h_separation", 5)
@@ -470,8 +553,7 @@ func _build_palette() -> void:
 		var b := Button.new()
 		b.custom_minimum_size = Vector2(48, 40)
 		b.focus_mode = Control.FOCUS_NONE
-		b.text = "🐾" if tid == "wild" else ""
-		b.add_theme_font_size_override("font_size", 18)
+		UI.mark_swatch(b, tid, 18)      # a letter on each colour (🐾 for wild)
 		b.tooltip_text = "%s team%s" % [B3Defs.TEAM[tid].name, " (fights everyone!)" if tid == "wild" else ""]
 		b.pressed.connect(func():
 			battle.snd("tick", null, 0.4)
@@ -536,25 +618,64 @@ func _build_palette() -> void:
 
 func set_cat(c: String) -> void:
 	cat = c
+	if search and search.text != "":
+		search.text = ""      # (picking a tab stops searching)
+	_fill_items()
+
+
+## The tab's things (or, while you search, everything whose name has what
+## you typed), in the Toy Box's order.
+func _item_ids() -> Array:
+	var q := search.text.strip_edges().to_lower() if search else ""
+	if q == "":
+		return _cat_ids(cat)
+	var out: Array = []
+	for c in B3Defs.CATS:
+		for id in _cat_ids(String(c.id)):
+			var d := _item_def(String(id))
+			if not out.has(id) and (String(d.get("name", "")).to_lower().contains(q) or String(id).contains(q)):
+				out.append(id)
+	return out
+
+
+static func _cat_ids(c: String) -> Array:
+	match c:
+		"people", "animals", "dinos", "vehicles", "history":
+			return B3Defs.UNIT_ORDER[c]
+		"booms":
+			return B3Defs.BOOM_ORDER
+		"hazards":
+			return B3Defs.HAZARD_ORDER
+		"build":
+			return B3Defs.STRUCT_ORDER
+	return []
+
+
+static func _item_def(sid: String) -> Dictionary:
+	for table in [B3Defs.UNITS, B3Defs.BOOMS, B3Defs.HAZARDS, B3Defs.STRUCTS]:
+		if table.has(sid):
+			return table[sid]
+	return {}
+
+
+## True while the 🔍 box has something in it.
+func searching() -> bool:
+	return search != null and search.text.strip_edges() != ""
+
+
+## Fills the Toy Box's grid with the tab's things (or what the search found).
+func _fill_items() -> void:
+	var c := cat
 	for ch in grid.get_children():
 		ch.queue_free()
 	item_btns.clear()
-	var ids: Array = []
-	match c:
-		"people", "animals", "dinos", "vehicles", "history":
-			ids = B3Defs.UNIT_ORDER[c]
-		"booms":
-			ids = B3Defs.BOOM_ORDER
-		"hazards":
-			ids = B3Defs.HAZARD_ORDER
-		"build":
-			ids = B3Defs.STRUCT_ORDER
+	var ids: Array = _item_ids()
+	if searching() and ids.is_empty():
+		var nl := UI.label("🔍 Nothing called that.", 15, UI.MUTED)
+		grid.add_child(nl)
 	for id in ids:
 		var sid := String(id)
-		var d: Dictionary = {}
-		for table in [B3Defs.UNITS, B3Defs.BOOMS, B3Defs.HAZARDS, B3Defs.STRUCTS]:
-			if table.has(sid):
-				d = table[sid]
+		var d: Dictionary = _item_def(sid)
 		var b := UI.button("", UI.PANEL2, 14, 132)
 		b.custom_minimum_size.y = 70
 		var col := VBoxContainer.new()
@@ -588,7 +709,7 @@ func set_cat(c: String) -> void:
 		if c == "vehicles" and not battle.tools.team_by_cat.has(c):
 			battle.tools.team_by_cat[c] = "red"     # vehicles remember their own team
 		var first := String(ids[0]) if not ids.is_empty() else ""
-		if B3Defs.item_cat(battle.tools.place_id) != c and first != "":
+		if B3Defs.item_cat(battle.tools.place_id) != c and first != "" and not searching():
 			battle.tools.choose(first)
 	_price_tags()      # 🪙 prices while there's a budget
 	refresh_palette()
@@ -599,17 +720,21 @@ func refresh_palette() -> void:
 		return
 	var tl = battle.tools
 	for id in cat_btns:
-		UI.set_on(cat_btns[id], id == cat)
+		UI.set_on(cat_btns[id], id == cat and not searching())
 	for id in item_btns:
 		var on: bool = id == tl.place_id and tl.tool == "place"
 		UI.set_on(item_btns[id], on)
 		var nm: Label = item_btns[id].get_child(0).get_node("Name")
-		nm.add_theme_color_override("font_color", Color("1d1b3a") if on else UI.TEXT)
+		UI.ink(nm, on)
 	var units := cat in ["people", "animals", "dinos", "vehicles", "history"]
+	if searching():
+		units = false
+		for id in item_btns:
+			units = units or B3Defs.UNITS.has(String(id))
 	team_box.visible = units
 	for t in team_btns:
 		var col := B3Defs.team_col(t)
-		var on: bool = t == tl.team
+		var on: bool = t == tl.place_team()      # (a budget battle's team, whatever the tab)
 		var b: Button = team_btns[t]
 		b.add_theme_stylebox_override("normal", UI.box(col, 20, 4 if on else 2, Color.WHITE if on else col.darkened(0.35), 0))
 		b.add_theme_stylebox_override("hover", UI.box(col.lightened(0.15), 20, 4 if on else 2, Color.WHITE, 0))
@@ -663,6 +788,12 @@ func _build_dock() -> void:
 	c4_btn.pressed.connect(func(): battle.detonate_c4())
 	var turn := _dock_btn(dock, "🔄", "Turn", "Turn the camera [Q / E]")
 	turn.pressed.connect(func(): battle.cam.rotate_view(1.0))
+	dock.add_child(VSeparator.new())
+	undo_btn = _dock_btn(dock, "↶", "Undo", "Undo [Ctrl+Z]: take back what you placed, erased, moved or changed")
+	undo_btn.pressed.connect(func(): battle.tools.undo.undo())
+	redo_btn = _dock_btn(dock, "↷", "Redo", "Redo [Ctrl+Y]: put it back again")
+	redo_btn.pressed.connect(func(): battle.tools.undo.redo())
+	_center_dock()
 
 
 func _dock_btn(dock: HBoxContainer, icon: String, nm_s: String, tip: String) -> Button:
@@ -695,8 +826,23 @@ func refresh_tools() -> void:
 		var on: bool = id == battle.tools.tool
 		UI.set_on(tool_btns[id], on)
 		var nm: Label = tool_btns[id].get_child(0).get_node("Name")
-		nm.add_theme_color_override("font_color", Color("1d1b3a") if on else UI.TEXT)
+		UI.ink(nm, on)
 	refresh_palette()
+
+
+## ↶ ↷ look dim when there's nothing to undo or redo (and for friends: only
+## the host can undo in a shared battle).
+func refresh_undo() -> void:
+	if undo_btn == null or battle == null or battle.tools == null or battle.tools.undo == null:
+		return
+	var un = battle.tools.undo
+	var friend: bool = battle.puppet
+	undo_btn.modulate.a = 1.0 if un.can_undo() and not friend else 0.45
+	redo_btn.modulate.a = 1.0 if un.can_redo() and not friend else 0.45
+	undo_btn.tooltip_text = ("Only the host can undo in a shared battle" if friend
+		else "Undo [Ctrl+Z]: " + (un.next_undo_text() if un.can_undo() else "nothing to undo yet"))
+	redo_btn.tooltip_text = ("Only the host can redo in a shared battle" if friend
+		else "Redo [Ctrl+Y]: " + (un.next_redo_text() if un.can_redo() else "nothing to redo"))
 
 
 func refresh_c4() -> void:
@@ -747,19 +893,23 @@ func _build_inspect() -> void:
 		var b := Button.new()
 		b.custom_minimum_size = Vector2(52, 34)
 		b.focus_mode = Control.FOCUS_NONE
-		b.text = "🐾" if tid == "wild" else ""
+		UI.mark_swatch(b, tid, 16)      # a letter on each colour (🐾 for wild)
 		b.tooltip_text = "Join the %s team" % B3Defs.TEAM[tid].name
 		b.add_theme_stylebox_override("normal", UI.box(col, 16, 2, col.darkened(0.35), 0))
 		b.add_theme_stylebox_override("hover", UI.box(col.lightened(0.15), 16, 3, Color.WHITE, 0))
 		b.add_theme_stylebox_override("pressed", UI.box(col, 16, 3, Color.WHITE, 0))
 		b.pressed.connect(func():
-			var u: B3Unit = battle.tools.selected
-			if u and is_instance_valid(u):
+			var undo: Array = []
+			var join := func(u: B3Unit):
+				if u.team != tid:
+					undo.append([u, u.team])
 				if not _for_host(u, {"c": "team", "t": tid}):
 					u.set_team(tid)
+			if _each("team", join) > 0:
 				battle.snd("tick", null, 0.5)
 				counts_dirty = true
-				show_inspect(u))
+				battle.tools.undo.did("team", undo, tid)
+			_reinspect())
 		tr.add_child(b)
 		insp_team[tid] = b
 	var pr := HBoxContainer.new()
@@ -771,12 +921,16 @@ func _build_inspect() -> void:
 		var b := UI.button(String(d.icon), UI.PANEL2, 16, 36)
 		b.tooltip_text = "%s: %s" % [d.name, d.tip]
 		b.pressed.connect(func():
-			var u: B3Unit = battle.tools.selected
-			if u and is_instance_valid(u):
+			var undo: Array = []
+			var feel := func(u: B3Unit):
+				if u.pers_choice != ps:
+					undo.append([u, u.pers_choice])
 				if not _for_host(u, {"c": "mood", "p": ps}):
 					u.set_personality(ps)
+			if _each("mood", feel) > 0:
 				battle.snd("tick", null, 0.5)
-				show_inspect(u))
+				battle.tools.undo.did("mood", undo, ps)
+			_reinspect())
 		pr.add_child(b)
 		insp_pers[ps] = b
 	var ar := HBoxContainer.new()
@@ -784,31 +938,33 @@ func _build_inspect() -> void:
 	v.add_child(ar)
 	var launch := UI.button("🚀 Launch!", Color("c0392b").darkened(0.1), 16)
 	launch.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	launch.pressed.connect(func():
-		var u: B3Unit = battle.tools.selected
-		if u and is_instance_valid(u) and not u.dead:
-			battle.snd("whoosh", u.position, 1.0)
-			if not _for_host(u, {"c": "launch"}):
-				u.knock_down(Vector3(randf_range(-4, 4), 18.0, randf_range(-4, 4))))
+	var fly := func(u: B3Unit):
+		battle.snd("whoosh", u.position, 1.0)
+		if not _for_host(u, {"c": "launch"}):
+			u.knock_down(Vector3(randf_range(-4, 4), 18.0, randf_range(-4, 4)))
+	launch.pressed.connect(func(): _each("launch", fly, true))
 	ar.add_child(launch)
+	insp_acts["launch"] = launch
 	var heal := UI.button("💚 Heal", Color("2f9e4f"), 16)
-	heal.pressed.connect(func():
-		var u: B3Unit = battle.tools.selected
-		if u and is_instance_valid(u) and not u.dead:
-			if _for_host(u, {"c": "heal"}):
-				return
-			u.hp = u.max_hp
-			battle.fx.heal(u.center() + Vector3(0, 0.6, 0))
-			battle.snd("heal", u.position, 0.8))
+	var mend := func(u: B3Unit):
+		if _for_host(u, {"c": "heal"}):
+			return
+		u.hp = u.max_hp
+		battle.fx.heal(u.center() + Vector3(0, 0.6, 0))
+		battle.snd("heal", u.position, 0.8)
+	heal.pressed.connect(func(): _each("heal", mend, true))
 	ar.add_child(heal)
+	insp_acts["heal"] = heal
 	var rm := UI.button("🗑️", UI.PANEL2, 16, 44)
 	rm.tooltip_text = "Remove [Delete]"
 	rm.pressed.connect(func():
-		var u: B3Unit = battle.tools.selected
-		if u and is_instance_valid(u) and not _for_host(u, {"c": "erase"}):
-			battle.remove_unit(u)
+		var gone: Array[B3Unit] = []
+		var pick := func(u: B3Unit): gone.append(u)
+		_each("erase", pick)
+		battle.tools.erase_units(gone)
 		battle.tools.select(null))
 	ar.add_child(rm)
+	insp_acts["erase"] = rm
 	var pl := HBoxContainer.new()
 	pl.add_theme_constant_override("separation", 6)
 	v.add_child(pl)
@@ -816,10 +972,15 @@ func _build_inspect() -> void:
 	play.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	play.tooltip_text = "Control this fighter yourself [P]"
 	play.pressed.connect(func():
+		if _targets().size() > 1:
+			toast("🎮 Pick just one fighter to play as!", false)
+			battle.snd("nope", null, 0.5)
+			return
 		var u: B3Unit = battle.tools.selected
 		if u and is_instance_valid(u) and not u.dead:
-			battle.tools.play_as(u))
+			battle.tools.play_as(u))      # (it says so if you can't: B3Battle.hands_off)
 	pl.add_child(play)
+	insp_acts["play"] = play
 	var fol := UI.button("🎥 Follow", UI.PANEL2, 17)
 	fol.tooltip_text = "Keep the camera on this fighter [F]"
 	fol.pressed.connect(func():
@@ -827,6 +988,60 @@ func _build_inspect() -> void:
 		if u and is_instance_valid(u) and not u.dead:
 			battle.tools.follow(u))
 	pl.add_child(fol)
+
+
+## 🧩 / 🌊 True (with a message and a "nope") if the Inspector can't do
+## `what` to `u` (B3Battle.hands_off: the puzzle's army, Wave Defense's
+## attackers, and fair play with your own army in a puzzle).
+func _hands_off(u: B3Unit, what: String) -> bool:
+	var why: String = battle.hands_off(u, what)
+	if why == "":
+		return false
+	toast(why, false)
+	battle.snd("nope", u.position, 0.6)
+	return true
+
+
+## The fighters the Inspector's buttons act on: everyone you've selected
+## (🔍 Select: drag a box round them), or just the one.
+func _targets() -> Array[B3Unit]:
+	var out: Array[B3Unit] = []
+	var tl = battle.tools
+	for u: B3Unit in tl.group:
+		if is_instance_valid(u) and not u.dead:
+			out.append(u)
+	if out.is_empty() and tl.selected and is_instance_valid(tl.selected) and not tl.selected.dead:
+		out.append(tl.selected)
+	return out
+
+
+## Does `fn` to each selected fighter that `what` may be done to (see
+## B3Battle.hands_off: puzzle and wave armies are hands off). If none of
+## them may, says why (with a "nope"). Returns how many it did. `alive`:
+## only fighters that aren't knocked out.
+func _each(what: String, fn: Callable, alive := false) -> int:
+	var n := 0
+	var why := ""
+	var at := Vector3.ZERO
+	for u in _targets():
+		if alive and u.dead:
+			continue
+		var w: String = battle.hands_off(u, what)
+		if w != "":
+			why = w
+			at = u.position
+			continue
+		fn.call(u)
+		n += 1
+	if n == 0 and why != "":
+		toast(why, false)
+		battle.snd("nope", at, 0.6)
+	return n
+
+
+## The Inspector again, for what's selected now.
+func _reinspect() -> void:
+	show_inspect(battle.tools.selected)
 
 
 ## In a friend's battle, buttons that change a fighter ask the host to do it.
@@ -843,18 +1058,58 @@ func show_inspect(u: B3Unit) -> void:
 		inspect.visible = false
 		return
 	inspect.visible = true
+	var us := _targets()
+	if us.is_empty():
+		us = [u]
+	var many := us.size() > 1
 	var d := u.def
-	insp_title.text = "%s %s" % [d.icon, d.name]
+	insp_title.text = "👥 %d fighters" % us.size() if many else "%s %s" % [d.icon, d.name]
 	_update_inspect(u)
+	# a colour or mood lights up when everyone selected has it
 	for t in insp_team:
 		var col := B3Defs.team_col(t)
-		var on: bool = t == u.team
+		var on := true
+		for o in us:
+			on = on and o.team == t
 		insp_team[t].add_theme_stylebox_override("normal", UI.box(col, 16, 4 if on else 2, Color.WHITE if on else col.darkened(0.35), 0))
 	for p in insp_pers:
-		UI.set_on(insp_pers[p], p == u.pers_choice)
+		var on := true
+		for o in us:
+			on = on and o.pers_choice == p
+		UI.set_on(insp_pers[p], on)
+	# what you can't do to them shows dimmed (clicking says why)
+	var off := {}
+	for what in ["team", "mood", "launch", "heal", "erase", "play"]:
+		var all_off := true
+		for o in us:
+			all_off = all_off and battle.hands_off(o, what) != ""
+		off[what] = all_off
+	for t in insp_team:
+		(insp_team[t] as Control).modulate.a = 0.4 if off.team else 1.0
+	for p in insp_pers:
+		(insp_pers[p] as Control).modulate.a = 0.4 if off.mood else 1.0
+	for k in insp_acts:
+		(insp_acts[k] as Control).modulate.a = 0.4 if off[String(k)] or (many and k == "play") else 1.0
+	var play: Button = insp_acts.get("play")
+	if play:
+		play.tooltip_text = "Pick just one fighter to play as" if many else "Control this fighter yourself [P]"
 
 
 func _update_inspect(u: B3Unit) -> void:
+	var us := _targets()
+	if us.size() > 1:
+		# 👥 lots selected: their health together, and how many are standing
+		var hp := 0.0
+		var mx := 0.0
+		var up := 0
+		for o in us:
+			hp += maxf(0.0, o.hp)
+			mx += o.max_hp
+			up += 0 if o.down else 1
+		insp_hp.max_value = maxf(1.0, mx)
+		insp_hp.value = hp
+		insp_info.text = "❤️ %d%% together   •   🧍 %d standing\nThe buttons change all of them." % [roundi(100.0 * hp / maxf(1.0, mx)), up]
+		return
 	insp_hp.max_value = u.max_hp
 	insp_hp.value = maxf(0.0, u.hp)
 	var pd: Dictionary = B3Defs.PERS[u.pers]
@@ -867,6 +1122,7 @@ func _update_inspect(u: B3Unit) -> void:
 # ------------------------------------------------------------- popups
 func _popup_panel(title: String) -> VBoxContainer:
 	close_top()
+	var shade := _shade()
 	var p := UI.panel(22)
 	p.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	p.grow_horizontal = Control.GROW_DIRECTION_BOTH
@@ -876,7 +1132,7 @@ func _popup_panel(title: String) -> VBoxContainer:
 	p.offset_right = 0
 	p.offset_top = 80
 	p.custom_minimum_size = Vector2(400, 0)
-	root.add_child(p)
+	shade.add_child(p)
 	popup = p
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 8)
@@ -887,9 +1143,65 @@ func _popup_panel(title: String) -> VBoxContainer:
 	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	h.add_child(t)
 	var x := UI.button("✖", UI.PANEL2, 14, 36)
+	x.tooltip_text = "Close [Esc]"
+	x.set_meta("no_first", true)
 	x.pressed.connect(close_top)
 	h.add_child(x)
 	return v
+
+
+## The dimmed backdrop behind a pop-up: the battlefield can't be clicked
+## through it (no fighters placed by accident), and a click on it closes the
+## pop-up. Keys and a gamepad work on the pop-up's buttons.
+func _shade() -> ColorRect:
+	var shade := ColorRect.new()
+	shade.name = "Shade"
+	shade.set_meta("shade", true)      # (its name can change while an old one is on its way out)
+	shade.color = Color(0.05, 0.04, 0.12, 0.5)
+	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	UI.focus_on(shade)
+	shade.gui_input.connect(func(e: InputEvent):
+		var mb := e as InputEventMouseButton
+		if mb and mb.pressed and mb.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
+			close_top())
+	root.add_child(shade)      # (on top of everything, bars too)
+	return shade
+
+
+## "Are you sure?" before something you can't take back. `yes_txt` does
+## `fn`; the other button (or a click outside) keeps everything as it is.
+func confirm(title: String, msg: String, yes_txt: String, fn: Callable) -> void:
+	var v := _popup_panel(title)
+	popup.set_meta("confirm", true)
+	var l := UI.label(msg, 18)
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.custom_minimum_size.x = 420
+	v.add_child(l)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	v.add_child(row)
+	var yes := UI.button(yes_txt, UI.BAD.darkened(0.25), 19, 190)
+	yes.name = "Yes"
+	yes.custom_minimum_size.y = 50
+	yes.pressed.connect(func():
+		close_top()
+		fn.call())
+	row.add_child(yes)
+	var no := UI.button("✋ No, keep it", Color("2f9e4f"), 19, 190)
+	no.name = "No"
+	no.custom_minimum_size.y = 50
+	no.pressed.connect(close_top)
+	row.add_child(no)
+
+
+## True if there's an army (or anything you built) on the field to lose.
+func _field_busy() -> bool:
+	for u: B3Unit in battle.units:
+		if is_instance_valid(u) and not u.dead:
+			return true
+	return not (battle.structs as Array).is_empty()
 
 
 func _show_map_menu() -> void:
@@ -906,10 +1218,15 @@ func _show_map_menu() -> void:
 		b.custom_minimum_size.y = 58
 		if mid == battle.map_id:
 			UI.set_on(b, true)
+		var go := func():
+			battle.snd("whoosh", null, 0.6)
+			battle.load_map(mid)
 		b.pressed.connect(func():
 			close_top()
-			battle.snd("whoosh", null, 0.6)
-			battle.load_map(mid))
+			if _field_busy():
+				confirm("🗺️ %s %s?" % [d.icon, d.name], "A new map clears the battlefield: your army and buildings will be gone!", "🗺️ Yes, new map", go)
+			else:
+				go.call())
 		g.add_child(b)
 	v.add_child(UI.label("Changing the map clears the battlefield.", 14, UI.MUTED))
 
@@ -1207,6 +1524,22 @@ func puzzle_result(won: int, best: int, next: String) -> void:
 	puzzle_card.visible = true
 
 
+## 🧩 A puzzle that's already won stays won on screen: if its last red
+## fighter burns out afterwards (a draw, as far as the battle goes), the
+## winner banner (`head`, `col`) and the ⭐ card stay, not the 🏆 scoreboard.
+func keep_puzzle_win(head: String, col: Color) -> void:
+	_score_shut = true
+	if score_card:
+		score_card.visible = false
+	if head != "":
+		banner_lbl.text = head
+		banner_lbl.visible_characters = head.length()
+		banner_lbl.add_theme_color_override("font_color", col)
+		banner_lbl.visible = true
+	if puzzle_card:
+		puzzle_card.visible = true
+
+
 ## 🪙 While there's a budget: each Toy Box card shows its price (dimmed if
 ## you can't pay for it), and fighters are Normal size on your team (a Huge
 ## knight would cost the same as a normal one).
@@ -1231,10 +1564,11 @@ func _price_tags() -> void:
 			tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			bt.add_child(tag)
 		var price := B3Defs.cost(String(id))
+		var banned: bool = on and battle.puzzle != null and String(id) in B3Puzzles.BIG_BOOMS
 		if tag:
 			tag.visible = on
-			tag.text = "🪙 %d" % price
-		bt.modulate = Color(1, 1, 1, 0.45) if on and price > left else Color.WHITE
+			tag.text = "🚫" if banned else "🪙 %d" % price
+		bt.modulate = Color(1, 1, 1, 0.45) if on and (price > left or banned) else Color.WHITE
 	var team_lock: String = battle.build_team if on else ""
 	for t in team_btns:
 		(team_btns[t] as Control).visible = team_lock == "" or t == team_lock
@@ -1250,6 +1584,14 @@ func _price_tags() -> void:
 ## ⚙️ Battle Rules: one row of choices per rule (see B3Rules).
 func _show_rules() -> void:
 	var v := _popup_panel("⚙️ Battle Rules")
+	var pz: bool = battle.puzzle != null
+	if pz:
+		# 🧩 a puzzle plays by the normal rules (B3Puzzles.neutral_rules); yours come back after
+		var note := UI.label("🧩 Puzzles always use the normal rules, so the ⭐ stars are fair. Yours come back when you leave the puzzle.", 16, UI.ACCENT)
+		note.name = "PuzzleRules"
+		note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		note.custom_minimum_size.x = 560
+		v.add_child(note)
 	var g := GridContainer.new()
 	g.columns = 2
 	g.add_theme_constant_override("h_separation", 12)
@@ -1271,15 +1613,26 @@ func _show_rules() -> void:
 			b.custom_minimum_size = Vector2(96, 38)
 			b.tooltip_text = String(B3Rules.TIPS.get(oid, ""))
 			UI.set_on(b, B3Rules.value(oid) == cid)
+			b.disabled = pz and oid != "shake"
 			b.pressed.connect(func():
-				B3Rules.set_value(oid, cid)
+				if battle.puzzle != null:
+					# (only Screen shake changes in a puzzle, and your saved rules stay as they are)
+					B3Rules.values[oid] = cid
+					Settings.b3_rules[oid] = cid
+					Settings.save()
+				else:
+					B3Rules.set_value(oid, cid)
 				battle.apply_rules()
 				battle.snd("tick", null, 0.6)
 				_refresh_rules_btn()
 				close_top()
 				_show_rules())
 			row.add_child(b)
+	var low := HBoxContainer.new()
+	low.add_theme_constant_override("separation", 10)
+	v.add_child(low)
 	var reset := UI.button("↺ Back to normal", UI.PANEL2, 16, 220)
+	reset.disabled = pz
 	reset.pressed.connect(func():
 		B3Rules.reset()
 		battle.apply_rules()
@@ -1287,7 +1640,18 @@ func _show_rules() -> void:
 		_refresh_rules_btn()
 		close_top()
 		_show_rules())
-	v.add_child(reset)
+	low.add_child(reset)
+	var sp := Control.new()
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	low.add_child(sp)
+	# 🔊 the game's own settings live here too (the same pop-up as the title screen's)
+	settings_btn = UI.button("🔧 Settings: sound, name, screen", Color("6c4fb3"), 16)
+	settings_btn.name = "Settings"
+	settings_btn.tooltip_text = "Sound and music, your name and color, full screen, button size, smooth edges"
+	settings_btn.pressed.connect(func():
+		battle.snd("click", null, 0.4)
+		show_settings())
+	low.add_child(settings_btn)
 
 
 func _refresh_rules_btn() -> void:
@@ -1338,82 +1702,187 @@ func _show_clear_menu() -> void:
 		["🧍 All fighters", "Remove every fighter", func(): battle.clear_units()],
 		["💥 Everything", "Start over with an empty battlefield", func(): battle.clear_all()],
 	]
-	for it in items:
+	for i in items.size():
+		var it: Array = items[i]
 		var b := UI.button(String(it[0]), UI.PANEL2, 18, 360)
 		b.custom_minimum_size.y = 48
 		b.tooltip_text = String(it[1])
 		var fn: Callable = it[2]
+		var go := func():
+			battle.snd("poof", null, 0.7)
+			fn.call()
+		var big := i > 0      # (tidying up knocked-out fighters doesn't need asking)
+		var what := String(it[0])
 		b.pressed.connect(func():
 			close_top()
-			battle.snd("poof", null, 0.7)
-			fn.call())
+			if big and _field_busy():
+				confirm("🧹 Clear %s?" % what.substr(what.find(" ") + 1).to_lower(), "You can't get them back, not even with ↶ Undo!", "🧹 Yes, clear it", go)
+			else:
+				go.call())
 		v.add_child(b)
 
 
 ## Tab: hide the Toy Box to see the whole battlefield, or bring it back.
+## The tool dock moves back to the middle while it's hidden.
 func toggle_palette() -> void:
 	if palette:
 		palette.visible = not palette.visible
 		if box_btn:
 			UI.set_on(box_btn, palette.visible)
 		battle.cam.offset_k = 0.17 if palette.visible else 0.0
+		_center_dock()
+
+
+## The tool dock sits in the middle of what's left of the screen: a little to
+## the right while the Toy Box is out, in the very middle when it's hidden.
+func _center_dock() -> void:
+	if dock_holder == null:
+		return
+	var k := 150.0 if palette and palette.visible else 0.0
+	dock_holder.offset_left = k
+	dock_holder.offset_right = k
+
+
+## ❓ How to play, in short sections (it scrolls if the window is short).
+const HELP := [
+	["🧸 Build your battle", [
+		"Pick something in the Toy Box on the left (🔍 finds things by name), choose a team colour and a mood, then click the ground.",
+		"Drag to place a whole line. Shift-drag for a big block. R turns buildings.",
+		"↶ Undo and ↷ Redo (Ctrl+Z, Ctrl+Y) take back what you placed, erased, moved or changed.",
+		"🔍 Select (2): click a fighter, or drag a box round lots of them, then change their team or mood all at once.",
+		"✋ Grab (3) anything and fling it! 🧽 Eraser (4) takes things away.",
+	]],
+	["⚔️ Fight!", [
+		"▶ Fight! (Space) and watch them go. 🐢 G is slow motion. ⏮ puts everyone back to play it again.",
+		"💣 Booms: click to drop. Place C4, then press 💥 Detonate (B).",
+		"🌋 Lava and acid: drag to make big pools. 🧱 Build towers, walls and bridges.",
+		"⚙️ Battle Rules: moon gravity, MEGA explosions, night, rain, snow, and the 🏁 goal: 👑 Defend the King or 🚩 King of the Hill. Its 🔧 Settings button has sound, music, your name and the screen.",
+	]],
+	["🔥 What happens in a battle", [
+		"🧠 Fighters are clever: they chop the legs off archer towers, take cover behind walls, and sneak round the ends of them.",
+		"🔥 Wooden towers, bridges and trees catch fire and burn down.",
+		"🪖 Tanks crush crates and small trees as they roll, but a mine under their treads goes BOOM!",
+		"🪂 When a plane is shot down, its pilot jumps out and floats down on a parachute.",
+	]],
+	["🎮 Be a fighter", [
+		"Select a fighter or vehicle and press 🎮 Play as me! (P). WASD moves, the mouse aims, click attacks, Space jumps.",
+		"🖱️ Right-click is your power: a shield, a scope, a charge, a kick... It needs a moment to fill up again.",
+		"👀 V looks through its eyes. ⇥ Tab (or N) jumps into the next teammate. Esc stops.",
+		"🚁 Drive tanks, jeeps and cars, and fly helicopters and planes too.",
+	]],
+	["🏆 Things to try", [
+		"📜 History battles (win ⭐ stars), 🎯 Ready-made battles and 🎲 Surprise Battles.",
+		"🧩 Army Puzzles: buy an army with your 🪙 points, put it in the glowing area and win. Spend less for more ⭐!",
+		"🌊 Wave Defense: the attackers go for your 🚩 keep, a stone tower with a flag and a health bar. Keep it standing, wave after wave!",
+		"💾 Save your battles. 👥 Play together with friends on the same Wi-Fi.",
+	]],
+	["🎥 Camera", [
+		"Move: WASD, arrows or right-drag. Zoom: wheel or pinch. Turn: Q / E. 🎥 F follows a fighter. Tab hides the Toy Box.",
+		"Moods: ⚔️ Attack  🛡️ Defend  🏹 Ranged  😡 Berserk  😱 Coward  🌼 Peaceful",
+	]],
+]
 
 
 func toggle_help() -> void:
 	if help and is_instance_valid(help):
-		help.get_parent().queue_free()
-		help = null
+		close_top()
 		return
+	close_top()
+	var shade := _shade()
 	# centred on screen however tall it gets
 	var cc := CenterContainer.new()
 	cc.set_anchors_preset(Control.PRESET_FULL_RECT)
 	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(cc)
+	shade.add_child(cc)
 	help = UI.panel(22)
-	help.custom_minimum_size = Vector2(680, 0)
+	help.custom_minimum_size = Vector2(720, 0)
 	cc.add_child(help)
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 6)
 	help.add_child(v)
-	v.add_child(UI.title("⚔️ How to play 3D Battle", 26))
-	for line in [
-		"🧍 Pick fighters on the left, choose a team color, click the ground.",
-		"↔️ Drag to place a whole line. Shift-drag for a big block.",
-		"▶  Press Fight! (Space) and watch them go. 🐢 G for slow motion.",
-		"💣 Booms: click to drop. Place C4, then press 💥 Detonate (B).",
-		"🌋 Lava and acid: drag to make big pools. 🧱 Build towers and walls.",
-		"✋ Grab (3) anything and fling it! 🔍 Select (2) to change a fighter's team or mood.",
-		"🎥 Move: WASD / arrows / right-drag.  Zoom: wheel or pinch.  Turn: Q / E.",
-		"🧸 Tab hides the Toy Box so you can see the whole battlefield.",
-		"🎮 Select a fighter or vehicle and press Play as me (P): WASD, mouse to aim, click to attack, Space to jump.",
-		"👀 Press V while playing to look through its eyes (first person). The mouse looks around; Esc stops.",
-		"🚁 Drive tanks, jeeps and cars, and fly helicopters and planes the same way.",
-		"⏮ Reset puts everyone back where they started, so you can play the same battle again.",
-		"📜 Battles from history, and 🎯 ready-made ones.  🎲 Surprise Battle makes a random one.",
-		"👥 Play together with friends on the same Wi-Fi: one hosts, the others join.",
-		"🎥 Follow (F) keeps the camera on a fighter.  💾 Save your battles.",
-		"⚙️ Battle Rules: moon gravity, MEGA explosions, night, rain, snow, screen shake and more.",
-		"Moods: ⚔️ Attack  🛡️ Defend  🏹 Ranged  😡 Berserk  😱 Coward  🌼 Peaceful",
-	]:
-		var l := UI.label(String(line), 16)
-		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		l.custom_minimum_size.x = 640
-		v.add_child(l)
+	var h := HBoxContainer.new()
+	v.add_child(h)
+	var t := UI.title("⚔️ How to play 3D Battle", 26)
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h.add_child(t)
+	var x := UI.button("✖", UI.PANEL2, 14, 36)
+	x.tooltip_text = "Close [Esc]"
+	x.set_meta("no_first", true)
+	x.pressed.connect(close_top)
+	h.add_child(x)
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sc.custom_minimum_size = Vector2(690, clampf(get_viewport().get_visible_rect().size.y - 230.0, 220.0, 640.0))
+	v.add_child(sc)
+	var col := VBoxContainer.new()
+	col.name = "Help"
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 4)
+	sc.add_child(col)
+	for sec in HELP:
+		col.add_child(UI.title(String(sec[0]), 20))
+		for line in sec[1]:
+			var l := UI.label("•  " + String(line), 16)
+			l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			l.custom_minimum_size.x = 660
+			col.add_child(l)
 	var ok := UI.button("Let's go!", Color("2f9e4f"), 20)
-	ok.pressed.connect(toggle_help)
+	ok.pressed.connect(close_top)
 	v.add_child(ok)
+
+
+## 🔧 Settings: the same pop-up as the title screen's (SettingsPanel):
+## sound, music, your name and color, the screen and updates.
+func show_settings() -> void:
+	var v := _popup_panel("🔧 Settings")
+	popup.set_meta("settings", true)
+	var sp := SettingsPanel.new()
+	v.add_child(sp)
+	sp.build()
 
 
 func close_top() -> bool:
 	if popup and is_instance_valid(popup):
-		popup.queue_free()
+		_drop(popup.get_parent() if popup.get_parent().has_meta("shade") else popup)      # (the dimmed backdrop goes with it)
 		popup = null
 		return true
 	if help and is_instance_valid(help):
-		help.get_parent().queue_free()
+		var cc := help.get_parent()
+		_drop(cc.get_parent() if cc.get_parent().has_meta("shade") else cc)
 		help = null
 		return true
 	return false
+
+
+## Takes `n` off the screen right away (and frees it).
+func _drop(n: Node) -> void:
+	if n.get_parent():
+		n.get_parent().remove_child(n)
+	n.queue_free()
+
+
+## With a pop-up open, arrows, Tab or a gamepad wake up the keyboard ring on
+## its buttons; the 🔍 box lets go of the keys when you click somewhere else.
+func _input(e: InputEvent) -> void:
+	if search and search.has_focus():
+		var mb := e as InputEventMouseButton
+		if mb and mb.pressed and not search.get_global_rect().has_point(mb.position):
+			search.release_focus()
+		var k := e as InputEventKey
+		if k and k.pressed and k.keycode == KEY_ESCAPE:
+			if search.text != "":
+				search.text = ""
+				_fill_items()
+			search.release_focus()
+			get_viewport().set_input_as_handled()
+		return
+	var top: Node = null
+	if popup and is_instance_valid(popup):
+		top = popup
+	elif help and is_instance_valid(help):
+		top = help
+	if top:
+		UI.wake_focus(e, top)
 
 
 # --------------------------------------------------------------- feedback
@@ -1449,8 +1918,11 @@ func banner(txt: String, col: Color, score := PackedStringArray()) -> void:
 	if not (banner_lbl.visible and banner_lbl.text.split("\n")[0] == head):
 		_banner_t = 0.0        # a new banner bounces in (just a new scoreboard doesn't)
 		_score_shut = false
+		_free_mouse_fp()
+		clear_toasts()         # (old messages would sit right behind the big headline)
 	banner_lbl.text = head if rest.is_empty() else head + "\n" + "\n".join(rest)
 	banner_lbl.visible_characters = head.length()
+	_fit_banner()
 	banner_lbl.add_theme_color_override("font_color", col)
 	banner_lbl.visible = true
 	again_btn.visible = can_reset()
@@ -1468,6 +1940,13 @@ func update_score(score: PackedStringArray) -> void:
 		return
 	var col: Color = banner_lbl.get_theme_color("font_color")
 	banner(banner_lbl.text.split("\n")[0], col, score)
+
+
+## Takes away every message at the top (the winner banner is coming).
+func clear_toasts() -> void:
+	for c in toasts.get_children():
+		toasts.remove_child(c)
+		c.queue_free()
 
 
 func hide_banner() -> void:
@@ -1648,6 +2127,30 @@ func refresh_play() -> void:
 			dock_holder.visible = true
 
 
+## 🖱️ The power's pill under "You're the ..." (overhead; first person has
+## the ring round the crosshair instead). Only for powers that need to
+## recharge: holding up a shield or a sniper's scope doesn't.
+func _pill_tick(pu: B3Unit, dt: float) -> void:
+	var on := pu != null and not B3Player.me.fp and B3Player.power_has_cd(pu)
+	if power_pill.visible != on:
+		power_pill.visible = on
+	if not on:
+		return
+	power_pill.position.y = play_lbl.position.y + play_lbl.size.y + 4.0
+	power_pill.show_power(B3Player.power_name(pu), B3Player.power_ready(pu), dt)
+
+
+## The winner banner just came up while you look out of a fighter's eyes:
+## the mouse is let go so you can click ⏮ Play it again or the scoreboard's
+## ✖ (clicking back in the battle grabs it again).
+func _free_mouse_fp() -> void:
+	if not (B3Player.me.fp and battle.cam.first_person()):
+		return
+	mouse_freed = true
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
 ## Your shot or swing just hit someone: the first-person crosshair flashes.
 func hit_marker() -> void:
 	if crosshair:
@@ -1669,8 +2172,13 @@ func _process(_d: float) -> void:
 			var hpk := clampf(pu.hp / maxf(1.0, pu.max_hp), 0.0, 1.0)
 			play_lbl.text = "🎮 You're the %s %s   ❤️ %d%%%s\n%s" % [pu.def.icon, pu.def.name,
 				int(round(hpk * 100.0)), "   💫 Knocked down!" if pu.down else "", controls_help(pu)]
-		# messages go just under the "You're the ..." lines, not on top of them
+		_pill_tick(pu if play_lbl.visible else null, dt)
+		# messages go just under the "You're the ..." lines (and the power's pill), not on top of them
 		var ty := (play_lbl.position.y + play_lbl.size.y + 8.0) if play_lbl.visible else 80.0
+		if power_pill.visible:
+			ty = power_pill.position.y + PowerPill.H + 8.0
+		if banner_lbl.visible:
+			ty = _under_banner()      # (not behind the big headline)
 		if toasts.position.y != ty:
 			toasts.position.y = ty
 	# a pop-up (📜, 💾, ⚙️…) sits right where messages go: they wait behind it
@@ -1700,6 +2208,10 @@ func _process(_d: float) -> void:
 		counts_dirty = false
 		_refresh_counts()
 		_fit_top()
+	_lay_t -= dt
+	if _lay_t <= 0.0:
+		_lay_t = 0.15
+		_layout()
 	_insp_t -= dt
 	if inspect.visible and _insp_t <= 0.0:
 		_insp_t = 0.15
@@ -1710,13 +2222,103 @@ func _process(_d: float) -> void:
 			inspect.visible = false
 
 
-## The first-person crosshair: a small ring with a dot, white with a dark edge.
+## Keeps the panels that share the screen apart, at any window size (and
+## any ⚙️ button size): the Inspector stays above the tool dock and moves
+## left of the 🏁 goal's panel if they'd touch; the winner banner fits across
+## the screen, and the 🏆 scoreboard (or the 🧩 ⭐ card) shrinks to fit
+## between ⏮ Play it again and the dock.
+func _layout() -> void:
+	if inspect == null or battle == null or not is_inside_tree():
+		return
+	var vp := get_viewport().get_visible_rect().size
+	var dock_top := vp.y - 10.0
+	if dock_holder and dock_holder.visible:
+		dock_top = dock_holder.get_global_rect().position.y
+	var ob := -(vp.y - dock_top + 8.0)
+	if inspect.offset_bottom != ob:
+		inspect.offset_bottom = ob
+	var right := -10.0
+	if inspect.visible and mode_hud and mode_hud.visible:
+		var isz := inspect.get_combined_minimum_size()
+		var ir := Rect2(Vector2(vp.x - 10.0 - isz.x, dock_top - 8.0 - isz.y), isz)
+		if ir.intersects(mode_hud.get_global_rect().grow(6.0)):
+			right = -(20.0 + mode_hud.size.x)
+	if inspect.offset_right != right:
+		inspect.offset_right = right
+	# the banner's headline: as wide as there's room for (smaller letters on a narrow screen)
+	var bw := minf(1000.0, vp.x - 40.0)
+	if banner_lbl.custom_minimum_size.x != bw:
+		banner_lbl.custom_minimum_size.x = bw
+		banner_lbl.size.x = bw
+		banner_lbl.position.x = -bw * 0.5
+		banner_lbl.pivot_offset.x = bw * 0.5
+		_fit_banner()
+	for card: Control in [score_card, puzzle_card]:
+		if card == null or not card.visible:
+			continue
+		var h := card.get_combined_minimum_size().y
+		var room := dock_top - 10.0 - card.offset_top
+		var k := clampf(room / maxf(1.0, h), 0.6, 1.0)
+		card.pivot_offset = Vector2(card.size.x * 0.5, 0.0)
+		if absf(card.scale.x - k) > 0.005:
+			card.scale = Vector2(k, k)
+
+
+## The headline's letters shrink if it's wider than the screen.
+func _fit_banner() -> void:
+	var head := banner_lbl.text.split("\n")[0]
+	var font := banner_lbl.get_theme_font("font")
+	var w := font.get_string_size(head, HORIZONTAL_ALIGNMENT_LEFT, -1, 64).x + 48.0
+	var fs := clampi(int(64.0 * minf(1.0, banner_lbl.custom_minimum_size.x / maxf(1.0, w))), 34, 64)
+	banner_lbl.add_theme_font_size_override("font_size", fs)
+
+
+## Where messages go while the winner banner is up: under ⏮ Play it again
+## and the 🏆 card, but not down on the tool dock.
+func _under_banner() -> float:
+	var y := again_btn.position.y + again_btn.size.y + 8.0
+	for card: Control in [score_card, puzzle_card]:
+		if card and card.visible:
+			var r := card.get_global_rect()
+			y = maxf(y, r.end.y + 8.0)      # (the rect is already as small as the card's drawn)
+	var floor_y := get_viewport().get_visible_rect().size.y - 110.0
+	if dock_holder and dock_holder.visible:
+		floor_y = dock_holder.get_global_rect().position.y - 8.0
+	return minf(y, floor_y - toasts.size.y)
+
+
+## The first-person crosshair: a small ring with a dot, white with a dark
+## edge, and the gauges round it (the first-person HUD):
+##  - the right-click power's cooldown: a glowing arc round the crosshair that
+##    fills up clockwise, with a ping when it's ready again (B3Player.power_ready);
+##  - the weapon's reload: a small bar under it (B3Player.reload_ready);
+##  - in a helicopter or fighter plane, bottom left: the throttle, the height
+##    over the ground and whether the bomb is loaded.
 class Crosshair extends Control:
 	var hit_t := 0.0
+	var power_k := 1.0        # what the gauges showed last (tests read them)
+	var reload_k := 1.0
+	var ping_t := 0.0         # the power just got ready: a ring pops out
+	var air_shown := false
+	var _air_box: StyleBoxFlat = null
+	const RING_R := 26.0      # (outside the hit marker's ticks)
+	const PING := 0.45
 
 	func _process(dt: float) -> void:
 		if hit_t > 0.0:
 			hit_t = maxf(0.0, hit_t - dt)
+		if ping_t > 0.0:
+			ping_t = maxf(0.0, ping_t - dt)
+		if not visible:
+			return
+		var u: B3Unit = B3Player.unit if B3Player.active() else null
+		var pk := 1.0
+		if u != null and B3Player.power_has_cd(u):
+			pk = B3Player.power_ready(u)
+		if pk >= 1.0 and power_k < 1.0:
+			ping_t = PING
+		power_k = pk
+		reload_k = B3Player.reload_ready(u) if u != null else 1.0
 		queue_redraw()
 
 	func _draw() -> void:
@@ -1731,3 +2333,134 @@ class Crosshair extends Control:
 			for k in 4:
 				var d := Vector2.from_angle(PI * 0.25 + k * PI * 0.5)
 				draw_line(c + d * 14.0, c + d * 22.0, Color(1, 0.9, 0.3, a), 3.0, true)
+		var u: B3Unit = B3Player.unit if B3Player.active() else null
+		if u == null:
+			return
+		_power_ring(c, u)
+		if reload_k < 1.0:
+			_reload_bar(c)
+		air_shown = u is B3Aircraft
+		if air_shown:
+			_air_gauges(u as B3Aircraft)
+
+	## The power's cooldown: a soft blue arc filling up clockwise from the top
+	## (with a glow), a green ring popping out when it's ready, then a thin
+	## green ring while it stays ready.
+	func _power_ring(c: Vector2, u: B3Unit) -> void:
+		if not B3Player.power_has_cd(u):
+			return
+		var top := -PI * 0.5
+		if power_k < 1.0:
+			draw_arc(c, RING_R, 0, TAU, 48, Color(0, 0, 0, 0.35), 5.0, true)
+			var end := top + TAU * power_k
+			if power_k > 0.01:
+				draw_arc(c, RING_R, top, end, 48, Color(0.45, 0.78, 1.0, 0.35), 10.0, true)
+				draw_arc(c, RING_R, top, end, 48, Color(0.66, 0.9, 1.0, 1.0), 4.0, true)
+			return
+		var ready := Color(0.55, 1.0, 0.65, 0.5)
+		draw_arc(c, RING_R, 0, TAU, 48, ready, 1.5, true)
+		if ping_t > 0.0:
+			var k := 1.0 - ping_t / PING
+			draw_arc(c, RING_R + 14.0 * k, 0, TAU, 48, Color(0.55, 1.0, 0.65, 0.9 * (1.0 - k)), 3.0 + 4.0 * (1.0 - k), true)
+
+	## The weapon reloading: a small bar under the crosshair.
+	func _reload_bar(c: Vector2) -> void:
+		var w := 54.0
+		var rect := Rect2(c + Vector2(-w * 0.5, RING_R + 12.0), Vector2(w, 6.0))
+		draw_rect(rect.grow(1.5), Color(0, 0, 0, 0.5))
+		draw_rect(Rect2(rect.position, Vector2(w * reload_k, rect.size.y)), Color(1.0, 0.86, 0.45, 0.95))
+
+	## ✈️ Bottom left in a helicopter or fighter plane: THR (the plane's
+	## throttle, W/S), ALT (metres over the ground) and the plane's bomb.
+	func _air_gauges(a: B3Aircraft) -> void:
+		var font := get_theme_default_font()
+		var cols := 3 if a.plane else 1
+		var box := Rect2(Vector2(24.0, size.y - 24.0 - 168.0), Vector2(18.0 + cols * 64.0, 168.0))
+		if _air_box == null:
+			_air_box = UI.box(Color(0.13, 0.12, 0.27, 0.85), 14, 2, UI.LINE)
+		draw_style_box(_air_box, box)
+		var x := box.position.x + 9.0
+		if a.plane:
+			_bar_gauge(font, Vector2(x, box.position.y), "THR", B3Player.throttle_of(a), "%d%%" % roundi(B3Player.throttle_of(a) * 100.0), UI.ACCENT)
+			x += 64.0
+		var alt := B3Player.altitude_of(a)
+		_bar_gauge(font, Vector2(x, box.position.y), "ALT", alt / B3Aircraft.CEILING, "%d m" % roundi(alt), Color(0.5, 0.82, 1.0))
+		x += 64.0
+		if a.plane:
+			var ready := B3Player.bomb_ready(a)
+			var mid := Vector2(x + 32.0, box.position.y + 84.0)
+			draw_string(font, Vector2(x, box.position.y + 24.0), "BOMB", HORIZONTAL_ALIGNMENT_CENTER, 64.0, 15, UI.MUTED)
+			# a little bomb like the one under the plane, nose down: grey body,
+			# yellow band, fins on top; glowing orange when it's loaded
+			var fade := 1.0 if ready else 0.35
+			if ready:
+				draw_circle(mid, 30.0, Color(1.0, 0.5, 0.2, 0.3))
+				draw_circle(mid, 22.0, Color(1.0, 0.55, 0.2, 0.3))
+			var body := Color(0.32, 0.34, 0.38, fade)
+			draw_colored_polygon(PackedVector2Array([mid + Vector2(-11, -30), mid + Vector2(11, -30), mid + Vector2(4, -16), mid + Vector2(-4, -16)]), Color(0.2, 0.21, 0.24, fade))
+			draw_rect(Rect2(mid + Vector2(-9, -16), Vector2(18, 24)), body)
+			draw_circle(mid + Vector2(0, -16), 9.0, body)
+			draw_circle(mid + Vector2(0, 8), 9.0, body)
+			draw_rect(Rect2(mid + Vector2(-9, -12), Vector2(18, 5)), Color(1.0, 0.81, 0.29, fade))
+			draw_rect(Rect2(mid + Vector2(-5, -6), Vector2(3, 14)), Color(1, 1, 1, 0.3 * fade))
+			draw_string(font, Vector2(x, box.position.y + 150.0), "READY" if ready else "...", HORIZONTAL_ALIGNMENT_CENTER, 64.0, 15, UI.GOOD if ready else UI.MUTED)
+
+	## One upright gauge: its name on top, a bar filling up from the bottom,
+	## and the number under it.
+	func _bar_gauge(font: Font, at: Vector2, title: String, k: float, txt: String, col: Color) -> void:
+		draw_string(font, at + Vector2(0, 24.0), title, HORIZONTAL_ALIGNMENT_CENTER, 64.0, 15, UI.MUTED)
+		var bar := Rect2(at + Vector2(24.0, 34.0), Vector2(16.0, 98.0))
+		draw_rect(bar.grow(2.0), Color(0, 0, 0, 0.55))
+		var f := clampf(k, 0.0, 1.0) * bar.size.y
+		draw_rect(Rect2(bar.position + Vector2(0, bar.size.y - f), Vector2(bar.size.x, f)), col)
+		draw_string(font, at + Vector2(0, 150.0), txt, HORIZONTAL_ALIGNMENT_CENTER, 64.0, 15, UI.TEXT)
+
+
+## 🖱️ Overhead, under "You're the ...": a pill showing the right-click
+## power's cooldown. It fills up as it recharges and says it's ready (and
+## glows a moment) once it is (B3Player.power_ready).
+class PowerPill extends Control:
+	var k := 1.0
+	var glow_t := 0.0
+	var lbl: Label
+	var _back: StyleBoxFlat = null
+	var _fills := {}
+	const W := 260.0
+	const H := 32.0
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(W, H)
+		size = Vector2(W, H)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lbl = UI.label("", 16)
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lbl.add_theme_constant_override("outline_size", 6)
+		lbl.add_theme_color_override("font_outline_color", Color("2a1f5a"))
+		lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(lbl)
+
+	## `name_s`: the power, as the help line says it ("👟 kick").
+	func show_power(name_s: String, ready_k: float, dt: float) -> void:
+		if ready_k >= 1.0 and k < 1.0:
+			glow_t = 0.6
+		k = ready_k
+		glow_t = maxf(0.0, glow_t - dt)
+		var t := ("%s: ready!" % name_s) if k >= 1.0 else ("%s..." % name_s)
+		if lbl.text != t:
+			lbl.text = t
+		queue_redraw()
+
+	func _draw() -> void:
+		var r := Rect2(Vector2.ZERO, size)
+		if glow_t > 0.0:
+			draw_style_box(UI.box(Color(0.45, 1.0, 0.55, 0.45 * glow_t / 0.6), int(H * 0.5 + 6.0)), r.grow(5.0 * glow_t / 0.6 + 1.0))
+		if _back == null:
+			_back = UI.box(Color(0.1, 0.09, 0.22, 0.85), int(H * 0.5), 2, UI.LINE)
+			_fills[true] = UI.box(Color(0.35, 0.8, 0.45, 0.9), int(H * 0.5) - 3)
+			_fills[false] = UI.box(Color(0.35, 0.62, 0.95, 0.85), int(H * 0.5) - 3)
+		draw_style_box(_back, r)
+		var fill := Rect2(r.position + Vector2(3, 3), Vector2((r.size.x - 6.0) * k, r.size.y - 6.0))
+		if fill.size.x > 4.0:
+			draw_style_box(_fills[k >= 1.0], fill)

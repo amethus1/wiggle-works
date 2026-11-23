@@ -3,6 +3,7 @@ extends Node
 ## (user://settings.cfg). Autoloaded as `Settings`.
 
 signal sticker_earned(id: String)
+signal smooth_3d_changed(on: bool)
 
 const PATH := "user://settings.cfg"
 const SAVE_DELAY := 3.0       # counters save this many seconds after they change (see count)
@@ -12,6 +13,8 @@ const COLORS := [
 ]
 const ADJ := ["Turbo", "Sneaky", "Mega", "Silly", "Super", "Cosmic", "Bouncy", "Zippy", "Jumbo", "Wobbly"]
 const NOUN := ["Noodle", "Pickle", "Taco", "Robot", "Ninja", "Rocket", "Muffin", "Comet", "Bean", "Waffle"]
+const UI_SCALES := [[0.85, "Small"], [1.0, "Normal"], [1.15, "Big"], [1.3, "Huge"]]
+const SHAKES := [[0.0, "Off"], [0.5, "A little"], [1.0, "Lots"]]
 
 var player_name := ""
 var player_color: Color = COLORS[0]
@@ -28,6 +31,10 @@ var b3_mouse_k := 1.0         # first-person mouse speed
 var b3_puzzles := {}          # 🧩 Army Puzzles: stage id -> best stars (1-3); a win opens the next one
 var b3_hist_stars := {}       # 📜 History battles: id -> {"finish": true, "change": true, "hero": true}
 var auto_update := true       # 🔄 look for a new version on GitHub when the game starts
+var smooth_3d := true         # 3D Battle: smooth (2x MSAA) edges; off is quicker on slow graphics cards (set_smooth_3d)
+var fullscreen := false       # 🖥️ ⚙️ Settings: the whole screen (set_fullscreen)
+var ui_scale := 1.0           # 🔍 ⚙️ Settings: how big buttons and words are (set_ui_scale; UI_SCALES)
+var shake_2d := 1.0           # 📳 ⚙️ Settings: how much the 2D playground's screen shakes (0, 0.5 or 1)
 var testing := false          # tests and screenshots never write the save file
 var file := PATH              # where it's saved (tests point this somewhere else)
 var _unsaved := false         # counters changed since the last save
@@ -40,6 +47,7 @@ func _ready() -> void:
 		randomize()
 		player_name = "%s %s" % [ADJ[randi() % ADJ.size()], NOUN[randi() % NOUN.size()]]
 		player_color = COLORS[randi() % COLORS.size()]
+	apply_screen()
 
 
 ## Screenshots (--shot) and test suites (--test=, even windowed ones like
@@ -72,6 +80,10 @@ func load_settings() -> void:
 	b3_puzzles = _dict(c.get_value("battle3d", "puzzles", {}))
 	b3_hist_stars = _dict(c.get_value("battle3d", "hist_stars", {}))
 	auto_update = bool(c.get_value("update", "auto", true))
+	smooth_3d = bool(c.get_value("battle3d", "smooth", true))
+	fullscreen = bool(c.get_value("screen", "fullscreen", false))
+	ui_scale = _pick(float(c.get_value("screen", "ui_scale", 1.0)), UI_SCALES, 1.0)
+	shake_2d = _pick(float(c.get_value("screen", "shake_2d", 1.0)), SHAKES, 1.0)
 
 
 func save() -> void:
@@ -94,7 +106,57 @@ func save() -> void:
 	c.set_value("battle3d", "puzzles", b3_puzzles)
 	c.set_value("battle3d", "hist_stars", b3_hist_stars)
 	c.set_value("update", "auto", auto_update)
+	c.set_value("battle3d", "smooth", smooth_3d)
+	c.set_value("screen", "fullscreen", fullscreen)
+	c.set_value("screen", "ui_scale", ui_scale)
+	c.set_value("screen", "shake_2d", shake_2d)
 	c.save(file)
+
+
+## Turns 3D Battle's smooth edges on or off (saved straight away). 3D Battle
+## (B3World) follows smooth_3d_changed.
+func set_smooth_3d(on: bool) -> void:
+	if on == smooth_3d:
+		return
+	smooth_3d = on
+	save()
+	smooth_3d_changed.emit(on)
+
+
+## `v` if it's one of `choices` ([value, name] pairs), otherwise `fallback`
+## (a hand-edited settings file can't make the buttons tiny).
+static func _pick(v: float, choices: Array, fallback: float) -> float:
+	for c in choices:
+		if absf(float(c[0]) - v) < 0.01:
+			return float(c[0])
+	return fallback
+
+
+## 🖥️ Full screen on or off (saved straight away).
+func set_fullscreen(on: bool) -> void:
+	fullscreen = on
+	save()
+	apply_screen()
+
+
+## 🔍 How big the buttons and words are (one of UI_SCALES; saved straight away).
+func set_ui_scale(k: float) -> void:
+	ui_scale = _pick(k, UI_SCALES, 1.0)
+	save()
+	apply_screen()
+
+
+## Puts the window and the size of everything on screen the way they're set.
+## (Not in tests or screenshots: they always use a normal window.)
+func apply_screen() -> void:
+	if not is_inside_tree():
+		return
+	get_tree().root.content_scale_factor = ui_scale
+	if testing or DisplayServer.get_name() == "headless":
+		return
+	var full := DisplayServer.window_get_mode() in [DisplayServer.WINDOW_MODE_FULLSCREEN, DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN]
+	if full != fullscreen:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN if fullscreen else DisplayServer.WINDOW_MODE_WINDOWED)
 
 
 ## Saves soon, once, however many counters change in the meantime (a chain of

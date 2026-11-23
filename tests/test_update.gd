@@ -69,8 +69,26 @@ func _ready() -> void:
 	check(String(Updater.pick_asset(assets, "Windows").name).ends_with(".exe"), "Windows gets the .exe")
 	check(String(Updater.pick_asset(assets, "macOS").name).ends_with("Mac.zip"), "a Mac gets the Mac zip")
 	check(Updater.pick_asset(assets, "Linux").is_empty(), "other computers get nothing to install")
-	var r := Updater.parse_release({"tag_name": "v9.0.0", "body": "New dinosaurs!", "html_url": "https://page", "assets": assets}, "Windows")
-	check(r.version == "9.0.0" and r.newer and r.notes == "New dinosaurs!" and r.page == "https://page" and r.asset.size == 20, "a newer release is spotted, with its notes and download")
+	var rel_page := "https://github.com/" + Updater.REPO + "/releases/tag/v9.0.0"
+	var r := Updater.parse_release({"tag_name": "v9.0.0", "body": "New dinosaurs!", "html_url": rel_page, "assets": assets}, "Windows")
+	check(r.version == "9.0.0" and r.newer and r.notes == "New dinosaurs!" and r.page == rel_page and r.asset.size == 20, "a newer release is spotted, with its notes and download")
+	# the page "Update now" opens on a Mac: only this game's own GitHub pages
+	check(Updater.parse_release({"tag_name": "v9.0.0", "html_url": "https://evil.example/wiggle", "assets": assets}, "macOS").page == Updater.PAGE
+		and Updater.safe_page("https://github.com/someone-else/wiggle-works/releases") == Updater.PAGE
+		and Updater.safe_page("https://github.com/" + Updater.REPO + "/../x") == Updater.PAGE
+		and Updater.safe_page("https://github.com/" + Updater.REPO + "@evil.example/") == Updater.PAGE
+		and Updater.safe_page(rel_page) == rel_page, "a release page from anywhere else opens the game's usual releases page instead")
+	# no fingerprint from GitHub: the release's SHA256SUMS.txt has it
+	var with_sums: Array = assets.duplicate()
+	with_sums.append({"name": "SHA256SUMS.txt", "size": 200, "browser_download_url": "https://github.com/" + Updater.REPO + "/releases/download/v9.0.0/SHA256SUMS.txt"})
+	check(String(Updater.parse_release({"tag_name": "v9.0.0", "assets": with_sums}, "Windows").sums.get("name", "")) == "SHA256SUMS.txt"
+		and Updater.parse_release({"tag_name": "v9.0.0", "assets": assets}, "Windows").sums.is_empty(), "the release's SHA256SUMS.txt is found (when there is one)")
+	var hex_w := sha("the windows game")
+	var sums_txt := "%s  WiggleWorks-Windows.exe\n%s  WiggleWorks-Mac.zip\n" % [hex_w, sha("the mac game")]
+	check(Updater.sum_for(sums_txt, "WiggleWorks-Windows.exe") == "sha256:" + hex_w
+		and Updater.sum_for(sums_txt, "Other.exe") == ""
+		and Updater.sum_for("nothex  WiggleWorks-Windows.exe", "WiggleWorks-Windows.exe") == ""
+		and Updater.sum_for("", "WiggleWorks-Windows.exe") == "", "and the right line is read out of it (junk and missing lines give nothing)")
 	var same := Updater.parse_release({"tag_name": "v1.0.0", "body": null, "assets": null}, "Windows")
 	check(not same.newer and same.notes == "" and same.asset.is_empty(), "the same version isn't offered (and missing bits don't break it)")
 	check(not Updater.can_install(), "running from the source code, Update now opens the page instead")
@@ -156,8 +174,14 @@ func _ready() -> void:
 	await get_tree().process_frame
 	check(m.modal == null, "afterwards ✕ closes it")
 	m._settings()
-	var boxes: Array = m.modal.find_children("*", "CheckBox", true, false)
-	check(boxes.size() == 1 and (boxes[0] as CheckBox).button_pressed == Settings.auto_update, "⚙️ Me has the 'look for a new version' switch")
+	# (the shared ⚙️ Settings pop-up: its switches are ✅ / ⬜ buttons with meta "on")
+	var switch: Array = m.modal.find_children("*", "Button", true, false).filter(func(b): return (b as Button).text.contains("Look for a new version"))
+	check(switch.size() == 1 and bool((switch[0] as Button).get_meta("on", null)) == Settings.auto_update, "⚙️ Me has the 'look for a new version' switch")
+	if switch.size() == 1:
+		var was := Settings.auto_update
+		(switch[0] as Button).pressed.emit()
+		check(Settings.auto_update == not was, "and it turns looking for updates on and off")
+		(switch[0] as Button).pressed.emit()
 	check(m.modal.find_children("*", "Button", true, false).any(func(b): return (b as Button).text.begins_with("🔄 Check")), "and a Check for updates button")
 	m.queue_free()
 

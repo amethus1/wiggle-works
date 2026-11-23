@@ -246,6 +246,136 @@ func _ready() -> void:
 	friend.tools.stop_playing()
 	await wait_for(func(): return not next_knight.call() and hk.ctl == null, 2.0)
 
+	# ⇥ Tab into a teammate someone else has just taken: the host says no, and
+	# the friend looks out of the one they really steer again (not a stranger's)
+	var ka: B3Unit = null
+	for u: B3Unit in host.units:
+		if u.team == "blue" and not u.dead and not u.down and u.ctl == null:
+			ka = u
+			break
+	var fa: B3Unit = friend.net.puppets.get(ka.get_instance_id())
+	friend.tools.play_as(fa)
+	check(await wait_for(func(): return ka.ctl != null and ka.ctl.peer != 0, 3.0), "the friend plays a blue knight")
+	friend.tools._round.clear()
+	B3Player.last_pos = fa.global_position
+	var fnext: B3Unit = friend.tools.next_teammate([fa.get_instance_id()], false)
+	var hnext: B3Unit = host.unit_by_id(int(fnext.get_meta("nid", 0))) if fnext else null
+	var stranger := B3Ctl.new()
+	stranger.peer = 999
+	if hnext:
+		B3Player.attach(hnext, stranger)      # (someone else got there first)
+	friend.tools.switch_teammate()
+	check(B3Player.unit == fnext, "⇥ Tab on the friend's screen jumps to the next knight straight away")
+	check(await wait_for(func(): return B3Player.unit == fa and friend.cam.follow == fa and toast_has(friend, "already playing"), 3.0),
+		"⇥ that one was taken: the host says so, and the friend's camera goes back to the knight they steer")
+	check(ka.ctl != null and ka.ctl.peer != 0 and hnext != null and hnext.ctl == stranger, "(still theirs on the host, and the other one still the other player's)")
+	if hnext:
+		B3Player.detach(hnext)
+	friend.tools.stop_playing()
+	await wait_for(func(): return ka.ctl == null, 2.0)
+
+	# presses that happen once are counted: a jump whose packet got lost, or a
+	# right-click let go before the next packet, still happen on the host
+	var tf := {}
+	var tc := B3Ctl.new()
+	B3Net._count_taps(tf, tc, 0)
+	B3Net._count_taps(tf, tc, 0)
+	var calm := not tc.jump and not tc.fire and not tc.fire2
+	B3Net._count_taps(tf, tc, 1 | (1 << 16))
+	check(calm and tc.jump and tc.fire2 and not tc.fire, "⏫ a jump (and a right-click) in a lost controls packet: the next one's count brings it")
+	tc.jump = false
+	B3Net._count_taps(tf, tc, 1 | (1 << 16))
+	B3Net._count_taps(tf, tc, 255 | (1 << 16))
+	var once := not tc.jump
+	B3Net._count_taps(tf, tc, 0 | (1 << 16))
+	check(once and tc.jump, "and only once, even when the count goes round past 255")
+	var hs3: B3Unit = null
+	for u: B3Unit in host.units:
+		if u.team == "red" and u.kind == "soldier" and not u.dead and not u.down and u.ctl == null:
+			hs3 = u
+			break
+	var fs3: B3Unit = friend.net.puppets.get(hs3.get_instance_id())
+	friend.tools.play_as(fs3)
+	check(await wait_for(func(): return hs3.ctl != null and hs3.ctl.peer != 0, 3.0), "the friend plays a soldier")
+	await wait_for(func(): return hs3._grounded and hs3.act == "", 2.0)
+	var y0: float = hs3.global_position.y
+	friend.net._ctl_t = 10.0          # (hold the next controls packet)
+	B3Player.me.jump = true
+	await get_tree().process_frame
+	await get_tree().process_frame
+	friend.net._jumped = false        # (as if the packet saying "jump" was lost: only the count gets there)
+	friend.net._ctl_t = 0.0
+	var top := [y0]
+	check(await wait_for(func():
+		top[0] = maxf(top[0], hs3.global_position.y)
+		return top[0] > y0 + 0.25, 2.0), "⏫ the jump still happens on the host (up %.2f m)" % (top[0] - y0))
+	await wait_for(func(): return hs3._grounded and hs3.act == "" and hs3.power_cd <= 0.0, 3.0)
+	friend.net._ctl_t = 10.0
+	B3Player.me.fire2 = true
+	await get_tree().process_frame
+	await get_tree().process_frame
+	B3Player.me.fire2 = false         # let go before a packet went
+	friend.net._ctl_t = 0.0
+	check(await wait_for(func(): return hs3.power_cd > 0.1, 2.0), "👟 a right-click tap quicker than a packet still kicks on the host")
+	check(await wait_for(func(): return B3Player.power_ready(fs3) < 0.95, 2.0),
+		"⏳ and the friend's power meter shows it recharging (%.2f)" % B3Player.power_ready(fs3))
+	check(await wait_for(func(): return B3Player.power_ready(fs3) > 0.99, 8.0), "then ready again")
+	# 📒 a knock-out by the fighter a friend plays earns the friend the sticker count
+	var kos0 := int(Settings.counters.get("b3_hero_kos", 0))
+	var vic: B3Unit = null
+	for u: B3Unit in host.units:
+		if u.team == "blue" and not u.dead:
+			vic = u
+			break
+	vic.hurt(99999.0, Vector3.RIGHT, 1.0, hs3)
+	check(await wait_for(func(): return int(Settings.counters.get("b3_hero_kos", 0)) == kos0 + 1, 2.0),
+		"📒 the friend's soldier knocks someone out: the friend gets it for 🦸 Hero")
+	friend.tools.stop_playing()
+	await wait_for(func(): return hs3.ctl == null, 2.0)
+
+	# 🐢 G on a friend's screen is the host's slow motion, for everyone
+	var kg := InputEventKey.new()
+	kg.keycode = KEY_G
+	kg.pressed = true
+	friend.tools._key(kg)
+	check(await wait_for(func(): return host.slowmo and friend.slowmo, 2.0), "🐢 the friend's G slows the host's battle down, on both screens")
+	await wait_for(func(): return false, 0.3)
+	check(host.slowmo and friend.slowmo, "and it stays slow (it's the host's)")
+	friend.tools._key(kg)
+	check(await wait_for(func(): return not host.slowmo and not friend.slowmo, 2.0), "G again: normal speed on both")
+
+	# 🔒 the host can stop friends changing the battle (the 👥 panel's checkbox)
+	host.ui._show_net()
+	var lock_box = host.ui.get_meta("net_lock", null)
+	check(lock_box is CheckBox and is_instance_valid(lock_box) and (lock_box as CheckBox).button_pressed, "the host's 👥 panel has the 🔒 checkbox, ticked")
+	if lock_box is CheckBox and is_instance_valid(lock_box):
+		(lock_box as CheckBox).button_pressed = false
+	check(not host.net.allow_changes, "unticking it locks the battle")
+	host.ui.close_top()
+	host.net.allow_changes = false
+	var n_lock: int = alive(host)
+	friend.tools.place_id = "viking"
+	friend.tools.team = "green"
+	friend.tools._place(at(friend, 2, 2), at(friend, 2, 2), false, false)
+	check(await wait_for(func(): return toast_has(friend, "locked"), 2.0) and alive(host) == n_lock, "🔒 locked: a friend's placing is turned away, and they're told why")
+	check(await wait_for(func(): return friend.net.host_locked, 1.0), "and the friend's game knows")
+	host.net.allow_changes = true
+	await wait_for(func(): return not friend.net.host_locked, 1.0)
+
+	# 🟩 a Shift-drag block can be 144 fighters: each one counts against a friend's placing
+	await wait_for(func(): return false, 1.0)
+	var n_box: int = alive(host)
+	for i in 4:
+		friend.net.send_cmd({"c": "place", "id": "soldier", "team": "yellow", "pers": "peaceful", "size": 1.0, "a": at(host, -70, -70),
+			"b": at(host, -40, -40), "dragged": true, "box": true, "yaw": 0.0})
+	await wait_for(func(): return false, 0.8)
+	var boxed: int = alive(host) - n_box
+	check(boxed >= 100 and boxed <= 2 * 144 + 2, "🟩 four blocks of fighters at once from a friend: only two get made (%d fighters)" % boxed)
+	for u: B3Unit in host.units.duplicate():
+		if is_instance_valid(u) and u.team == "yellow":
+			host.remove_unit(u, false)
+	check(await wait_for(func(): return alive(friend) == alive(host), 3.0), "(and they go away again on both screens)")
+
 	# knock-outs and broken walls show up too
 	var victim: B3Unit = null
 	for u: B3Unit in host.units:
@@ -261,6 +391,17 @@ func _ready() -> void:
 	check(friend.net.fx_played > 0, "explosions, shots and sounds play on the friend's screen (%d)" % friend.net.fx_played)
 	host.remove_unit(tank)
 	check(await wait_for(func(): return friend.units.filter(func(u): return u.kind == "tank" and not u.dead).is_empty(), 2.0), "erasing on the host erases on the friend's screen")
+
+	# 🔥 a wooden tower catching fire burns on the friend's screen too, and 🪂 parachutes float down there
+	var htw: B3Struct = host.spawn_struct("tower", at(host, -30, -30), 0.0)
+	check(await wait_for(func(): return friend.structs.size() == host.structs.size(), 3.0), "(the friend gets a wooden tower)")
+	await wait_for(func(): return false, 1.2)      # (a friend's new building is left alone for its first second)
+	var fire_ok: bool = host.fighting and B3Fire.of(host).ignite(htw.pieces[0])
+	check(fire_ok and await wait_for(func(): return B3Fire.of(friend).burning.size() == 1, 2.0), "🔥 a tower catching fire burns on the friend's screen too")
+	host.fx.chute(at(host, -30, 30) + Vector3(0, 20, 0), Vector3(0, 8, 0), Color.RED)
+	check(await wait_for(func(): return friend.fx.get_children().any(func(c): return c is B3Chute), 2.0), "🪂 a pilot's parachute floats down on the friend's screen")
+	B3Fire.of(host).put_out()
+	host.remove_struct(htw, false)
 
 	# ✈️ an airstrike's plane flies over on the friend's screen too
 	host.airstrike(at(host, 0, 70), Vector3.RIGHT)
@@ -282,6 +423,10 @@ func _ready() -> void:
 	friend.cam.trauma = 0.0
 	friend.net._play_fx(["nuke", at(friend, 90, 90)])
 	check(friend.ui._flash > 0.5 and friend.cam.trauma > 0.5, "☢️ a nuke flashes and shakes the friend's screen too")
+	friend.ui._flash = 0.0
+	host.net.rec_fx(["nuke", at(host, 90, 90)])
+	check(await wait_for(func(): return friend.ui._flash > 0.5, 2.0) and not host.net.snapshot().has("fx"),
+		"☢️ the host's nuke flash comes over on its own reliable channel (not in a snapshot that could get lost)")
 
 	# effects the friend's copy already made itself aren't played twice
 	var skipped: int = friend.net.fx_skipped
@@ -361,6 +506,54 @@ func _ready() -> void:
 	for p in c4_props(host):
 		host.remove_prop(p, false)
 
+	# 🏆 the winner banner and the scoreboard under it come over as data
+	for u: B3Unit in host.units.duplicate():
+		if is_instance_valid(u) and not u.dead and u.team != "red":
+			u.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+	check(await wait_for(func(): return host.winner == "red" and friend.ui.banner_lbl.visible and friend.ui.score_card.visible, 4.0),
+		"🏆 the friend sees the winner banner and the scoreboard")
+	check(await wait_for(func(): return B3Battle.read_score(friend.net._sb) == B3Battle.read_score(host.scoreboard()) and not friend.net._sb.is_empty(), 2.0),
+		"with the same numbers as the host's (%d lines)" % friend.net._sb.size())
+	check(String(friend.ui.banner_lbl.text).get_slice("\n", 0) == String(host.ui.banner_lbl.text).get_slice("\n", 0), "and the same headline")
+
+	# 👥 snapshots only carry what changed since the last one the friend got
+	var keys0: int = host.net._tx.keyframes
+	await wait_for(func(): return false, 0.5)
+	check(host.net._tx.keyframes == keys0 and friend.net._rx.got > 50, "📦 the friend gets just the changes, not whole snapshots (%d whole ones since joining)" % keys0)
+	friend.net._rx.hist.clear()      # (as if every snapshot it had got lost)
+	var mover: B3Unit = null
+	for u: B3Unit in host.units:
+		if not u.dead and not u.down and not (u is B3Vehicle):
+			mover = u
+			break
+	mover.global_position += Vector3(6, 0, 0)
+	check(await wait_for(func(): return host.net._tx.keyframes > keys0, 2.0), "📦 a friend that's lost track asks, and gets a whole snapshot")
+	var fm: B3Unit = friend.net.puppets.get(mover.get_instance_id())
+	check(await wait_for(func(): return fm != null and fm.global_position.distance_to(mover.global_position) < 0.8, 2.0), "and is right again")
+	var full_snap: PackedByteArray = host.net._tx.packet(-1)
+	var change_snap: PackedByteArray = host.net._tx.packet(host.net._tx.n - 1)
+	print("        3D snapshot: %d bytes whole, %d bytes of changes (%d fighters)" % [full_snap.size(), change_snap.size(), alive(host)])
+	check(change_snap.size() < full_snap.size(), "a snapshot of changes is smaller than a whole one")
+
+	# a copy of the game that isn't the same version is told, kindly, on both sides
+	var odd := ENetMultiplayerPeer.new()
+	odd.create_client("127.0.0.1", B3Net.PORT)
+	var omp := SceneMultiplayer.new()
+	omp.root_path = get_path()
+	omp.multiplayer_peer = odd
+	var said := [""]
+	omp.peer_packet.connect(func(_id: int, pkt: PackedByteArray):
+		var why: Variant = NetCommon.decode(pkt).get("why")
+		if why is String:
+			said[0] = why)
+	omp.connected_to_server.connect(func():
+		omp.send_bytes(NetCommon.encode({"m": "hello", "v": B3Net.VERSION - 1, "name": "Old"}), 1, MultiplayerPeer.TRANSFER_MODE_RELIABLE, 0))
+	check(await wait_for(func():
+		omp.poll()
+		return said[0] != "", 3.0) and said[0] == NetCommon.WRONG_VERSION, "🔢 a friend with another version is told: %s" % said[0])
+	check(toast_has(host, "different version"), "and so is the host")
+	odd.close()
+
 	# the host sets up a History battle
 	host.run_history("agincourt")
 	var hp_count := func(bt) -> int:
@@ -403,7 +596,8 @@ func _ready() -> void:
 	friend.tools.team = "green"
 	friend.tools._place(at(friend, 0, 10), at(friend, 0, 10), false, false)
 	check(await wait_for(func(): return host.spent == spent0 + 2, 3.0), "a friend's soldier in the fort is paid from the host's points")
-	check(await wait_for(func(): return friend.ui.coin_lbl.text == "🪙 %d / %d" % [host.points_left(), host.budget], 2.0),
+	# ("🪙 left / budget", or just "🪙 left" when the top bar is squeezed up: B3UI._compact_top)
+	check(await wait_for(func(): return friend.ui.coin_lbl.text.trim_prefix("🪙 ").split(" ")[0] == str(host.points_left()), 2.0),
 		"and the friend's coins go down too (%s)" % friend.ui.coin_lbl.text)
 	friend.tools._place(at(friend, 0, -30), at(friend, 0, -30), false, false)
 	check(await wait_for(func(): return toast_has(friend, "🚧"), 2.0) and host.spent == spent0 + 2, "outside the fort, the friend is told why and nothing's placed")
@@ -444,6 +638,36 @@ func _ready() -> void:
 	check(friend.budget == keep_b, "and so are broken points")
 	B3Rules.set_value("goal", "last")
 	await wait_for(func(): return friend.modes.kind == "", 2.0)
+
+	# 🧩 a puzzle: the friend sees its goal and glowing area, laid on each new map
+	var st0: Dictionary = B3Puzzles.STAGES[0]
+	var st1: Dictionary = B3Puzzles.STAGES[1]
+	B3Puzzles.start(host, String(st0.id))
+	check(await wait_for(func(): return (friend.puzzle != null and friend.puzzle.id == st0.id and friend.zone_vis != null
+		and friend.ui.puzzle_box != null and friend.ui.puzzle_box.visible), 4.0), "🧩 the friend sees the host's puzzle, its goal and the glowing area")
+	# (its id, not the node: the old area gets freed, and a lambda holding a freed node makes Godot complain)
+	var zv0_id: int = friend.zone_vis.get_instance_id()
+	B3Puzzles.start(host, String(st1.id))
+	check(Rect2(st0.zone) == Rect2(st1.zone) and String(st0.map) != String(st1.map), "(the next puzzle has the same area on another map)")
+	check(await wait_for(func(): return (friend.map_id == String(st1.map) and friend.puzzle != null and friend.puzzle.id == st1.id
+		and friend.zone_vis != null and friend.zone_vis.get_instance_id() != zv0_id and friend.net._zone_map == friend.map_id), 4.0),
+		"🧩 the next puzzle: the friend's glowing area is laid on the new map, not left from the old one")
+	check(String(friend.ui.puzzle_lbl.text).contains(String(st1.name)), "with the new goal (%s)" % String(friend.ui.puzzle_lbl.text).get_slice("\n", 0))
+	host.puzzle.over = true
+	host.puzzle.won = 2
+	check(await wait_for(func(): return friend.ui.puzzle_card != null and friend.ui.puzzle_card.visible, 3.0), "⭐ when the puzzle's fight is over, the friend gets the stars card too")
+	var lit := 0
+	var stars_row: Node = friend.ui.puzzle_card.find_child("Stars", true, false) if friend.ui.puzzle_card else null
+	if stars_row:
+		for c in stars_row.get_children():
+			if (c as CanvasItem).modulate.a > 0.9:
+				lit += 1
+	check(lit == 2 and B3Puzzles.stars(String(st1.id)) >= 2, "with the host's ⭐⭐ (and the friend keeps them)")
+	host.puzzle.over = false
+	host.puzzle.won = 0
+	check(await wait_for(func(): return not friend.ui.puzzle_card.visible, 2.0), "⏮ trying again takes the card away")
+	host.clear_all()
+	check(await wait_for(func(): return friend.puzzle == null and friend.budget < 0 and friend.zone_vis == null, 3.0), "and when the puzzle's over, it's gone on the friend's screen")
 
 	# leaving
 	friend.stop_net()

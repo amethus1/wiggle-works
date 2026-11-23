@@ -74,6 +74,12 @@ func headline() -> String:
 	return String(b.ui.banner_lbl.text).split("\n")[0] if b.ui.banner_lbl.visible else ""
 
 
+## ▶ Fight! (which sets the clock back to normal speed: the tests run faster)
+func go() -> void:
+	b.toggle_play()
+	Engine.time_scale = SPEED
+
+
 ## Holds `u` still at `p` (so it stays in or out of the hill's circle).
 func pin(u: B3Unit, p: Vector3) -> void:
 	u.freeze = true
@@ -102,10 +108,19 @@ func _ready() -> void:
 	await _last()
 	await _king()
 	await _king_draw()
+	await _king_hp()
+	await _king_small()
+	await _king_rout()
+	await _king_town()
 	await _hill()
 	await _hill_ai()
+	await _hill_more()
+	await _hill_everyone()
 	await _waves_setup()
 	await _waves_play()
+	await _waves_keep()
+	await _waves_more()
+	await _waves_net()
 	await _waves_first_person()
 	await _waves_list()
 	await _waves_start_later()
@@ -188,7 +203,8 @@ func _king() -> void:
 	var bk: B3Unit = b.modes.kings.get("blue")
 	check(rk != null and rk.kind == "soldier" and bk.kind == "viking", "of its most common fighter (%s, %s)" % [rk.kind if rk else "?", bk.kind if bk else "?"])
 	check(crowned(rk) and crowned(bk), "👑 both wear a gold crown")
-	check(absf(rk.size_mult - B3Modes.KING_SIZE) < 0.01 and rk.max_hp > float(B3Defs.unit_def("soldier").hp) * 10.0,
+	check(absf(rk.size_mult - B3Modes.KING_SIZE) < 0.01 and absf(rk.max_hp - B3Modes.king_hp("soldier")) < 1.0
+		and rk.max_hp >= float(B3Defs.unit_def("soldier").hp) * 3.0,
 		"a big King with lots of health (%d ❤️)" % int(rk.max_hp))
 	var behind := rk.position.x < -14.0 + 0.5 and bk.position.x > 14.0 - 0.5
 	check(behind, "each stands behind its army (%.1f, %.1f)" % [rk.position.x, bk.position.x])
@@ -252,6 +268,121 @@ func _king_draw() -> void:
 	await sim(1.0)
 	check(b.winner.begins_with("wild:"), "both Kings fall at once: the wild wolf is left (%s)" % b.winner)
 	rule("goal", "last")
+
+
+func _king_hp() -> void:
+	print("👑 a King's health: tough, not a wall")
+	var worst := 0.0
+	var who := ""
+	for k: String in B3Defs.UNITS:
+		if B3Defs.is_vehicle(k):
+			continue
+		var r := B3Modes.king_hp(k) / float(B3Defs.unit_def(k).hp)
+		if r > worst:
+			worst = r
+			who = k
+	check(worst <= B3Modes.KING_HP + 0.01, "no King has more than %.0f× its kind's usual health (was 12.8×; most: %s %.1f×)" % [B3Modes.KING_HP, who, worst])
+	check(B3Modes.king_hp("brachio") <= 3000.0 and B3Modes.king_hp("soldier") >= 300.0,
+		"a King Brachiosaurus has %d ❤️ (was 23,040), a King soldier %d" % [int(B3Modes.king_hp("brachio")), int(B3Modes.king_hp("soldier"))])
+	await fresh()
+	rule("goal", "king")
+	for i in 3:
+		b.spawn_unit("brachio", "red", at(-20, -8 + i * 8.0), "peaceful")
+		b.spawn_unit("brachio", "blue", at(20, -8 + i * 8.0), "peaceful")
+	go()
+	await sim(0.6)
+	var rk: B3Unit = b.modes.kings.get("red")
+	check(rk != null and rk.kind == "brachio" and absf(rk.max_hp - B3Modes.king_hp("brachio")) < 1.0,
+		"...and that's what a crowned one gets (%d)" % int(rk.max_hp if rk else 0.0))
+	rule("goal", "last")
+
+
+func _king_small() -> void:
+	print("👑 small armies and stand-offs")
+	await fresh()
+	rule("goal", "king")
+	for i in 2:
+		b.spawn_unit("knight", "red", at(-12, -2 + i * 4.0), "auto", PI * 0.5)
+		b.spawn_unit("viking", "blue", at(12, -2 + i * 4.0), "auto", -PI * 0.5)
+	go()
+	await sim(0.8)
+	var guards := live("red").filter(func(u: B3Unit) -> bool: return not u.king and u.pers == "defend")
+	var free := live("red").filter(func(u: B3Unit) -> bool: return not u.king and u.pers != "defend")
+	check(b.modes.kings.size() == 2 and guards.size() <= 1 and free.size() >= 1,
+		"with 2 fighters a team keeps one on the attack (%d guarding, %d attacking)" % [guards.size(), free.size()])
+	# a stand-off: everyone guarding, far apart
+	for u: B3Unit in live():
+		if not u.king:
+			u.set_personality("defend")
+			u.home = u.position
+	b.modes._hp_sum = -1.0
+	b.modes._calm_t = 0.0
+	await sim(B3Modes.STALL_T + 1.5)
+	var still := live().filter(func(u: B3Unit) -> bool: return u.pers == "defend")
+	check(still.is_empty() and b.modes._charged, "nobody hurt for %.0f s: the guards and Kings charge (%d still waiting)" % [B3Modes.STALL_T, still.size()])
+	var t := 0.0
+	while b.winner == "" and t < 60.0:
+		await sim(2.0)
+		t += 2.0
+	check(b.winner == "red" or b.winner == "blue", "...and someone wins (%s, %.0f s later)" % [b.winner, t])
+	rule("goal", "last")
+
+
+func _king_rout() -> void:
+	print("👑 a team whose King falls runs away")
+	await fresh()
+	rule("goal", "king")
+	var spots := {"red": Vector2(-22, 0), "blue": Vector2(22, 0), "green": Vector2(0, 26)}
+	for t: String in spots:
+		var p: Vector2 = spots[t]
+		for i in 4:
+			b.spawn_unit("soldier", t, at(p.x + (i - 1.5) * 2.0, p.y), "peaceful")
+	go()
+	await sim(0.8)
+	check(b.modes.kings.size() == 3, "three Kings")
+	var reds := live("red").filter(func(u: B3Unit) -> bool: return not u.king)
+	ko(b.modes.kings.red, live("blue")[0])
+	await sim(0.8)
+	var ran := reds.filter(func(u: B3Unit) -> bool:
+		return is_instance_valid(u) and (u.dead or (u.routed and u.fleeing and u.pers == "coward")))
+	check(ran.size() == reds.size() and b.winner == "", "Red's King falls: Red's army runs away (%d of %d), the others fight on" % [ran.size(), reds.size()])
+	await sim(B3Modes.ROUT_T + 2.5)
+	check(live("red").is_empty(), "...and soon it's gone (poof!), so nobody's left fighting for a team that's out (%d)" % live("red").size())
+	ko(b.modes.kings.green, live("blue")[0])
+	await sim(0.8)
+	check(b.winner == "blue" and headline().begins_with("👑"), "Green's King falls too: Blue wins (%s)" % b.winner)
+	var losers_cheer := live().filter(func(u: B3Unit) -> bool: return u.team != "blue" and u.cheer)
+	var cheer_n := live("blue").filter(func(u: B3Unit) -> bool: return u.cheer).size()
+	check(losers_cheer.is_empty() and cheer_n > 0, "only the winners cheer (%d green cheering, %d blue)" % [losers_cheer.size(), cheer_n])
+	await sim(B3Modes.ROUT_T + 2.5)
+	check(b.winner == "blue" and live("green").is_empty(), "and Blue stays the winner")
+	rule("goal", "last")
+
+
+func _king_town() -> void:
+	print("👑 Kings don't stand inside houses")
+	await fresh("town")
+	var q := PhysicsShapeQueryParameters3D.new()
+	var sph := SphereShape3D.new()
+	sph.radius = 1.1
+	q.shape = sph
+	q.collision_mask = B3Defs.L_SCENERY
+	var house := Vector3.INF
+	for ix in range(-30, 31):
+		for iz in range(-30, 31):
+			var p := at(ix * 3.0, iz * 3.0)
+			q.transform = Transform3D(Basis.IDENTITY, p + Vector3(0, 1.4, 0))
+			if not b.space().intersect_shape(q, 1).is_empty():
+				house = p
+				break
+		if house != Vector3.INF:
+			break
+	check(house != Vector3.INF, "(found a house at %s)" % str(house))
+	var spot: Vector3 = b.modes._free_spot(house)
+	q.collision_mask = B3Defs.L_SCENERY | B3Defs.L_STRUCT
+	q.transform = Transform3D(Basis.IDENTITY, spot + Vector3(0, 1.4, 0))
+	check(b.space().intersect_shape(q, 1).is_empty() and spot.distance_to(house) > 0.5,
+		"a King meant for a spot inside a house stands next to it instead (%.1f m over)" % spot.distance_to(house))
 
 
 # ------------------------------------------------------------------- 🚩
@@ -323,6 +454,75 @@ func _hill_ai() -> void:
 	check(d.position.distance_to(g0) < 3.0, "a 🛡️ Defend fighter stays at its post")
 	await sim(6.0)
 	check(float(b.modes.scores.get("red", 0.0)) > 0.0, "and scores once it's there")
+	rule("goal", "last")
+
+
+func _hill_more() -> void:
+	print("🚩 no free points after a win, no lava or buildings in the circle")
+	await fresh()
+	rule("goal", "hill")
+	var r: B3Unit = b.spawn_unit("soldier", "red", at(-12, 0), "peaceful")
+	var bl: B3Unit = b.spawn_unit("soldier", "blue", at(12, 0), "peaceful")
+	go()
+	await sim(0.5)
+	ko(bl, r)
+	await sim(1.0)
+	check(b.winner == "red", "(Red wins the usual way: Blue's all knocked out)")
+	await sim(4.0)      # the winner banner stays up a while...
+	pin(r, b.modes.hill_pos + Vector3(1, 0.3, 0))
+	b.spawn_unit("soldier", "blue", at(30, 30), "peaceful")      # ...then someone new turns up
+	await sim(0.6)
+	var s := float(b.modes.scores.get("red", 0.0))
+	check(b.winner == "" and b.modes.hill_won == "" and s < 5.0, "the time under the banner doesn't count: no 100 points at once (%.1f)" % s)
+	# lava up on a hill, and a bunker on top of it
+	var c := at(-6, -32)
+	var top: Vector3 = b.modes._hill_spot(c)
+	check(top.y > c.y + 1.0, "(a hill at %s, %.1f m up)" % [str(top), top.y])
+	var lava: B3Hazard = b.spawn_hazard("lava", top, 3.0)
+	var top2: Vector3 = b.modes._hill_spot(c)
+	var gap := Vector2(top2.x - top.x, top2.z - top.z).length()
+	check(gap > 3.0 + B3Modes.HILL_R, "🌋 lava up on the hill: the circle goes somewhere else (%.1f m away)" % gap)
+	b.remove_hazard(lava)
+	await sim(0.1)
+	b.spawn_struct("bunker", top, 0.0)
+	await sim(0.5)
+	var top3: Vector3 = b.modes._hill_spot(c)
+	check(b.modes._hill_clear(top3) and Vector2(top3.x - top.x, top3.z - top.z).length() > 1.0,
+		"🧱 a bunker on top: the circle goes next to it, not round it (%.1f m away)" % Vector2(top3.x - top.x, top3.z - top.z).length())
+	# 🌋 the Volcano's pools sit high and low: every one of them counts
+	await fresh("volcano")
+	var seen := 0
+	for h: B3Hazard in b.hazards:
+		if not b.modes._hill_ok(h.position.x, h.position.z):
+			seen += 1
+	check(b.hazards.size() >= 8 and seen == b.hazards.size(), "🌋 the circle keeps away from all %d Volcano pools, high or low (%d)" % [b.hazards.size(), seen])
+	rule("goal", "last")
+
+
+func _hill_everyone() -> void:
+	print("🚩 vehicles and guards by nature go for the hill too")
+	await fresh()
+	rule("goal", "hill")
+	var tank: B3Unit = b.spawn_unit("tank", "red", at(-26, -6), "auto", PI * 0.5)
+	var jeep: B3Unit = b.spawn_unit("jeep", "red", at(-26, 8), "auto", PI * 0.5)
+	var hop: B3Unit = b.spawn_unit("hoplite", "red", at(-24, 2), "auto", PI * 0.5)
+	var ele: B3Unit = b.spawn_unit("elephant", "red", at(-26, 16), "auto", PI * 0.5)
+	var post: B3Unit = b.spawn_unit("knight", "red", at(-24, -14), "defend", PI * 0.5)
+	b.spawn_unit("soldier", "blue", at(26, 44), "peaceful")
+	b.spawn_unit("soldier", "blue", at(26, -44), "peaceful")
+	go()
+	await sim(0.3)
+	var hp: Vector3 = b.modes.hill_pos
+	var dist := func(u: B3Unit) -> float: return Vector2(u.position.x - hp.x, u.position.z - hp.z).length()
+	var d0 := {}
+	for u: B3Unit in [tank, jeep, hop, ele]:
+		d0[u] = float(dist.call(u))
+	var p0 := post.position
+	await sim(10.0)
+	for u: B3Unit in [tank, jeep, hop, ele]:
+		var d1: float = dist.call(u)
+		check(d1 < float(d0[u]) - 6.0, "the %s heads for the hill (%.0f → %.0f m)" % [u.def.name, float(d0[u]), d1])
+	check(post.position.distance_to(p0) < 3.0, "a knight you set to 🛡️ Defend still stays at its post")
 	rule("goal", "last")
 
 
@@ -426,12 +626,16 @@ func _waves_play() -> void:
 	await sim(0.5)
 	check(b._respawns.filter(func(r: Dictionary) -> bool: return r.team == "blue").is_empty(), "knocked-out attackers don't come back")
 	rule("respawn", "off")
-	# losing: nothing of yours left in the fort
+	# losing: the 🚩 keep falls (not just everyone leaving the fort)
 	for u: B3Unit in live("red"):
 		u.global_position = at(40, 60)     # (everyone runs off)
 	await sim(1.0)
-	check(b.modes.phase == "lost" and b.winner == "blue", "nothing left in the fort: it falls")
-	check(headline().contains("The fort fell on wave 2"), "🌊 The fort fell on wave 2! (%s)" % headline())
+	check(b.modes.phase == "wave" and b.winner == "", "everyone out of the fort: it hasn't fallen (the keep's what counts)")
+	b.modes.keep_hp = 1.0
+	b.modes.hurt_keep(5.0)
+	await sim(0.5)
+	check(b.modes.phase == "lost" and b.winner == "blue", "the keep falls: the fort's lost")
+	check(headline().contains("The keep fell on wave 2"), "🚩 The keep fell on wave 2! (%s)" % headline())
 	check(b.ui.score_card.visible, "🏆 with the scoreboard")
 	# ⏮ Play it again: the fort as it was at Fight!
 	b.ui.again_btn.pressed.emit()
@@ -439,6 +643,13 @@ func _waves_play() -> void:
 	check(not b.fighting and b.modes.phase == "build" and b.modes.wave == 0 and live("blue").is_empty(), "⏮ back to before wave 1")
 	check(b.budget == budget0 and b.spent == spent0 and live("red").size() == n_red, "with the points and the fort you had (%d/%d, %d fighters)" % [b.points_left(), b.budget, live("red").size()])
 	check(b.ready_id == "waves" and b.build_zone == B3Modes.FORT, "still Wave Defense")
+	var mg: Array = live("red").filter(func(u: B3Unit) -> bool: return u.kind == "mgnest")
+	var left0: int = b.points_left()
+	if not mg.is_empty():
+		b.remove_unit(mg[0])
+	check(mg.size() == 1 and b.points_left() == left0 + B3Defs.cost("mgnest"), "⏮ what you bought is yours to erase for its points back (%d → %d)" % [left0, b.points_left()])
+	b.tools.place_id = "mgnest"
+	b.tools._place(at(-3, 4), at(-3, 4), false, false)
 	b.toggle_play()
 	await sim(0.5)
 	check(b.modes.wave == 1 and live("blue").size() == 6, "and Fight! starts wave 1 again")
@@ -446,6 +657,185 @@ func _waves_play() -> void:
 	b.run_ready("skirmish")
 	await sim(0.5)
 	check(b.budget < 0 and b.modes.kind == "" and not b.ui.coin_lbl.visible and b.zone_vis == null, "picking another battle: everything's free again")
+	check(b.modes.keep_node == null, "and the keep goes away")
+
+
+func _waves_keep() -> void:
+	print("🚩 the Fort Keep")
+	await fresh()
+	b.run_ready("waves")
+	await sim(0.6)
+	var m = b.modes
+	var kp: Vector3 = m.keep_pos
+	check(is_instance_valid(m.keep_node) and m.keep_up and m.keep_hp == m.keep_max and B3Modes.FORT.has_point(Vector2(kp.x, kp.z)),
+		"a 🚩 Fort Keep at the back of the fort, at full health (%d ❤️)" % int(m.keep_hp))
+	check(m._keep_bar != null and m._keep_bar.visible, "with a health bar over it")
+	var hud = b.ui.mode_hud
+	check(hud.visible and hud._bars.has("red") and String((hud._names["red"] as Label).text).contains("Keep")
+		and (hud._bars["red"] as ProgressBar).value > 99.0, "and in the panel")
+	var hit: Dictionary = b.raycast(kp + Vector3(0, 12, 0), kp - Vector3(0, 1, 0), B3Defs.L_STRUCT)
+	check(not hit.is_empty() and float((hit.position as Vector3).y) > kp.y + 4.0, "it's solid: things stand on top of it")
+	var blocked := false
+	for s: B3Struct in b.structs:
+		if Vector2(s.position.x - kp.x, s.position.z - kp.z).length() < B3Modes.KEEP_R + 1.0:
+			blocked = true
+	check(not blocked, "(nothing of the starting fort is built on it)")
+	var on_keep := Vector3(kp.x + 1.0, kp.y, kp.z)
+	check(b.can_place("wall", on_keep) != "" and b.can_place("lava", on_keep) != "" and b.can_place("soldier", on_keep) == "",
+		"walls and pools can't go on the keep (fighters can)")
+	b.ui.mode_hud.press_next()
+	Engine.time_scale = SPEED
+	await sim(0.5)
+	check(b.modes.phase == "wave", "(wave 1)")
+	# your whole army out of the fort (flying, riding out to flank): it holds
+	for u: B3Unit in live("red"):
+		u.global_position = at(40.0 + randf() * 4.0, 60.0 + randf() * 4.0)
+	await sim(1.5)
+	check(m.phase == "wave" and b.winner == "", "everyone out of the fort (a plane, a ride round the side): no \"The fort fell!\"")
+	# the attackers' booms hurt it; yours don't
+	var h0: float = m.keep_hp
+	b.explode(kp + Vector3(0, 1.0, -3.2), 3.5, 6.0, 80.0, {"team": "red"})
+	check(m.keep_hp == h0, "your own booms don't hurt the keep")
+	b.explode(kp + Vector3(0, 1.0, -3.2), 3.5, 6.0, 80.0, {"team": "blue"})
+	check(m.keep_hp < h0, "the attackers' booms do (%d → %d)" % [int(h0), int(m.keep_hp)])
+	# attackers with nobody to fight close by hit it
+	var foes := live("blue")
+	for i in 3:
+		var u: B3Unit = foes[i]
+		u.global_position = at(kp.x + (i - 1) * 1.6, kp.z - B3Modes.KEEP_R - 1.0)
+	var h1: float = m.keep_hp
+	await sim(3.0)
+	check(m.keep_hp < h1 - 20.0, "attackers at the keep bash it (%d → %d)" % [int(h1), int(m.keep_hp)])
+	await sim(0.3)
+	check((hud._bars["red"] as ProgressBar).value < 99.0, "...and its bar goes down (%.0f%%)" % (hud._bars["red"] as ProgressBar).value)
+	# far-off attackers walk to it
+	var far: B3Unit = foes[4]
+	var fd0 := Vector2(far.position.x - kp.x, far.position.z - kp.z).length()
+	await sim(3.0)
+	var fd1 := Vector2(far.position.x - kp.x, far.position.z - kp.z).length() if is_instance_valid(far) else 0.0
+	check(fd1 < fd0 - 5.0, "the others march on the keep (%.0f → %.0f m)" % [fd0, fd1])
+	# it falls: a defeat, not a victory
+	var keep_st: Dictionary = Settings.stickers.duplicate()
+	Settings.stickers.erase("b3win")
+	Settings.stickers.erase("general")
+	var ev0: int = b._events.size()
+	m.keep_hp = 3.0
+	m.hurt_keep(10.0)
+	await sim(0.3)
+	check(m.phase == "lost" and not m.keep_up and b.winner == "blue", "the keep falls: the fort's lost")
+	check(headline().contains("The keep fell on wave 1"), "🚩 The keep fell on wave 1! (%s)" % headline())
+	check(b._events.size() <= ev0 + 1, "no fireworks or confetti (%d → %d things waiting)" % [ev0, b._events.size()])
+	check(not Settings.stickers.has("b3win") and not Settings.stickers.has("general"), "no 🏆 Victory or 🎖️ General sticker for losing")
+	var red_cheer := live("red").filter(func(u: B3Unit) -> bool: return u.cheer).size()
+	var blue_cheer := live("blue").filter(func(u: B3Unit) -> bool: return u.cheer).size()
+	check(red_cheer == 0 and blue_cheer > 0, "the attackers cheer, your side doesn't (%d, %d)" % [blue_cheer, red_cheer])
+	await sim(1.5)
+	check(m._keep_fall >= 0.99 and m._keep_tower.scale.y < 0.5, "it crumbles into a heap, flag down")
+	Settings.stickers = keep_st
+	# ⏮ Play it again: a new keep
+	b.ui.again_btn.pressed.emit()
+	await sim(0.6)
+	check(m.phase == "build" and m.keep_up and m.keep_hp == m.keep_max and is_instance_valid(m.keep_node) and m._keep_fall < 0.0,
+		"⏮ Play it again: the keep's back up, good as new")
+
+
+func _waves_more() -> void:
+	print("🌊 points, the next wave, patching up, refunds")
+	check(B3Modes.bounty("stick") == 1 and B3Modes.bounty("soldier") == 1 and B3Modes.bounty("tank") == 7 and B3Modes.bounty("plane") == 7,
+		"🪙 knock-outs pay half the attacker's price: a stick figure 1, a tank or plane 7")
+	check(B3Modes.bounty("giant", true) == 10 and B3Modes.bounty("dragon", true) == 15, "a boss at least 10 (a dragon 15)")
+	await fresh()
+	b.run_ready("waves")
+	await sim(0.6)
+	var hud = b.ui.mode_hud
+	var first: Array = B3Modes.wave_preview(1)
+	check(hud.preview.visible and String(hud.prev_title.text).contains(String(B3Modes.wave_def(1).name))
+		and String(hud.prev_line.text).contains("%s×%d" % [first[0][0], first[0][1]]),
+		"👀 before wave 1 the panel shows what's coming (%s)" % String(hud.prev_line.text))
+	# buy one now (it'll fight in wave 1)
+	b.tools.place_id = "soldier"
+	b.tools._place(at(-2, 10), at(-2, 10), false, false)
+	var old: B3Unit = live("red").filter(func(u: B3Unit) -> bool: return u.has_meta("cost"))[0]
+	b.ui.mode_hud.press_next()
+	Engine.time_scale = SPEED
+	await sim(0.5)
+	check(not hud.preview.visible, "(not during the wave)")
+	# 🛡️ the attackers are hands-off
+	var foe: B3Unit = live("blue")[0]
+	check(b.modes.keeps(foe) and not b.modes.keeps(live("red")[0]), "🛡️ the attackers can't be erased, changed, grabbed or played (B3Modes.keeps)")
+	if b.has_method("hands_off"):
+		var ok := true
+		for what in ["erase", "team", "launch", "play", "grab"]:
+			ok = ok and String(b.hands_off(foe, what)) != ""
+		check(ok, "...the Eraser, the Inspector, 🎮 Play as and ✋ Grab say no")
+	# attackers turned red somehow don't count, and the wave still ends
+	var foes := live("blue")
+	for i in 3:
+		(foes[i] as B3Unit).set_team("red")
+	await sim(0.3)
+	check(b.modes.left == foes.size() - 3 and not b.modes.keeps(foes[0]), "three attackers turned red: %d left, not %d" % [b.modes.left, foes.size()])
+	# hurt: a defender and the keep (patched up after the wave)
+	var hurt: B3Unit = live("red").filter(func(u: B3Unit) -> bool: return u.kind == "knight")[0]
+	hurt.hp = hurt.max_hp * 0.3
+	b.modes.keep_hp = 1000.0
+	var budget0: int = b.budget
+	for u: B3Unit in live("blue"):
+		ko(u, live("red")[0])
+	await sim(1.0)
+	check(b.modes.phase == "break", "knocking out the real ones ends the wave (no getting stuck)")
+	check(b.budget == budget0 + (foes.size() - 3) + B3Modes.wave_bonus(1), "🪙 only the real attackers pay (%d, want %d)" % [b.budget, budget0 + foes.size() - 3 + B3Modes.wave_bonus(1)])
+	check(is_instance_valid(hurt) and hurt.hp >= hurt.max_hp * 0.59, "💚 your fighters still standing get 30%% of their health back (30%% → %.0f%%, with the medic's help)" % (hurt.hp / hurt.max_hp * 100.0))
+	check(absf(b.modes.keep_hp - (1000.0 + B3Modes.KEEP_HP * B3Modes.KEEP_FIX)) < 1.0, "and the keep's mended a bit (%d)" % int(b.modes.keep_hp))
+	await sim(0.3)
+	var nxt: Array = B3Modes.wave_preview(2)
+	check(hud.preview.visible and String(hud.prev_title.text).contains(String(B3Modes.wave_def(2).name))
+		and String(hud.prev_line.text).contains("%s×%d" % [nxt[0][0], nxt[0][1]]), "👀 the break shows what wave 2 brings (%s)" % String(hud.prev_line.text))
+	# 🪙 refunds in the break: for what you just bought, not what's fought
+	var pts: int = b.points_left()
+	b.tools._place(at(3, 10), at(3, 10), false, false)
+	var fresh_buy: Array = live("red").filter(func(u: B3Unit) -> bool: return u.has_meta("cost") and not u.has_meta("fought"))
+	check(fresh_buy.size() == 1 and b.points_left() == pts - 2, "(bought a soldier in the break)")
+	b.remove_unit(fresh_buy[0])
+	check(b.points_left() == pts, "erasing it in the break gives its points back")
+	b.remove_unit(old)
+	check(b.points_left() == pts, "...but not for one that's already fought a wave")
+	# ▶ Next wave while paused
+	b.set_paused(true)
+	hud.press_next()
+	check(b.modes.phase == "wave" and b.modes.wave == 2 and not b.paused, "▶ Next wave works while paused (and un-pauses)")
+	Engine.time_scale = SPEED
+	await sim(0.3)
+
+
+func _waves_net() -> void:
+	print("🌊 friends see the keep")
+	await fresh()
+	b.run_ready("waves")
+	await sim(0.4)
+	var st: Array = b.modes.net_state()
+	check(st.size() == 9 and int(st[8]) == 1 and B3Modes._net_ok("waves", st), "the snapshot has the keep: where, its health, standing")
+	# a friend's copy (on its own, in this battle)
+	var f := B3Modes.new()
+	f.battle = b
+	f.apply_net(st)
+	check(f.kind == "waves" and is_instance_valid(f.keep_node) and f.keep_up and f.keep_node.position.distance_to(b.modes.keep_pos) < 0.01,
+		"a friend's screen builds the keep where the host's is")
+	st[6] = 0.4
+	f.apply_net(st)
+	check(absf(f.keep_hp / f.keep_max - 0.4) < 0.01, "with its health")
+	st[6] = 0.0
+	st[8] = 2
+	f.apply_net(st)
+	check(not f.keep_up and f._keep_fall >= 0.0, "and it crumbles when the host's falls")
+	var junk := st.duplicate()
+	junk[7] = Vector3(NAN, 0, 0)
+	check(not B3Modes._net_ok("waves", junk), "🛡️ a broken keep from a \"host\" is ignored")
+	junk = st.duplicate()
+	junk[6] = "lots"
+	check(not B3Modes._net_ok("waves", junk), "(and broken health)")
+	f.apply_net([""])
+	check(f.keep_node == null, "leaving Wave Defense takes it away")
+	f.free()
 
 
 func _waves_first_person() -> void:

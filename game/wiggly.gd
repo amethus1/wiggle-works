@@ -438,6 +438,7 @@ func use_special() -> void:
 			world.fx_event("special", {"p": com, "k": kind, "r": radius()})
 		"twinkle":
 			var to: Vector2 = world.random_open_spot(com)
+			world.warp_fighters(com, 170.0 * size)   # fighters close by get warped too: up into the air!
 			world.fx_event("warp", {"a": com, "b": to, "r": radius()})
 			teleport(to)
 

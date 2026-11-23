@@ -223,6 +223,10 @@ const BUILDS := [
 	{"id": "rocket_cart", "name": "Rocket Cart", "desc": "A go-kart with rockets. Flip the switch!"},
 	{"id": "domino", "name": "Domino Run", "desc": "Push the first one…"},
 	{"id": "lamp_show", "name": "Light Show", "desc": "A timer blinking three lamps."},
+	# 🔌 Battle Trap Builds: ready-made wired traps
+	{"id": "trap_minefield", "name": "Minefield", "desc": "Step on the plate and every mine wired to it goes BOOM!"},
+	{"id": "disarm_gate", "name": "Disarm Gate", "desc": "Walk under the magnet and it yanks swords and guns away!"},
+	{"id": "ufo_abductor", "name": "UFO Abductor", "desc": "Step on the plate and the saucer beams you up!"},
 ]
 
 const CATEGORY_ORDER := ["People", "Animals", "Dinos", "Weapons", "Armor", "Booms", "Hazards", "Platforms", "Wigglies", "Balls", "Blocks", "Machines", "Rides", "Builds"]

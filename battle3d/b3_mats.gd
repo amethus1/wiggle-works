@@ -45,12 +45,15 @@ static func mat(c: Color, rough := 0.75, metal := 0.0) -> StandardMaterial3D:
 ## skin share their merged meshes. Only those meshes use it: every mesh with
 ## its own values takes room in a buffer the renderer has a limit for (see
 ## project.godot, rendering/limits/global_shader_variables/buffer_size).
-static func rig_mat(look := "", per_mesh := false) -> ShaderMaterial:
-	var key := "rig_%s%s" % [look, "_pm" if per_mesh else ""]
+## `mixed`: for meshes where only some pieces cast a shadow (the others carry
+## +2 on their roughness, and the shadow is drawn without them); the rest
+## keep the renderer's quicker way of drawing shadows.
+static func rig_mat(look := "", per_mesh := false, mixed := false) -> ShaderMaterial:
+	var key := "rig_%s%s%s" % [look, "_pm" if per_mesh else "", "_mix" if mixed else ""]
 	var m: ShaderMaterial = _mats.get(key)
 	if m == null:
 		m = ShaderMaterial.new()
-		m.shader = shader("rig_pm" if per_mesh else "rig")
+		m.shader = shader(("rig_pm" if per_mesh else "rig") + ("_mix" if mixed else ""))
 		match look:
 			"ko":
 				m.set_shader_parameter("grey", 0.55)
@@ -59,8 +62,15 @@ static func rig_mat(look := "", per_mesh := false) -> ShaderMaterial:
 				m.set_shader_parameter("grey", 0.6)
 				m.set_shader_parameter("dark", 0.35)
 		m.set_meta("rig_pm", per_mesh)
+		m.set_meta("rig_mix", mixed)
+		m.set_meta("rig_look", look)
 		_mats[key] = m
 	return m
+
+
+## The same kind of merged-piece material as `m` (rig_mat), with another look.
+static func rig_relook(m: Material, look: String) -> ShaderMaterial:
+	return rig_mat(look, bool(m.get_meta("rig_pm", false)), bool(m.get_meta("rig_mix", false)))
 
 
 ## Glowing (HDR) material: lava, lasers, muzzle flashes, lights.
@@ -122,7 +132,7 @@ static func ko(m: Material) -> Material:
 	if k != null:
 		return k
 	if m is ShaderMaterial and m.has_meta("rig_pm"):
-		k = rig_mat("ko", bool(m.get_meta("rig_pm")))
+		k = rig_relook(m, "ko")
 	elif m is StandardMaterial3D and (m as StandardMaterial3D).shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL:
 		var src := m as StandardMaterial3D
 		var c := src.albedo_color
@@ -274,6 +284,407 @@ static func add(parent: Node3D, mesh: Mesh, m: Material, pos := Vector3.ZERO, ro
 	return mi
 
 
+# ------------------------------------------------------ primitive arrays
+## The surface arrays (positions, normals, indices: all B3Rig and B3World
+## merge) of a primitive mesh, worked out here the same way Godot makes
+## them (test_maps checks they match). Asking the mesh itself
+## (surface_get_arrays) reads them back from the graphics card: with a few
+## hundred kinds of pieces, that made the first big army take about a fifth
+## of a second longer to set up. Empty for any other kind of mesh.
+static func prim_arrays(m: Mesh) -> Array:
+	if m is PrimitiveMesh and (m as PrimitiveMesh).flip_faces:
+		return []
+	var v := PackedVector3Array()
+	var n := PackedVector3Array()
+	var ix := PackedInt32Array()
+	if m is SphereMesh:
+		var s := m as SphereMesh
+		_p_sphere(v, n, ix, s.radius, s.height, s.radial_segments, s.rings, s.is_hemisphere)
+	elif m is CapsuleMesh:
+		var c := m as CapsuleMesh
+		_p_capsule(v, n, ix, c.radius, c.height, c.radial_segments, c.rings)
+	elif m is CylinderMesh:
+		var y := m as CylinderMesh
+		_p_cyl(v, n, ix, y.top_radius, y.bottom_radius, y.height, y.radial_segments, y.rings, y.cap_top, y.cap_bottom)
+	elif m is BoxMesh:
+		var b := m as BoxMesh
+		if b.subdivide_width != 0 or b.subdivide_height != 0 or b.subdivide_depth != 0:
+			return []
+		_p_box(v, n, ix, b.size)
+	elif m is TorusMesh:
+		var t := m as TorusMesh
+		_p_torus(v, n, ix, t.inner_radius, t.outer_radius, t.rings, t.ring_segments)
+	elif m is PrismMesh:
+		var p := m as PrismMesh
+		if p.subdivide_width != 0 or p.subdivide_height != 0 or p.subdivide_depth != 0:
+			return []
+		_p_prism(v, n, ix, p.size, p.left_to_right)
+	else:
+		return []
+	var a := []
+	a.resize(Mesh.ARRAY_MAX)
+	a[Mesh.ARRAY_VERTEX] = v
+	a[Mesh.ARRAY_NORMAL] = n
+	a[Mesh.ARRAY_INDEX] = ix
+	return a
+
+
+static func _p_quads(ix: PackedInt32Array, prevrow: int, thisrow: int, i: int) -> void:
+	ix.append(prevrow + i - 1)
+	ix.append(prevrow + i)
+	ix.append(thisrow + i - 1)
+	ix.append(prevrow + i)
+	ix.append(thisrow + i)
+	ix.append(thisrow + i - 1)
+
+
+static func _p_sphere(v: PackedVector3Array, n: PackedVector3Array, ix: PackedInt32Array, radius: float, height: float, segs: int, rings: int, hemi: bool) -> void:
+	var scale := height * (1.0 if hemi else 0.5)
+	var point := 0
+	var thisrow := 0
+	var prevrow := 0
+	for j in rings + 2:
+		var vv := float(j) / (rings + 1)
+		var w := 0.0
+		var y := -1.0
+		if j != rings + 1:
+			w = sin(PI * vv)
+			y = cos(PI * vv)
+		for i in segs + 1:
+			var u := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = sin(u * TAU)
+				z = cos(u * TAU)
+			if hemi and y < 0.0:
+				v.append(Vector3(x * radius * w, 0.0, z * radius * w))
+				n.append(Vector3(0.0, -1.0, 0.0))
+			else:
+				v.append(Vector3(x * radius * w, scale * y, z * radius * w))
+				n.append(Vector3(x * w * scale, radius * y, z * w * scale).normalized())
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads(ix, prevrow, thisrow, i)
+		prevrow = thisrow
+		thisrow = point
+
+
+static func _p_capsule(v: PackedVector3Array, n: PackedVector3Array, ix: PackedInt32Array, radius: float, height: float, segs: int, rings: int) -> void:
+	var point := 0
+	var thisrow := 0
+	var prevrow := 0
+	# top hemisphere
+	for j in rings + 2:
+		var vv := float(j) / (rings + 1)
+		var w := 1.0
+		var y := 0.0
+		if j != rings + 1:
+			w = sin(0.5 * PI * vv)
+			y = cos(0.5 * PI * vv)
+		for i in segs + 1:
+			var u := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = -sin(u * TAU)
+				z = cos(u * TAU)
+			var p := Vector3(x * w, y, -z * w)
+			v.append(p * radius + Vector3(0.0, 0.5 * height - radius, 0.0))
+			n.append(p)
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads(ix, prevrow, thisrow, i)
+		prevrow = thisrow
+		thisrow = point
+	# cylinder
+	thisrow = point
+	prevrow = 0
+	for j in rings + 2:
+		var vv := float(j) / (rings + 1)
+		var y := (0.5 * height - radius) - (height - 2.0 * radius) * vv
+		for i in segs + 1:
+			var u := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = -sin(u * TAU)
+				z = cos(u * TAU)
+			v.append(Vector3(x * radius, y, -z * radius))
+			n.append(Vector3(x, 0.0, -z))
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads(ix, prevrow, thisrow, i)
+		prevrow = thisrow
+		thisrow = point
+	# bottom hemisphere
+	thisrow = point
+	prevrow = 0
+	for j in rings + 2:
+		var vv := float(j) / (rings + 1)
+		var w := 0.0
+		var y := -1.0
+		if j != rings + 1:
+			w = cos(0.5 * PI * vv)
+			y = -sin(0.5 * PI * vv)
+		for i in segs + 1:
+			var u := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = -sin(u * TAU)
+				z = cos(u * TAU)
+			var p := Vector3(x * w, y, -z * w)
+			v.append(p * radius + Vector3(0.0, -0.5 * height + radius, 0.0))
+			n.append(p)
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads(ix, prevrow, thisrow, i)
+		prevrow = thisrow
+		thisrow = point
+
+
+static func _p_cyl(v: PackedVector3Array, n: PackedVector3Array, ix: PackedInt32Array, top: float, bottom: float, height: float, segs: int, rings: int, cap_top: bool, cap_bottom: bool) -> void:
+	var point := 0
+	var thisrow := 0
+	var prevrow := 0
+	var side_y := (bottom - top) / height
+	for j in rings + 2:
+		var vv := float(j) / (rings + 1)
+		var radius := top + (bottom - top) * vv
+		var y := height * 0.5 - height * vv
+		for i in segs + 1:
+			var u := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = sin(u * TAU)
+				z = cos(u * TAU)
+			v.append(Vector3(x * radius, y, z * radius))
+			n.append(Vector3(x, side_y, z).normalized())
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads(ix, prevrow, thisrow, i)
+		prevrow = thisrow
+		thisrow = point
+	if cap_top and top > 0.0:
+		var y := height * 0.5
+		thisrow = point
+		v.append(Vector3(0.0, y, 0.0))
+		n.append(Vector3(0.0, 1.0, 0.0))
+		point += 1
+		for i in segs + 1:
+			var r := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = sin(r * TAU)
+				z = cos(r * TAU)
+			v.append(Vector3(x * top, y, z * top))
+			n.append(Vector3(0.0, 1.0, 0.0))
+			point += 1
+			if i > 0:
+				ix.append(thisrow)
+				ix.append(point - 1)
+				ix.append(point - 2)
+	if cap_bottom and bottom > 0.0:
+		var y := height * -0.5
+		thisrow = point
+		v.append(Vector3(0.0, y, 0.0))
+		n.append(Vector3(0.0, -1.0, 0.0))
+		point += 1
+		for i in segs + 1:
+			var r := float(i) / segs
+			var x := 0.0
+			var z := 1.0
+			if i != segs:
+				x = sin(r * TAU)
+				z = cos(r * TAU)
+			v.append(Vector3(x * bottom, y, z * bottom))
+			n.append(Vector3(0.0, -1.0, 0.0))
+			point += 1
+			if i > 0:
+				ix.append(thisrow)
+				ix.append(point - 2)
+				ix.append(point - 1)
+
+
+static func _p_box(v: PackedVector3Array, n: PackedVector3Array, ix: PackedInt32Array, size: Vector3) -> void:
+	var s := size * -0.5
+	var point := 0
+	# front + back
+	var thisrow := point
+	var prevrow := 0
+	var y := s.y
+	for j in 2:
+		var x := s.x
+		for i in 2:
+			v.append(Vector3(x, -y, -s.z))
+			n.append(Vector3(0, 0, 1))
+			point += 1
+			v.append(Vector3(-x, -y, s.z))
+			n.append(Vector3(0, 0, -1))
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads2(ix, prevrow, thisrow, i * 2)
+			x += size.x
+		y += size.y
+		prevrow = thisrow
+		thisrow = point
+	# left + right
+	y = s.y
+	thisrow = point
+	prevrow = 0
+	for j in 2:
+		var z := s.z
+		for i in 2:
+			v.append(Vector3(-s.x, -y, -z))
+			n.append(Vector3(1, 0, 0))
+			point += 1
+			v.append(Vector3(s.x, -y, z))
+			n.append(Vector3(-1, 0, 0))
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads2(ix, prevrow, thisrow, i * 2)
+			z += size.z
+		y += size.y
+		prevrow = thisrow
+		thisrow = point
+	# top + bottom
+	var zz := s.z
+	thisrow = point
+	prevrow = 0
+	for j in 2:
+		var x := s.x
+		for i in 2:
+			v.append(Vector3(-x, -s.y, -zz))
+			n.append(Vector3(0, 1, 0))
+			point += 1
+			v.append(Vector3(x, s.y, -zz))
+			n.append(Vector3(0, -1, 0))
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads2(ix, prevrow, thisrow, i * 2)
+			x += size.x
+		zz += size.z
+		prevrow = thisrow
+		thisrow = point
+
+
+static func _p_quads2(ix: PackedInt32Array, prevrow: int, thisrow: int, i2: int) -> void:
+	ix.append(prevrow + i2 - 2)
+	ix.append(prevrow + i2)
+	ix.append(thisrow + i2 - 2)
+	ix.append(prevrow + i2)
+	ix.append(thisrow + i2)
+	ix.append(thisrow + i2 - 2)
+	ix.append(prevrow + i2 - 1)
+	ix.append(prevrow + i2 + 1)
+	ix.append(thisrow + i2 - 1)
+	ix.append(prevrow + i2 + 1)
+	ix.append(thisrow + i2 + 1)
+	ix.append(thisrow + i2 - 1)
+
+
+static func _p_torus(v: PackedVector3Array, n: PackedVector3Array, ix: PackedInt32Array, inner: float, outer: float, rings: int, segs: int) -> void:
+	var lo := minf(inner, outer)
+	var hi := maxf(inner, outer)
+	var radius := (hi - lo) * 0.5
+	for i in rings + 1:
+		var prevrow := (i - 1) * (segs + 1)
+		var thisrow := i * (segs + 1)
+		var inci := float(i) / rings
+		var angi := inci * TAU
+		var ni := Vector2(0.0, -1.0) if i == rings else Vector2(-sin(angi), -cos(angi))
+		for j in segs + 1:
+			var incj := float(j) / segs
+			var angj := incj * TAU
+			var nj := Vector2(-1.0, 0.0) if j == segs else Vector2(-cos(angj), sin(angj))
+			var nk := nj * radius + Vector2(lo + radius, 0)
+			v.append(Vector3(ni.x * nk.x, nk.y, ni.y * nk.x))
+			n.append(Vector3(ni.x * nj.x, nj.y, ni.y * nj.x))
+			if i > 0 and j > 0:
+				ix.append(thisrow + j - 1)
+				ix.append(prevrow + j)
+				ix.append(prevrow + j - 1)
+				ix.append(thisrow + j - 1)
+				ix.append(thisrow + j)
+				ix.append(prevrow + j)
+
+
+static func _p_prism(v: PackedVector3Array, n: PackedVector3Array, ix: PackedInt32Array, size: Vector3, ltr: float) -> void:
+	var s := size * -0.5
+	var point := 0
+	# front + back
+	var y := s.y
+	var thisrow := point
+	var prevrow := 0
+	for j in 2:
+		var scale := float(j)
+		var ssx := size.x * scale
+		var start_x := s.x + (1.0 - scale) * size.x * ltr
+		var x := 0.0
+		for i in 2:
+			v.append(Vector3(start_x + x, -y, -s.z))
+			n.append(Vector3(0, 0, 1))
+			point += 1
+			v.append(Vector3(start_x + ssx - x, -y, s.z))
+			n.append(Vector3(0, 0, -1))
+			point += 1
+			if i > 0 and j == 1:
+				var i2 := i * 2
+				ix.append(prevrow + i2)
+				ix.append(thisrow + i2)
+				ix.append(thisrow + i2 - 2)
+				ix.append(prevrow + i2 + 1)
+				ix.append(thisrow + i2 + 1)
+				ix.append(thisrow + i2 - 1)
+			x += scale * size.x
+		y += size.y
+		prevrow = thisrow
+		thisrow = point
+	# left + right
+	var nl := Vector3(-size.y, size.x * ltr, 0.0).normalized()
+	var nr := Vector3(size.y, size.x * (1.0 - ltr), 0.0).normalized()
+	y = s.y
+	thisrow = point
+	prevrow = 0
+	for j in 2:
+		var scale := float(j)
+		var left := s.x + size.x * ltr * (1.0 - scale)
+		var right := left + size.x * scale
+		var z := s.z
+		for i in 2:
+			v.append(Vector3(right, -y, -z))
+			n.append(nr)
+			point += 1
+			v.append(Vector3(left, -y, z))
+			n.append(nl)
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads2(ix, prevrow, thisrow, i * 2)
+			z += size.z
+		y += size.y
+		prevrow = thisrow
+		thisrow = point
+	# bottom
+	var zz := s.z
+	thisrow = point
+	prevrow = 0
+	for j in 2:
+		var x := s.x
+		for i in 2:
+			v.append(Vector3(x, s.y, -zz))
+			n.append(Vector3(0, -1, 0))
+			point += 1
+			if i > 0 and j > 0:
+				_p_quads(ix, prevrow, thisrow, i)
+			x += size.x
+		zz += size.z
+		prevrow = thisrow
+		thisrow = point
+
+
 # ----------------------------------------------------------------- shaders
 static func shader(id: String) -> Shader:
 	var s: Shader = _shaders.get(id)
@@ -291,10 +702,13 @@ static func shader(id: String) -> Shader:
 			s.code = RING_SHADER
 		"cloud":
 			s.code = CLOUD_SHADER
-		"rig":
-			s.code = RIG_SHADER
-		"rig_pm":
-			s.code = RIG_SHADER.replace("uniform float dark = 0.0;", "uniform float dark = 0.0;\ninstance uniform vec4 skin = vec4(1.0);\ninstance uniform vec4 team = vec4(1.0);").replace("vec3 c = COLOR.rgb;", "vec3 c = COLOR.a < 0.25 ? skin.rgb : (COLOR.a < 0.75 ? team.rgb * UV2.x + UV2.y : COLOR.rgb);")
+		"rig", "rig_pm", "rig_mix", "rig_pm_mix":
+			var code := RIG_SHADER
+			if id.begins_with("rig_pm"):
+				code = code.replace("uniform float dark = 0.0;", "uniform float dark = 0.0;\ninstance uniform vec4 skin = vec4(1.0);\ninstance uniform vec4 team = vec4(1.0);").replace("vec3 c = COLOR.rgb;", "vec3 c = COLOR.a < 0.25 ? skin.rgb : (COLOR.a < 0.75 ? team.rgb * UV2.x + UV2.y : COLOR.rgb);")
+			if id.ends_with("_mix"):
+				code = code.replace("void fragment() {", RIG_MIX_VERTEX + "void fragment() {").replace("ROUGHNESS = UV.x;", "ROUGHNESS = UV.x > 1.5 ? UV.x - 2.0 : UV.x;")
+			s.code = code
 	_shaders[id] = s
 	return s
 
@@ -392,7 +806,9 @@ void fragment() {
 ## B3Rig's merged pieces (see rig_mat): the same lighting as mat()'s
 ## StandardMaterial3D, with the colour (sRGB) from the vertex and the
 ## roughness and metalness from UV. grey/dark: B3Mats.ko()'s greying. (The
-## "rig_pm" copy also has the per-mesh skin and team colours.)
+## "rig_pm" copies also have the per-mesh skin and team colours, and the
+## "_mix" ones leave the pieces that cast no shadow out of the shadow:
+## RIG_MIX_VERTEX.)
 const RIG_SHADER := """
 shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
@@ -406,6 +822,15 @@ void fragment() {
 	ROUGHNESS = UV.x;
 	METALLIC = UV.y;
 	SPECULAR = UV.y > 0.0 ? 0.7 : 0.5;
+}
+"""
+
+## Pieces that cast no shadow (roughness + 2) shrink to a point while the
+## shadows are drawn, so they leave no shadow (and nothing else changes).
+const RIG_MIX_VERTEX := """void vertex() {
+	if (IN_SHADOW_PASS && UV.x > 1.5) {
+		VERTEX = vec3(0.0);
+	}
 }
 """
 

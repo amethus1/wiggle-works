@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the headless test suites. A suite fails if it exits non-zero, runs out
-# of time, or prints a SCRIPT ERROR or a parse error. Full output goes to
-# .test-logs/<suite>.log
+# of time, never prints its summary, or prints a SCRIPT ERROR, a parse error,
+# a USER ERROR (push_error) or an engine ERROR (except the harmless ones in
+# HARMLESS, like leak notes at exit). Full output goes to .test-logs/<suite>.log
 #
 #   tools/run_tests.sh                 # every suite
 #   tools/run_tests.sh update modes    # just those
@@ -9,6 +10,9 @@ set -u
 cd "$(dirname "$0")/.."
 GODOT="${GODOT:-godot}"
 LIMIT=400   # seconds per suite
+# engine messages that aren't a failure: Godot's notes about leaks at exit,
+# and ENet's note about big unreliable packets
+HARMLESS='resources still in use at exit|leaked at exit|ObjectDB instances leaked|RID allocations of type|Pages in use exist at exit|above the MTU'
 ALL="core fight battle b3more b3menu b3powers b3puzzle b3modes b3net vehicles maps history modes net toyfight update"
 suites="${*:-$ALL}"
 
@@ -53,11 +57,11 @@ for suite in $suites; do
 	log=".test-logs/$suite.log"
 	run_limited $LIMIT "$GODOT" --headless --path . -- --test=$suite >"$log" 2>&1
 	code=$?
-	# "ERROR: 1 resources still in use at exit" is Godot being chatty, not a failure
 	errs=$(grep -cE "SCRIPT ERROR|Parse Error|PARSE ERROR" "$log" || true)
+	engine=$(grep -E "^(USER )?ERROR:" "$log" | grep -cvE "$HARMLESS" || true)
 	summary=$(grep -E "^test_$suite:" "$log" | tail -1)
-	if [ $code -ne 0 ] || [ "$errs" != "0" ] || [ -z "$summary" ]; then
-		echo "FAIL  $suite  (${summary:-no summary}, exit code $code, $errs script/parse errors) — see $log"
+	if [ $code -ne 0 ] || [ "$errs" != "0" ] || [ "$engine" != "0" ] || [ -z "$summary" ]; then
+		echo "FAIL  $suite  (${summary:-no summary}, exit code $code, $errs script/parse errors, $engine other errors) — see $log"
 		failed=1
 	else
 		echo "ok    $suite  ($summary)"

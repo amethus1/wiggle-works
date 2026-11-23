@@ -35,6 +35,8 @@ var _pluses: Array[Node3D] = []
 var _plus_i := 0
 var _rings: Array[MeshInstance3D] = []
 var _ring_i := 0
+var _wades: Array[MeshInstance3D] = []     # splash rings round fighters in water (their own, so blasts keep theirs)
+var _wade_i := 0
 var _dust: Array[CPUParticles3D] = []
 var _num_budget := 0.0
 var _beams: Array[MeshInstance3D] = []
@@ -134,6 +136,14 @@ func _ready() -> void:
 		r.visible = false
 		add_child(r)
 		_rings.append(r)
+	for i in 24:
+		var r := MeshInstance3D.new()
+		r.mesh = B3Mats.torus(0.8, 1.0)      # (a chunkier ring than a blast's)
+		r.material_override = B3Mats.shader_mat("ring")
+		r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		r.visible = false
+		add_child(r)
+		_wades.append(r)
 	_make_pool("smoke", 12)
 	_make_pool("sparks", 12)
 	_make_pool("debris", 10)
@@ -145,16 +155,58 @@ func _ready() -> void:
 
 
 ## Shaders that would otherwise first turn up in the middle of a battle (the
-## nuke's cloud, lava and acid pools, the fighters' merged pieces) get an
-## unseen mesh each, so they're compiled now. On a computer that hasn't
-## compiled them before, the first nuke or pool froze the game for a moment.
+## nuke's cloud, lava and acid pools, the fighters' merged pieces, rain and
+## snow) get a copy each, so they're compiled now. On a computer that hasn't
+## compiled them before, the first nuke or pool froze the game for a moment,
+## and the first rain or snow for about half a second. Hidden copies aren't
+## enough: Godot only makes some of a mesh's pipelines (the shadows, for one)
+## the first time it's drawn, and they depend on what the mesh carries. So
+## the copies are drawn for a few frames, tiny and under the ground in the
+## middle of the view (where the shadows are drawn too), and the fighters'
+## pieces get a mesh laid out like theirs (colours and two UV sets:
+## B3Rig.sample_mesh) in each of their four materials. Rain and snow get the
+## same particles as B3Weather, one drop each.
+const PREWARM_FRAMES := 6
+var _warm: Node3D = null
+var _warm_n := 0
+
+
 func _prewarm() -> void:
-	for m: Material in [B3Mats.shader_mat("cloud"), B3Hazard.pool_mat(false), B3Mats.rig_mat(), B3Mats.rig_mat("", true)]:
+	_warm = Node3D.new()
+	_warm.name = "Prewarm"
+	_warm.scale = Vector3.ONE * 0.02
+	add_child(_warm)
+	var rig := B3Rig.sample_mesh()
+	var warm: Array = [[B3Mats.sphere(1.0, 14), B3Mats.shader_mat("cloud")], [B3Mats.sphere(1.0, 14), B3Hazard.pool_mat(false)]]
+	for pm in [false, true]:
+		for mixed in [false, true]:
+			warm.append([rig, B3Mats.rig_mat("", pm, mixed)])
+	for e in warm:
 		var w := MeshInstance3D.new()
-		w.mesh = B3Mats.sphere(1.0, 14)
-		w.material_override = m
-		w.visible = false
-		add_child(w)
+		w.mesh = e[0]
+		w.material_override = e[1]
+		_warm.add_child(w)
+	for k in ["rain", "snow"]:
+		var p := B3Weather.make_particles(k, 0.0)      # (one drop)
+		p.preprocess = 0.0
+		p.visibility_aabb = AABB(Vector3(-60, -60, -60), Vector3(120, 120, 120))
+		_warm.add_child(p)
+	_warm_n = PREWARM_FRAMES
+	_prewarm_tick()
+
+
+## Keeps the copies under the middle of the view, then drops them.
+func _prewarm_tick() -> void:
+	if _warm == null:
+		return
+	_warm_n -= 1
+	if _warm_n < 0 or battle == null or battle.cam == null or battle.world == null:
+		if _warm_n < 0:
+			_warm.queue_free()
+			_warm = null
+		return
+	var f: Vector3 = battle.cam.focus
+	_warm.global_position = Vector3(f.x, float(battle.world.height_at(f.x, f.z)) - 1.5, f.z)
 
 
 # --------------------------------------------------------------- particles
@@ -472,6 +524,27 @@ func _fx_ring(pos: Vector3, r0: float, r1: float, life: float, tint := Color(1, 
 	_add(it)
 
 
+## 💦 A cartoony splash ring spreading round someone wading through water
+## (B3World._wade; each computer makes its own, so it isn't sent to friends).
+func wade(pos: Vector3, r: float) -> void:
+	if _wades.is_empty():
+		return
+	var m := _wades[_wade_i]
+	_wade_i = (_wade_i + 1) % _wades.size()
+	m.global_position = pos
+	m.scale = Vector3(r * 0.5, 0.3, r * 0.5)
+	m.visible = true
+	m.set_instance_shader_parameter("age", 0.0)
+	m.set_instance_shader_parameter("tint", Color(0.36, 0.38, 0.4, 0.9))
+	var it := Item.new()
+	it.node = m
+	it.kind = "ring"
+	it.life = 0.75
+	it.f = r * 0.5
+	it.size = r * 1.7
+	_add(it)
+
+
 func _fx_tracer(a: Vector3, b: Vector3, col: Color, life := 0.06) -> void:
 	var l := a.distance_to(b)
 	if l < 0.05:
@@ -726,6 +799,8 @@ func _nuke_update(it: Item) -> void:
 
 # ------------------------------------------------------------------ update
 func _process(dt: float) -> void:
+	if _warm != null:
+		_prewarm_tick()
 	_num_budget = maxf(0.0, _num_budget - dt * 10.0)
 	if dt <= 0.0:
 		return
@@ -810,6 +885,9 @@ func clear() -> void:
 	_owner.clear()
 	for d in _decals:
 		d.visible = false
+	for c in get_children():
+		if c is B3Chute:
+			c.queue_free()      # (parachutes drifting down from the last battle)
 
 
 # ------------------------------------------------- shared with friends (👥)
@@ -973,3 +1051,26 @@ func nuke(pos: Vector3) -> void:
 	_fx_depth += 1
 	_fx_nuke(pos)
 	_fx_depth -= 1
+
+
+## 🪂 A pilot bailing out of a doomed aircraft under a little parachute in
+## the team colour `col` (B3Chute: just for show, it drifts down, lands and
+## vanishes in a puff). `vel`: how fast it pops out.
+func chute(pos: Vector3, vel: Vector3, col: Color) -> void:
+	if _fx_depth == 0 and battle and battle.net:
+		battle.net.rec_fx(["chute", pos, vel, col])
+	_fx_depth += 1
+	_fx_chute(pos, vel, col)
+	_fx_depth -= 1
+
+
+func _fx_chute(pos: Vector3, vel: Vector3, col: Color) -> void:
+	var n := 0
+	for c in get_children():
+		if c is B3Chute:
+			n += 1
+	if n >= 16:
+		return      # (a whole air show shot down at once: enough already)
+	var c := B3Chute.new()
+	add_child(c)
+	c.setup(battle, pos, vel.limit_length(30.0), col, int(pos.x * 97.0) ^ int(pos.z * 131.0) ^ int(pos.y * 17.0))

@@ -37,6 +37,8 @@ var _script_us := 0
 var _steps := 0
 var _measuring := false
 var _fixed := true               # every frame was exactly one 1/120 s step (--fixed-fps 120)
+var _blown_seen := 0
+var _blowups: Array = []         # [sim seconds, how many] each time things were thrown miles out of the world at once
 var _phys: Array[float] = []     # ms per physics step (everything)
 var _script: Array[float] = []   # ms per physics step (_physics_process scripts)
 var _frame: Array[float] = []    # ms per frame for _process and drawing
@@ -127,6 +129,9 @@ func _ready() -> void:
 			print("  %.0f s: %d fighters (%d lying still), %d toys, %d particles, %d ms since start" % [sim_t, w.fighters().size(), lying, w.toys().size(), fx.particle_count(), Time.get_ticks_msec()])
 		while not timeline.is_empty() and float(timeline[0][0]) <= sim_t:
 			(timeline.pop_front()[1] as Callable).call()
+		if w.blown > _blown_seen:
+			_blowups.append([sim_t, w.blown - _blown_seen])
+			_blown_seen = w.blown
 		step += 1
 	_measuring = false
 	await get_tree().process_frame
@@ -134,9 +139,7 @@ func _ready() -> void:
 	if args.has("shot") and DisplayServer.get_name() != "headless":
 		await RenderingServer.frame_post_draw
 		var img := get_viewport().get_texture().get_image()
-		if ProjectSettings.get_setting("rendering/viewport/hdr_2d", false):
-			img.convert(Image.FORMAT_RGBA8)
-			img.linear_to_srgb()
+		img = UI.srgb_image(img)      # (HDR viewports hand back linear half-floats)
 		img.save_png(String(args.shot))
 		print("saved ", args.shot)
 	get_tree().quit(0)
@@ -313,6 +316,11 @@ func _report(n_fighters: int, secs: float, sd: int, wid: String, fixed: bool) ->
 		for k in parts:
 			line += " %s %.2f," % [k, float(w.prof[k]) / _phys.size() / 1000.0]
 		print(line.trim_suffix(","))
+	var most: Array = [0.0, 0]
+	for e in _blowups:
+		if int(e[1]) > int(most[1]):
+			most = e
+	print("  out of the world: %d; thrown miles out in one step: %d (the most at once %d at %.1f s)" % [w.flung, w.blown, int(most[1]), float(most[0])])
 	print("  fingerprint: %s" % _fingerprint())
 	print("test_bench2d: done")
 

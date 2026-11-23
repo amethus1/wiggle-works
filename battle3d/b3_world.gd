@@ -26,6 +26,8 @@ const HALF := 192.0            # half the map width: (N - 1) * STEP / 2
 const CH := 4                  # terrain and scenery are cut into CH x CH chunks (culling)
 const CELLS := 64              # terrain cells per chunk side
 const DEEP := 0.9              # water deeper than this pushes walkers back to the shore
+const WADE := 0.12             # water deeper than this splashes round walkers (_wade) ...
+const WADE_STEPS := 20         # ... every this many physics steps
 ## Rows of the mountain ring, in metres past the map edge.
 const RING := [0.0, 5.0, 12.0, 22.0, 35.0, 52.0, 74.0, 102.0, 138.0, 182.0, 236.0, 300.0, 380.0, 480.0, 600.0, 760.0]
 ## Collision of scenery that blasts can uproot: [radius, height] (height 0 = sphere).
@@ -47,6 +49,8 @@ const DETAIL_CELL := 48.0
 ## switches back (a bit lower, so it doesn't flick to and fro at the edge).
 const DETAIL_LO_ZOOM := 95.0
 const DETAIL_LO_BACK := 90.0
+const ANIM_LOD_ZOOM := 70.0       # overhead, zoomed out past this the fighters are posed every 2nd frame (B3Rig.anim_every)
+const ANIM_LOD_ZOOM2 := 115.0     # ... and past this every 3rd
 ## Per map: fog distance (first person, by day), height of the far
 ## mountains, snow line, and the ring's mid / rock colours.
 const CFG := {
@@ -101,15 +105,20 @@ var _water_mat: ShaderMaterial
 var _ice_mat: StandardMaterial3D
 var _nodes: Array[Node] = []     # everything made for the current map
 var _detail: Array[MultiMeshInstance3D] = []     # ground detail chunks (tufts, crops...)
-var _detail_fp: Array[MultiMeshInstance3D] = []  # first person: the same in finer pieces that fade out
+var _detail_fp: Array[MultiMeshInstance3D] = []  # first person: the same in finer pieces that fade out (hidden overhead)
 var _detail_inst := {}           # kind -> its [transform, colour, ...] (for _detail_fp)
-var _detail_mm: Array[MultiMesh] = []    # _detail_fp's MultiMeshes, kept for the next time
+var _cell_kinds: Array = []      # kinds still to cut into _detail_fp's pieces (_detail_prep)
+var _cell_todo: Array = []       # [kind, [transform, colour, ...]...]: pieces still to make
+var _cell_wait := 0              # frames before starting on them (the map's just been made)
+var _waders := {}                # fighter (instance id) -> where it was at the last splash check
 var _detail_lo := false          # _detail is showing the simpler meshes (zoomed out)
 # only used while building a map
 var _d: Dictionary = {}
 var _cols := PackedColorArray()
 var _road_d := PackedFloat32Array()
 var _road_h := PackedFloat32Array()
+var _road_lo := PackedFloat32Array()    # town: the lowest street's height over each square (_stamp_road)
+var _road_n := PackedByteArray()        # town: how many streets are over it (2: two or more)
 var _road_hw := 2.8
 var _busy := PackedByteArray()
 var _bld: Array[Builder] = []
@@ -193,6 +202,38 @@ func _ready() -> void:
 	_ice_mat.albedo_color = Color("cfe6f4")
 	_ice_mat.roughness = 0.08
 	_ice_mat.metallic_specular = 0.9
+	_apply_smooth(Settings.smooth_3d)
+	Settings.smooth_3d_changed.connect(_apply_smooth)
+
+
+## Smooth edges (Settings.smooth_3d: 2x MSAA, which costs a little on slow
+## graphics cards) while 3D Battle is open, changing as the setting does.
+## Leaving puts it back off: the title screen and the 2D game draw no 3D.
+func _apply_smooth(on: bool) -> void:
+	if is_inside_tree():
+		get_viewport().msaa_3d = Viewport.MSAA_2X if on else Viewport.MSAA_DISABLED
+
+
+func _exit_tree() -> void:
+	B3Rig.anim_every = 1
+	if Settings.smooth_3d_changed.is_connected(_apply_smooth):
+		Settings.smooth_3d_changed.disconnect(_apply_smooth)
+	get_viewport().msaa_3d = Viewport.MSAA_DISABLED
+	var bt := get_parent()
+	if bt != null and bt.get("main") != null:
+		clear_cache()      # back to the title screen or the 2D game (tests keep the maps: they're quicker)
+
+
+## Drops what's kept for the next battle: the last few maps (their ground,
+## meshes and scenery, megabytes each) and the scenery meshes and pieces
+## every map shares. Called when 3D Battle closes.
+static func clear_cache() -> void:
+	_memo.clear()
+	_memo_keys.clear()
+	_kmesh.clear()
+	_prims.clear()
+	_clouds = null
+	_water_shader = null
 
 
 ## Half the width of the map in metres (the camera pans this far).
@@ -382,6 +423,13 @@ func _process(_dt: float) -> void:
 	if lo != _detail_lo:
 		_detail_lo = lo
 		_apply_lod()
+	# the first-person ground detail, a millisecond's worth a frame
+	if not (_cell_kinds.is_empty() and _cell_todo.is_empty()):
+		_cell_wait -= 1
+		if _cell_wait < 0:
+			_detail_prep(1000)
+	# zoomed far out the fighters are a few pixels tall: pose them every 2nd or 3rd frame
+	B3Rig.anim_every = 1 if v == 1 or cam.size < ANIM_LOD_ZOOM else (2 if cam.size < ANIM_LOD_ZOOM2 else 3)
 
 
 ## Zoomed right out overhead, tufts and crops are a few pixels each, and
@@ -395,63 +443,69 @@ func _apply_lod() -> void:
 
 ## Overhead: the ground detail in its big chunks. First person: in finer
 ## pieces, each fading out past DETAIL_FAR (far-off tufts and crops are a
-## pixel or two, and there are thousands of them).
+## pixel or two, and there are thousands of them). The finer pieces are made
+## a little at a time while overhead (_detail_prep), so switching to first
+## person doesn't stall (on farmland that took a frame of 20 ms or so); if
+## some aren't made yet, they are then.
 func _apply_detail() -> void:
 	var fp := _view == 1
-	if fp and _detail_fp.is_empty():
-		if _detail_mm.is_empty():
-			_detail_mm = _detail_cells()
-		for mm in _detail_mm:
-			var kind := String(mm.get_meta("kind"))
-			var far: float = DETAIL_FAR.get(kind, 100.0)
-			var mmi := MultiMeshInstance3D.new()
-			mmi.multimesh = mm
-			mmi.material_override = B3Mats.vcol()
-			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			mmi.visibility_range_end = far
-			mmi.visibility_range_end_margin = DETAIL_FADE
-			mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-			scenery.add_child(mmi)
-			_detail_fp.append(mmi)
-	elif not fp:
-		for m in _detail_fp:
-			if is_instance_valid(m):
-				m.queue_free()
-		_detail_fp.clear()
+	if fp:
+		_detail_prep(-1)
+	for m in _detail_fp:
+		if is_instance_valid(m):
+			m.visible = fp
 	for m in _detail:
 		if is_instance_valid(m):
 			m.visible = not fp
 
 
-## The ground detail cut into DETAIL_CELL squares (one MultiMesh per kind
-## and square, with meta "kind").
-func _detail_cells() -> Array[MultiMesh]:
-	var out: Array[MultiMesh] = []
+## Makes first-person ground detail pieces for up to `budget_usec`
+## microseconds (-1: all the rest): first the cells each kind is cut into,
+## then a piece (a MultiMesh, meta "kind") per kind and cell.
+func _detail_prep(budget_usec: int) -> void:
+	var t0 := Time.get_ticks_usec()
 	var n := ceili(2.0 * HALF / DETAIL_CELL)
-	for kv in _detail_inst:
-		var kind := String(kv)
-		var cells := {}
-		for ev in (_detail_inst[kv] as Array):
-			var e: Array = ev
-			var o: Transform3D = e[0]
-			var ci := Vector2i(clampi(int((o.origin.x + HALF) / DETAIL_CELL), 0, n - 1), clampi(int((o.origin.z + HALF) / DETAIL_CELL), 0, n - 1))
-			if not cells.has(ci):
-				cells[ci] = []
-			(cells[ci] as Array).append(e)
-		for ci in cells:
-			var grp: Array = cells[ci]
-			var mm := MultiMesh.new()
-			mm.transform_format = MultiMesh.TRANSFORM_3D
-			mm.use_colors = true
-			mm.mesh = kind_mesh(kind)
-			mm.instance_count = grp.size()
-			for j in grp.size():
-				var e2: Array = grp[j]
-				mm.set_instance_transform(j, e2[0])
-				mm.set_instance_color(j, e2[1])
-			mm.set_meta("kind", kind)
-			out.append(mm)
-	return out
+	while not (_cell_todo.is_empty() and _cell_kinds.is_empty()):
+		if not _cell_todo.is_empty():
+			var g: Array = _cell_todo.pop_back()
+			_detail_piece(String(g[0]), g[1])
+		else:
+			var kind := String(_cell_kinds.pop_back())
+			var cells := {}
+			for ev in (_detail_inst.get(kind, []) as Array):
+				var e: Array = ev
+				var o: Transform3D = e[0]
+				var ci := Vector2i(clampi(int((o.origin.x + HALF) / DETAIL_CELL), 0, n - 1), clampi(int((o.origin.z + HALF) / DETAIL_CELL), 0, n - 1))
+				if not cells.has(ci):
+					cells[ci] = []
+				(cells[ci] as Array).append(e)
+			for ci in cells:
+				_cell_todo.append([kind, cells[ci]])
+		if budget_usec >= 0 and Time.get_ticks_usec() - t0 > budget_usec:
+			return
+
+
+func _detail_piece(kind: String, grp: Array) -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.mesh = kind_mesh(kind)
+	mm.instance_count = grp.size()
+	for j in grp.size():
+		var e2: Array = grp[j]
+		mm.set_instance_transform(j, e2[0])
+		mm.set_instance_color(j, e2[1])
+	mm.set_meta("kind", kind)
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = B3Mats.vcol()
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.visibility_range_end = DETAIL_FAR.get(kind, 100.0)
+	mmi.visibility_range_end_margin = DETAIL_FADE
+	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	mmi.visible = _view == 1      # (made hidden, it's still ready to draw: its shaders compile now)
+	scenery.add_child(mmi)
+	_detail_fp.append(mmi)
 
 
 # ------------------------------------------------------------------ queries
@@ -532,13 +586,19 @@ func _uphill(x: float, z: float) -> Vector3:
 
 
 ## Deep water pushes walkers (and cars) back towards the shore, like a soft
-## wall. Ragdolls, flyers and things in the air aren't touched.
+## wall. Ragdolls, flyers and things in the air aren't touched. 💦 Anyone
+## walking (or driving) through water leaves a splash ring now and then
+## (just for show: every computer, a friend's too, makes its own from where
+## the fighters are).
 func _physics_process(_dt: float) -> void:
 	if waters.is_empty():
 		return
 	var bt := get_parent()
-	if bt == null or bt.get("units") == null or bt.get("puppet") == true:
+	if bt == null or bt.get("units") == null:
 		return
+	var puppet: bool = bt.get("puppet") == true
+	var fx: B3Fx = bt.get("fx")
+	var f := Engine.get_physics_frames()
 	var us: Array = bt.get("units")
 	for o in us:
 		var u := o as B3Unit
@@ -548,7 +608,10 @@ func _physics_process(_dt: float) -> void:
 		var lv := water_level_at(p.x, p.z)
 		if lv < -1e8 or p.y > lv + 0.6:
 			continue
-		if lv - height_at(p.x, p.z) < DEEP:
+		var depth := lv - height_at(p.x, p.z)
+		if depth > WADE and fx != null and (f + u.uid) % WADE_STEPS == 0:
+			_wade(u, p, lv, fx)
+		if puppet or depth < DEEP:
 			continue
 		if bool(u.def.get("boat", false)):
 			continue
@@ -559,6 +622,20 @@ func _physics_process(_dt: float) -> void:
 		var out := v.x * g.x + v.z * g.z
 		if out < 2.5:
 			u.linear_velocity = v + g * (2.5 - out)
+
+
+## 💦 A splash ring round `u` on the water (at `level`) if it's moved since
+## the last look (how far it went, not its speed: a friend's copies glide).
+func _wade(u: B3Unit, p: Vector3, level: float, fx: B3Fx) -> void:
+	var id := u.get_instance_id()
+	var last: Vector3 = _waders.get(id, p)
+	_waders[id] = p
+	if _waders.size() > 512:
+		_waders.clear()      # (the ones that left long ago)
+	var moved := Vector2(p.x - last.x, p.z - last.z).length()
+	if moved < 0.25:
+		return
+	fx.wade(Vector3(p.x, level + 0.03, p.z), u.radius * 1.2 + 0.2)
 
 
 ## The number of an uprootable tree or rock, or -1. Numbers come from where
@@ -691,7 +768,9 @@ func _instantiate(dat: Dictionary) -> void:
 	_detail.clear()
 	_detail_fp.clear()
 	_detail_inst = {}
-	_detail_mm.clear()
+	_cell_kinds = []
+	_cell_todo = []
+	_cell_wait = 30
 	_detail_lo = false       # (the new chunks start detailed; _process switches them if zoomed out)
 	heights = dat.heights
 	builtin_pools = (dat.pools as Array).duplicate(true)
@@ -801,6 +880,7 @@ func _make_instances(inst: Dictionary) -> void:
 		var shadow := not NO_SHADOW.has(kind)
 		if not shadow:
 			_detail_inst[kind] = all
+			_cell_kinds.append(kind)
 		for gv in groups:
 			var grp: Array = gv
 			if grp.is_empty():
@@ -1188,14 +1268,22 @@ func _make_heights() -> void:
 	_road_d.fill(1e6)
 	_road_h = PackedFloat32Array()
 	_road_h.resize(N * N)
+	_road_lo = PackedFloat32Array()
+	_road_n = PackedByteArray()
+	if map_id == "town":
+		_road_lo.resize(N * N)
+		_road_n.resize(N * N)
 	for rv in (_d.roads as Array):
 		_stamp_road((rv as Dictionary).pts)
 	var reach := _road_hw + 5.0
 	for k in N * N:
 		var d := _road_d[k]
 		if d < reach:
-			heights[k] = lerpf(heights[k], _road_h[k], 1.0 - smoothstep(_road_hw, reach, d))
+			var rh := _road_h[k] if _road_n.is_empty() or _road_n[k] < 2 else _road_lo[k]
+			heights[k] = lerpf(heights[k], rh, 1.0 - smoothstep(_road_hw, reach, d))
 	_road_h = PackedFloat32Array()
+	_road_lo = PackedFloat32Array()
+	_road_n = PackedByteArray()
 	for lv in (_d.lakes as Array):
 		_stamp_lake(lv)
 	for pv in (_d.pads as Array):
@@ -1396,6 +1484,8 @@ func _stamp_road(pts: PackedVector2Array) -> void:
 		hs = sm
 	var reach := _road_hw + 5.0
 	var rc := int(ceil(reach / STEP))
+	var town := map_id == "town"
+	var mine := {}      # town: square -> (distance, height) of this street over it
 	for i in n:
 		var p := pts[i]
 		var cx := roundi((p.x + HALF) / STEP)
@@ -1415,6 +1505,16 @@ func _stamp_road(pts: PackedVector2Array) -> void:
 				if d < _road_d[k]:
 					_road_d[k] = d
 					_road_h[k] = hs[i]
+				if town and d < _road_hw + 1.0:
+					var m: Vector2 = mine.get(k, Vector2(1e9, 0.0))
+					if d < m.x:
+						mine[k] = Vector2(d, hs[i])
+	# where the town's streets cross, the ground under them takes the lower
+	# one's height (_make_heights), so it can't poke up through either
+	for k in mine:
+		var h: float = (mine[k] as Vector2).y
+		_road_lo[k] = h if _road_n[k] == 0 else minf(_road_lo[k], h)
+		_road_n[k] = mini(_road_n[k] + 1, 2)
 
 
 func _stamp_lake(lk: Dictionary) -> void:
@@ -2770,8 +2870,21 @@ func _snowman(o: Transform3D) -> void:
 ## Town: road surfaces with kerbs and lane marks, and street lamps.
 func _town_streets() -> void:
 	var asphalt := Color("4a4c52")
-	for rv in (_d.roads as Array):
-		var pts: PackedVector2Array = (rv as Dictionary).pts
+	var boxes := _street_boxes()
+	var hw := _road_hw
+	for ri in (_d.roads as Array).size():
+		var pts: PackedVector2Array = ((_d.roads as Array)[ri] as Dictionary).pts
+		# where a street crosses an earlier one, only the earlier one's asphalt
+		# (and the corners of its pavement) go over the crossing: the other
+		# stops at its edge, so the two never lie in the same place (they
+		# flickered there). Pavements stop at every other street.
+		var road_cut := []
+		var pave_cut := []
+		var mark_cut := []
+		for j in boxes.size():
+			road_cut.append(hw if j < ri else 0.0)
+			pave_cut.append(0.0 if j == ri else (hw + 2.4 if j < ri else hw))
+			mark_cut.append(0.0 if j == ri else hw)
 		var i := 0
 		while i + 2 < pts.size():
 			var a := pts[i]
@@ -2780,25 +2893,39 @@ func _town_streets() -> void:
 			var dir := (b - a).normalized()
 			var bend := (pts[i - 1] - a).normalized().dot(dir) < 0.98
 			var sd := Vector2(-dir.y, dir.x)
-			var ya := height_at(a.x, a.y)
-			var yb := height_at(b.x, b.y)
-			var am := Vector3(a.x, ya + 0.05, a.y)
-			var bm := Vector3(b.x, yb + 0.05, b.y)
+			var ya := height_at(a.x, a.y) + 0.05
+			var yb := height_at(b.x, b.y) + 0.05
 			var s3 := Vector3(sd.x, 0, sd.y)
-			_bd(am).quad(am - s3 * _road_hw, am + s3 * _road_hw, bm + s3 * _road_hw, bm - s3 * _road_hw, asphalt)
-			# kerbs and pavement (not across other streets)
+			var ext := 0.3 / maxf(a.distance_to(b), 0.01)
+			for piece in _street_free(a, b, 0.0, hw, boxes, road_cut):
+				var t0: float = (piece as Vector2).x
+				var t1: float = (piece as Vector2).y
+				# a cut end tucks a little way under the street it meets (no crack between them)
+				var d0 := 0.04 if t0 > 0.0001 else 0.0
+				var d1 := 0.04 if t1 < 0.9999 else 0.0
+				t0 = maxf(0.0, t0 - ext) if d0 > 0.0 else t0
+				t1 = minf(1.0, t1 + ext) if d1 > 0.0 else t1
+				var pa: Vector2 = a.lerp(b, t0)
+				var pb: Vector2 = a.lerp(b, t1)
+				var am := Vector3(pa.x, lerpf(ya, yb, t0) - d0, pa.y)
+				var bm := Vector3(pb.x, lerpf(ya, yb, t1) - d1, pb.y)
+				_bd(am).quad(am - s3 * hw, am + s3 * hw, bm + s3 * hw, bm - s3 * hw, asphalt)
+			# kerbs and pavement
 			for sg in [-1.0, 1.0]:
-				var mid := (a + b) * 0.5 + sd * float(sg) * (_road_hw + 1.2)
-				if bend or _road_d[_k(mid.x, mid.y)] < _road_hw + 0.6:
+				if bend:
 					continue
-				var o1 := am + s3 * float(sg) * _road_hw + Vector3(0, 0.07, 0)
-				var o2 := am + s3 * float(sg) * (_road_hw + 2.4) + Vector3(0, 0.07, 0)
-				var o3 := bm + s3 * float(sg) * (_road_hw + 2.4) + Vector3(0, 0.07, 0)
-				var o4 := bm + s3 * float(sg) * _road_hw + Vector3(0, 0.07, 0)
-				_bd(am).quad(o1, o2, o3, o4, Color("b9b6ae"))
+				for piece in _street_free(a, b, float(sg) * (hw + 1.2), 1.2, boxes, pave_cut):
+					var pa: Vector2 = a.lerp(b, (piece as Vector2).x)
+					var pb: Vector2 = a.lerp(b, (piece as Vector2).y)
+					var am := Vector3(pa.x, lerpf(ya, yb, (piece as Vector2).x) + 0.07, pa.y)
+					var bm := Vector3(pb.x, lerpf(ya, yb, (piece as Vector2).y) + 0.07, pb.y)
+					_bd(am).quad(am + s3 * float(sg) * hw, am + s3 * float(sg) * (hw + 2.4), bm + s3 * float(sg) * (hw + 2.4), bm + s3 * float(sg) * hw, Color("b9b6ae"))
 			if i % 4 == 0:
-				var cm := (am + bm) * 0.5 + Vector3(0, 0.02, 0)
-				_bd(cm).add(prim("box"), Transform3D(Basis(Vector3.UP, atan2(dir.x, dir.y)) * Basis.from_scale(Vector3(0.22, 0.04, 2.0)), cm), Color("f2f0e6"))
+				var c2 := (a + b) * 0.5
+				var clear := _street_free(c2 - dir * 1.3, c2 + dir * 1.3, 0.0, 0.2, boxes, mark_cut)
+				if clear.size() == 1 and (clear[0] as Vector2) == Vector2(0, 1):      # (no marks across other streets)
+					var cm := Vector3(c2.x, (ya + yb) * 0.5 + 0.02, c2.y)
+					_bd(cm).add(prim("box"), Transform3D(Basis(Vector3.UP, atan2(dir.x, dir.y)) * Basis.from_scale(Vector3(0.22, 0.04, 2.0)), cm), Color("f2f0e6"))
 		# lamps every 24 m, alternating sides
 		var j := 6
 		var sgn := 1.0
@@ -2817,6 +2944,88 @@ func _town_streets() -> void:
 	for c in [Vector2(38, 38), Vector2(-38, 38), Vector2(38, -38), Vector2(-38, -38), Vector2(0, 38), Vector2(0, -38), Vector2(38, 0), Vector2(-38, 0)]:
 		var cv: Vector2 = c
 		_lamp(Transform3D(Basis(Vector3.UP, atan2(-cv.x, -cv.y)), Vector3(cv.x, height_at(cv.x, cv.y), cv.y)))
+
+
+## The town's streets are straight and square to the map: each as
+## [0 (along x) or 1 (along z), where it is across, from, to (along)], or []
+## for any other.
+func _street_boxes() -> Array:
+	var out := []
+	for rv in (_d.roads as Array):
+		var pts: PackedVector2Array = (rv as Dictionary).pts
+		var a := pts[0]
+		var b := pts[pts.size() - 1]
+		if absf(a.y - b.y) < 0.01:
+			out.append([0, a.y, minf(a.x, b.x), maxf(a.x, b.x)])
+		elif absf(a.x - b.x) < 0.01:
+			out.append([1, a.x, minf(a.y, b.y), maxf(a.y, b.y)])
+		else:
+			out.append([])
+	return out
+
+
+## The parts (Vector2(t0, t1), 0..1 along a->b) of a strip along a->b,
+## `off` metres to its side and `w` either way across, that no other street
+## covers: street j (boxes[j]) covers `cut[j]` metres either side of its
+## centre line, between its two ends (0: not at all). The whole strip if
+## a->b isn't square to the map.
+func _street_free(a: Vector2, b: Vector2, off: float, w: float, boxes: Array, cut: Array) -> Array:
+	var whole := [Vector2(0, 1)]
+	var ax := -1
+	if absf(a.y - b.y) < 0.001:
+		ax = 0
+	elif absf(a.x - b.x) < 0.001:
+		ax = 1
+	if ax < 0:
+		return whole
+	var d := b - a
+	var sd := Vector2(-d.y, d.x).normalized() * off
+	var across := (a.y + sd.y) if ax == 0 else (a.x + sd.x)
+	var s0 := a.x if ax == 0 else a.y
+	var s1 := b.x if ax == 0 else b.y
+	if absf(s1 - s0) < 0.001:
+		return whole
+	var gone: Array = []
+	for j in boxes.size():
+		var bx: Array = boxes[j]
+		var cw: float = cut[j]
+		if cw <= 0.0 or bx.is_empty():
+			continue
+		var lo := 0.0
+		var hi := 0.0
+		if int(bx[0]) == ax:
+			# side by side: covered where both run, if they overlap across
+			if absf(across - float(bx[1])) >= w + cw - 0.01:
+				continue
+			lo = float(bx[2])
+			hi = float(bx[3])
+		else:
+			# across it: covered over its width, if the strip is between its ends
+			if across + w <= float(bx[2]) + 0.01 or across - w >= float(bx[3]) - 0.01:
+				continue
+			lo = float(bx[1]) - cw
+			hi = float(bx[1]) + cw
+		var t0 := clampf((lo - s0) / (s1 - s0), 0.0, 1.0)
+		var t1 := clampf((hi - s0) / (s1 - s0), 0.0, 1.0)
+		if t1 < t0:
+			var tt := t0
+			t0 = t1
+			t1 = tt
+		if t1 - t0 > 0.0001:
+			gone.append(Vector2(t0, t1))
+	if gone.is_empty():
+		return whole
+	gone.sort_custom(func(p: Vector2, q: Vector2) -> bool: return p.x < q.x)
+	var out := []
+	var t := 0.0
+	for g in gone:
+		var gv: Vector2 = g
+		if gv.x - t > 0.005:
+			out.append(Vector2(t, gv.x))
+		t = maxf(t, gv.y)
+	if 1.0 - t > 0.005:
+		out.append(Vector2(t, 1.0))
+	return out
 
 
 func _lamp(o: Transform3D) -> void:
@@ -2938,7 +3147,9 @@ static func prim(key: String) -> Array:
 			cp.radial_segments = 10
 			cp.rings = 3
 			m = cp
-	a = m.get_mesh_arrays()
+	a = B3Mats.prim_arrays(m)      # (not m.get_mesh_arrays(): that reads them back from the graphics card)
+	if a.is_empty():
+		a = m.get_mesh_arrays()
 	_prims[key] = a
 	return a
 

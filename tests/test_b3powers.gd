@@ -128,6 +128,11 @@ func _ready() -> void:
 	await _roar()
 	await _friends()
 	await _tab()
+	await _shield_rhythm()
+	await _gorilla_fp()
+	await _scope_down()
+	await _tab_skips()
+	await _gauges()
 	if b and is_instance_valid(b):
 		b.tools.stop_playing()
 		b.queue_free()
@@ -665,3 +670,264 @@ func _tab() -> void:
 	await frames(2)
 	check(B3Player.unit == solo, "with nobody else on your team, Tab leaves you where you are")
 	b.tools.stop_playing()
+
+
+# ------------------------------------------------------- 🛡️ block or swing
+## Holding up the shield and swinging at the same time was 90% off every hit
+## while swinging at full speed. Now it's one or the other.
+func _shield_rhythm() -> void:
+	print("🛡️ block or swing, not both")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("knight", "red", at(0, 0), "peaceful", 0.0)
+	var foe: B3Unit = b.spawn_unit("viking", "blue", at(0, 1.6), "peaceful", PI)
+	foe.max_hp = 5000.0
+	foe.hp = 5000.0
+	await sim(0.3)
+	b.tools.play_as(me)
+	b.fighting = false
+	aim_at(foe.position)
+	await sim(0.2)
+	me.cd = 0.0
+	B3Player.me.fire2 = true
+	B3Player.me.fire = true
+	var swung := false
+	var end: float = b.time + 1.5
+	while b.time < end:
+		swung = swung or me.act == "attack"
+		await get_tree().physics_frame
+	check(me.shield_up and not swung and foe.hp == foe.max_hp, "holding both buttons: the shield stays up and the knight can't swing")
+	check(B3Player.power_help(me).contains("let go to swing"), "(the help line says so: \"%s\")" % B3Player.power_help(me))
+	var up_hit := func() -> float:
+		var h0: float = me.hp
+		me._block_t = 0.0
+		me.hurt(20.0, -me.forward(), 1.0)
+		var d: float = h0 - me.hp
+		me.hp = me.max_hp
+		return d
+	var blocked: float = up_hit.call()
+	B3Player.me.fire2 = false
+	var went: bool = await wait_for(func(): return me.act == "attack", 1.0)
+	check(went and not me.shield_up, "let go of right-click: it swings, with the shield down")
+	B3Player.me.fire2 = true      # right-click again, mid-swing
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var mid_swing: bool = me.act == "attack" and not me.shield_up
+	var open_hit: float = up_hit.call()
+	check(mid_swing, "right-click mid-swing: the shield stays down until the swing is over")
+	check(open_hit > blocked * 2.5, "so a hit from the front mid-swing gets through (%.1f vs %.1f blocked)" % [open_hit, blocked])
+	B3Player.me.fire = false
+	var back_up: bool = await wait_for(func(): return me.act == "" and me.shield_up, 2.0)
+	check(back_up, "and it comes back up once the swing is done")
+	b.tools.set_first_person(true)
+	B3Player.me.fire2 = false
+	await frames(2)
+	B3Player.me.fire = true
+	await wait_for(func(): return me.act == "attack", 1.0)
+	B3Player.me.fire2 = true
+	await frames(3)
+	var hands: B3FPView = b.cam.hands
+	check(me.act != "attack" or (hands.shield != null and hands._guard < 0.99), "👀 in first person you don't see it up while you swing either")
+	B3Player.me.fire = false
+	B3Player.me.fire2 = false
+	b.tools.stop_playing()
+
+
+# ------------------------------------------------- 🦍 first person, mid-air
+func _gorilla_fp() -> void:
+	print("🦍 first person: it pounds whoever's close")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("gorilla", "red", at(0, 0), "peaceful", 0.0)
+	var n1: B3Unit = b.spawn_unit("soldier", "blue", at(0.6, 2.6), "peaceful")
+	b.spawn_unit("knight", "blue", at(0, 80), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me, true)
+	b.fighting = false
+	me.cd = 99.0
+	B3Player.me.look_yaw = 0.0
+	B3Player.me.look_pitch = 0.05      # looking ahead: the crosshair is far away
+	await frames(4)
+	var far_aim: float = flat_dist(B3Player.me.aim, me.position)
+	B3Player.me.fire2 = true
+	var acted: bool = await wait_for(func(): return me.act == "pound" or me.act == "hurl", 1.0)
+	var what: String = me.act
+	B3Player.me.fire2 = false
+	check(far_aim > 6.5 and acted and what == "pound", "looking ahead, an enemy close in front: a ground pound, not a boulder (crosshair %.0f m away: %s)" % [far_aim, what])
+	await wait_for(func(): return me.power_cd <= 0.0 and me.act == "", 6.0)
+	b.remove_unit(n1, false)
+	await sim(0.2)
+	B3Player.me.fire2 = true
+	acted = await wait_for(func(): return me.act == "pound" or me.act == "hurl", 1.0)
+	what = me.act
+	B3Player.me.fire2 = false
+	check(acted and what == "hurl", "nobody close: a boulder where you look (%s)" % what)
+	await wait_for(func(): return me.power_cd <= 0.0 and me.act == "", 7.0)
+	b.tools.stop_playing()
+	# in mid-air: nothing until its feet are back on the ground
+	for k in ["gorilla", "trex"]:
+		await fresh()
+		var u: B3Unit = b.spawn_unit(k, "red", at(0, 0), "peaceful", 0.0)
+		b.spawn_unit("soldier", "blue", at(0, 3.5), "peaceful")
+		await sim(0.4)
+		b.tools.play_as(u)
+		b.fighting = false
+		aim_at(u.position + Vector3(0, 0, 3))
+		u.cd = 99.0
+		await sim(0.2)
+		u.linear_velocity.y = 8.0
+		var up: bool = await wait_for(func(): return not u._grounded and u.position.y > b.world.height_at(u.position.x, u.position.z) + 0.4, 0.6)
+		B3Player.me.fire2 = true
+		var in_air := false
+		var guard := 0
+		while not u._grounded and guard < 2000:
+			in_air = in_air or u.act in ["pound", "hurl", "roar"]
+			await get_tree().physics_frame
+			guard += 1
+		var landed: bool = await wait_for(func(): return u.act in ["pound", "hurl", "roar"], 1.0)
+		B3Player.me.fire2 = false
+		check(up and not in_air, "%s: right-click in mid-jump does nothing" % k)
+		check(landed, "%s: it goes off once it lands" % k)
+		b.tools.stop_playing()
+
+
+# ---------------------------------------------------- 🔭 knocked down
+func _scope_down() -> void:
+	print("🔭 knocked down, the scope comes out")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("sniper", "red", at(0, 0), "peaceful", 0.0)
+	b.spawn_unit("knight", "blue", at(0, 40), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me, true)
+	b.fighting = false
+	await frames(2)
+	right_click()
+	var zoomed: bool = await wait_for(func(): return b.cam.cam.fov < 26.0, 2.0)
+	check(zoomed and B3Player.scoped(me, B3Player.me), "(looking through the scope)")
+	me.knock_down(Vector3(0, 3, -3))
+	check(me.down and not B3Player.scoped(me, B3Player.me), "knocked down: not looking through the scope any more")
+	var out: bool = await wait_for(func(): return b.cam.cam.fov > 71.5 and not b.cam._scope.visible, 2.0)
+	check(out and not B3Player.me.fire2, "the view zooms back out (%.0f°) and the scope stays out" % b.cam.cam.fov)
+	b.tools.stop_playing()
+
+
+# ------------------------------------------------ ⇥ Tab: who's skipped
+func _tab_skips() -> void:
+	print("⇥ Tab skips teammates lying down and planes going down")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	var lying: B3Unit = b.spawn_unit("knight", "red", at(2, 0), "peaceful", 0.0)
+	var pl: B3Unit = b.spawn_unit("plane", "red", at(4, 0), "peaceful", 0.0)
+	var mate: B3Unit = b.spawn_unit("archer", "red", at(14, 0), "peaceful", 0.0)
+	b.spawn_unit("soldier", "blue", at(0, 70), "peaceful")
+	await sim(0.5)
+	lying.knock_down(Vector3(0, 2, 0))
+	pl.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+	await sim(0.1)
+	check(lying.down and pl is B3Aircraft and (pl as B3Aircraft).falling and not pl.dead, "(a knight lies knocked down, and the plane's going down)")
+	b.tools.play_as(me, true)
+	await frames(2)
+	press(KEY_TAB)
+	await frames(2)
+	check(B3Player.unit == mate, "Tab jumps past both of them to the archer farther away (%s)" % (B3Player.unit.kind if B3Player.active() else "nobody"))
+	press(KEY_TAB)
+	await frames(2)
+	check(B3Player.unit == me, "and round again: never into either of them")
+	# knocked out: into the teammate lying down (who'll get up), not the crashing plane
+	b.remove_unit(mate, false)
+	await sim(0.05)
+	me.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+	await frames(3)
+	check(B3Player.active() and B3Player.unit == lying, "knocked out, you'd still rather jump into a teammate lying down than a crashing plane (%s)" % (B3Player.unit.kind if B3Player.active() else "nobody"))
+	b.tools.stop_playing()
+
+
+# ------------------------------------------- ⏳ the power's cooldown gauges
+func _gauges() -> void:
+	print("⏳ the power's cooldown: a pill overhead, a ring in first person")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	var foe: B3Unit = b.spawn_unit("soldier", "blue", at(0, 1.4), "peaceful", PI)
+	foe.max_hp = 5000.0
+	foe.hp = 5000.0
+	await sim(0.3)
+	b.tools.play_as(me)
+	b.fighting = false
+	aim_at(foe.position + Vector3(0, 0, 4))
+	me.cd = 99.0
+	await frames(3)
+	var pill = b.ui.power_pill
+	check(pill.visible and B3Player.power_ready(me) == 1.0 and String(pill.lbl.text).contains("ready"), "overhead, a pill says the kick is ready (\"%s\")" % pill.lbl.text)
+	var pr: Rect2 = pill.get_global_rect()
+	var lr: Rect2 = b.ui.play_lbl.get_global_rect()
+	check(pr.position.y >= lr.end.y - 1.0 and b.ui.toasts.position.y >= pr.end.y and absf(pr.get_center().x - lr.get_center().x) < 2.0,
+		"right under the help line, with messages under it (%.0f, %.0f)" % [pr.position.y, b.ui.toasts.position.y])
+	B3Player.me.fire2 = true
+	await wait_for(func(): return me.act == "kick", 1.0)
+	B3Player.me.fire2 = false
+	await frames(2)
+	var k0: float = B3Player.power_ready(me)
+	check(k0 < 0.3 and pill.k < 0.3 and not String(pill.lbl.text).contains("ready"), "kicking empties it (%.2f)" % k0)
+	await sim(0.6)
+	await frames(2)
+	var k1: float = B3Player.power_ready(me)
+	check(k1 > k0 + 0.2 and k1 < 1.0 and absf(pill.k - k1) < 0.15, "it fills up as the kick recharges (%.2f)" % k1)
+	await wait_for(func(): return B3Player.power_ready(me) >= 1.0, 3.0)
+	await frames(2)
+	check(pill.k >= 1.0 and String(pill.lbl.text).contains("ready") and pill.glow_t > 0.0, "until it's ready again, with a glow")
+	# first person: a ring round the crosshair instead
+	b.tools.set_first_person(true)
+	B3Player.me.look_yaw = me.facing
+	B3Player.me.look_pitch = -0.1
+	await frames(3)
+	var ch = b.ui.crosshair
+	check(not pill.visible and ch.visible and ch.power_k >= 1.0, "👀 first person: no pill, the ring round the crosshair shows it")
+	B3Player.me.fire2 = true
+	await wait_for(func(): return me.act == "kick", 1.0)
+	B3Player.me.fire2 = false
+	await frames(2)
+	check(ch.power_k < 0.3, "the ring empties when you kick (%.2f)" % ch.power_k)
+	await wait_for(func(): return B3Player.power_ready(me) >= 1.0, 3.0)
+	await frames(2)
+	check(ch.power_k >= 1.0 and ch.ping_t > 0.0, "and pings when it's ready again")
+	b.tools.stop_playing()
+	# a knight's shield is held, not used up: no pill or ring
+	var kn: B3Unit = b.spawn_unit("knight", "red", at(-8, 0), "peaceful", 0.0)
+	await sim(0.2)
+	b.tools.play_as(kn)
+	await frames(3)
+	check(not pill.visible and not B3Player.power_has_cd(kn), "🛡️ a shield has no cooldown: no pill")
+	b.tools.stop_playing()
+	# ⏳ the reload bar: a musket takes a while
+	var rc: B3Unit = b.spawn_unit("redcoat", "red", at(8, 0), "peaceful", 0.0)
+	var tgt: B3Unit = b.spawn_unit("knight", "blue", at(8, 14), "peaceful", PI)
+	tgt.max_hp = 5000.0
+	tgt.hp = 5000.0
+	await sim(0.3)
+	b.tools.play_as(rc, true)
+	await frames(2)
+	check(ch.reload_k >= 1.0, "(loaded)")
+	look_at_point(tgt.center())
+	await frames(2)
+	B3Player.me.fire = true
+	var shot: bool = await wait_for(func(): return rc.cd > 1.0, 1.0)
+	B3Player.me.fire = false
+	await frames(2)
+	var r0: float = ch.reload_k
+	await sim(1.5)
+	await frames(2)
+	check(shot and r0 < 0.2 and ch.reload_k > r0 + 0.2 and ch.reload_k < 1.0, "🔄 firing the musket shows a reload bar under the crosshair, filling up (%.2f → %.2f)" % [r0, ch.reload_k])
+	await wait_for(func(): return rc.cd <= 0.0, 4.0)
+	await frames(2)
+	check(ch.reload_k >= 1.0, "gone once it's loaded again")
+	b.tools.stop_playing()
+	# 👥 a friend's copy only knows what the host sends
+	var g: PackedFloat32Array = B3Player.net_gauges(me)
+	check(g.size() == 2 and g[0] >= 1.0 and absf(g[1] - B3Player.reload_ready(me)) < 0.01, "the host sends two numbers for a friend's fighter: power and reload (%s)" % str(g))
+	b.puppet = true
+	check(B3Player.power_ready(me) == 1.0, "a friend's copy reads ready until told otherwise")
+	B3Player.set_net_gauges(me, PackedFloat32Array([0.25, 0.5]))
+	var got := [B3Player.power_ready(me), B3Player.reload_ready(me)]
+	B3Player.set_net_gauges(me, [NAN, "junk", 7.0])
+	var junk := [B3Player.power_ready(me), B3Player.reload_ready(me)]
+	b.puppet = false
+	check(got == [0.25, 0.5], "then shows what the host sent (%s)" % str(got))
+	check(junk == [1.0, 1.0], "and junk reads as ready (%s)" % str(junk))

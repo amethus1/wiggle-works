@@ -63,6 +63,31 @@ func _ready() -> void:
 	await frames(2)
 	check(w.platforms.size() == forts, "🧹 Clear leaves Battle Valley's forts standing (%d of %d left)" % [w.platforms.size(), forts])
 
+	print("ground pieces")
+	var slanted := 0
+	var off_area := 0.0
+	var shortest := INF
+	for wd in Catalog.WORLDS:
+		w.load_world(wd.id, false)
+		for g in w.terrain.get_children():
+			if not (g is Ground) or g.is_queued_for_deletion():
+				continue
+			var area := 0.0
+			for cs in g.get_children():
+				if cs is CollisionShape2D and cs.shape is ConvexPolygonShape2D:
+					var pts: PackedVector2Array = cs.shape.points
+					area += _area(pts)
+					for i in pts.size():
+						var a := pts[i]
+						var nb := pts[(i + 1) % pts.size()]
+						shortest = minf(shortest, a.distance_to(nb))
+						if absf(a.x - nb.x) > 0.01 and not _on_outline((a + nb) * 0.5, g.poly):
+							slanted += 1
+			off_area = maxf(off_area, absf(area - _area(g.poly)) / _area(g.poly))
+	# (Godot's own split made fans of needle-thin triangles reaching across the
+	# ground: a heap of ragdolls squeezed into them got flung out of the world)
+	check(slanted == 0 and off_area < 0.005 and shortest > 0.4, "the ground's collision is cut into upright slices that fill it exactly (%d slanted cuts, %.2f%% off, shortest side %.1f px)" % [slanted, off_area * 100.0, shortest])
+
 	print("jelly")
 	w.load_world("canvas", false)
 	var b := w.spawn_wiggly("bloop", Vector2(0, -150))
@@ -276,8 +301,65 @@ func _ready() -> void:
 	print("lists")
 	await _lists()
 
+	print("toy pictures")
+	await _toy_pictures()
+	print("nailed-down machines")
+	await _nailed_machines()
+	print("ready-made builds")
+	await _builds()
+	print("undo for small changes")
+	await _small_undo()
+	print("ropes and straining Wigglies")
+	await _ropes_and_strain()
+	print("💾 save slots")
+	await _save_slots()
+
 	print("test_core: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+## 💾 Six named save slots (Saves), and the old single save moving into slot 1.
+func _save_slots() -> void:
+	Saves.delete_all_test_saves()
+	w.load_world("canvas")
+	await frames(2)
+	w.spawn_wiggly("bloop", Vector2(-100, -200))
+	w.spawn_wiggly("zappy", Vector2(100, -200))
+	await frames(10)
+	var n1 := w.count_wigglies()
+	# the save from before (just the playground, no name) is still there
+	var old := FileAccess.open(Saves.legacy_path(), FileAccess.WRITE)
+	old.store_string(JSON.stringify(w.serialize()))
+	old.close()
+	check(Saves.has_slot(1) and not FileAccess.file_exists(Saves.legacy_path()) and FileAccess.file_exists(Saves.legacy_path() + ".old"),
+		"the old single save moves into slot 1 (and the old file is kept as .old)")
+	var d1 := Saves.read(1)
+	check(String(d1.get("name", "")) != "" and String(d1.get("world", "")) == "canvas", "slot 1 has a name and its world (%s, %s)" % [d1.get("name"), d1.get("world")])
+	w.load_world("meadow")
+	await frames(2)
+	check(Saves.load_slot(w, 1) and w.world_id == "canvas" and w.count_wigglies() == n1, "loading it brings the old playground back (%d of %d Wigglies)" % [w.count_wigglies(), n1])
+	# a raw old-style file in a slot still loads too
+	var raw := FileAccess.open(Saves.path(4), FileAccess.WRITE)
+	raw.store_string(JSON.stringify(w.serialize()))
+	raw.close()
+	check(Saves.read(4).has("data") and Saves.load_slot(w, 4), "a slot holding just a playground (no name) still loads")
+	# six slots, each its own
+	w.spawn_wiggly("blaze", Vector2(0, -200))
+	await frames(4)
+	var n3 := w.count_wigglies()
+	check(Saves.save_slot(w, 3, "My Castle") and Saves.read(3).name == "My Castle" and Saves.when_text(Saves.read(3)) != "", "saving in slot 3 with a name (and when)")
+	check(Saves.save_slot(w, 6) and String(Saves.read(6).name).contains("Blank Canvas"), "a slot saved with no name is named after its world (%s)" % Saves.read(6).name)
+	check(Saves.rename(6, "  Rocket Lab  ") and Saves.read(6).name == "Rocket Lab", "✏️ renaming a slot")
+	check(not Saves.save_slot(w, 7) and not Saves.save_slot(w, 0), "there are only %d slots" % Saves.SLOTS)
+	check(not Saves.has_slot(2) and Saves.read(2).is_empty() and Saves.thumb(3) == null, "an empty slot is empty (and headless saves have no picture)")
+	var img := Image.create(64, 36, false, Image.FORMAT_RGBA8)
+	img.fill(Color.ORANGE)
+	check(Saves.save_slot(w, 2, "", img) and Saves.thumb(2) != null and Saves.thumb(2).get_size() == Vector2(Saves.THUMB), "a slot keeps a little picture of the playground")
+	w.load_world("meadow")
+	await frames(2)
+	check(Saves.load_slot(w, 3) and w.count_wigglies() == n3 and w.world_id == "canvas", "loading slot 3 brings back what was saved there (%d of %d Wigglies)" % [w.count_wigglies(), n3])
+	Saves.delete_all_test_saves()
+	check(not Saves.has_slot(), "(test saves cleaned up)")
 
 
 ## World.fighters(), toys(), wigglies() and ride_parts() are kept between
@@ -431,6 +513,20 @@ func _water_area() -> float:
 	return a
 
 
+func _area(p: PackedVector2Array) -> float:
+	var s := 0.0
+	for i in p.size():
+		s += p[i].cross(p[(i + 1) % p.size()])
+	return absf(s) * 0.5
+
+
+func _on_outline(q: Vector2, poly: PackedVector2Array) -> bool:
+	for i in poly.size():
+		if q.distance_to(Geometry2D.get_closest_point_to_segment(q, poly[i], poly[(i + 1) % poly.size()])) < 0.5:
+			return true
+	return false
+
+
 ## The height of the first solid ground at `x`, coming down from the sky.
 func _ground_top(x: float) -> float:
 	var y := -400.0
@@ -440,3 +536,324 @@ func _ground_top(x: float) -> float:
 				return y
 		y += 2.0
 	return INF
+
+
+## Counts redraws of each toy over `n` frames.
+func _redraws(ts: Dictionary, n: int) -> Dictionary:
+	var counts := {}
+	var conns := {}
+	for k in ts:
+		counts[k] = 0
+		var cb := func() -> void: counts[k] += 1
+		conns[k] = cb
+		(ts[k] as Toy).draw.connect(cb)
+	var t0 := Time.get_ticks_msec()
+	for i in n:
+		await get_tree().process_frame
+	while Time.get_ticks_msec() - t0 < 1100:   # (headless frames fly by: give blinkers a second)
+		await get_tree().process_frame
+	for k in ts:
+		(ts[k] as Toy).draw.disconnect(conns[k])
+	return counts
+
+
+## Toys whose picture changes all by itself get redrawn now and then; ones
+## that look the same frame after frame don't.
+func _toy_pictures() -> void:
+	w.load_world("canvas", false)
+	var ts := {}
+	var x := -700.0
+	for id in ["magnet", "timer", "saucer", "c4", "landmine", "lamp", "motor", "battery"]:
+		var t := w.spawn_toy(id, Vector2(x, 200))
+		t.nailed = true
+		t.update_freeze()
+		ts[id] = t
+		x += 160.0
+	var bat := w.spawn_toy("battery", Vector2(0, -300))
+	bat.nailed = true
+	bat.update_freeze()
+	for k in ["magnet", "lamp", "motor"]:
+		w.add_link("wire", bat, ts[k], bat.global_position, ts[k].global_position)
+	await frames(10)
+	var n := await _redraws(ts, 30)
+	check(int(n.magnet) >= 30, "a switched-on magnet's pulses keep moving (%d redraws)" % int(n.magnet))
+	check(int(n.timer) >= 4 and int(n.timer) < 30, "the Blinky Timer's hand ticks round, a few redraws a second (%d)" % int(n.timer))
+	check(int(n.c4) >= 2 and int(n.landmine) >= 1 and int(n.saucer) >= 4, "C4, landmine and saucer lights blink (%d, %d, %d redraws)" % [int(n.c4), int(n.landmine), int(n.saucer)])
+	check(int(n.c4) < 15 and int(n.saucer) < 20, "but only when the light changes, not every frame")
+	check(int(n.lamp) == 0 and int(n.motor) == 0 and int(n.battery) == 0, "a lit lamp, a running motor and a battery aren't redrawn for nothing (%d, %d, %d)" % [int(n.lamp), int(n.motor), int(n.battery)])
+	var bell := w.spawn_toy("bell", Vector2(600, 200))
+	bell.nailed = true
+	bell.update_freeze()
+	await frames(5)
+	ToyLogic.use(w, bell)
+	var tilt := [0]
+	bell.draw.connect(func() -> void: tilt[0] += 1)
+	for i in 4:
+		await get_tree().process_frame
+	check(tilt[0] >= 3, "a dinged bell wobbles")
+	await frames(60)
+	tilt[0] = 0
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(bell.cooldown <= 0.0 and not bell._art_key.contains("b1") and tilt[0] == 0, "and comes to rest upright (redrawn once as it stops, then left alone)")
+
+
+## A nailed toy is frozen and can't feel its own contacts: nailed landmines,
+## spring pads and conveyor belts look for what's on them themselves.
+func _nailed_machines() -> void:
+	w.load_world("canvas", false)
+	w.battle_on = false
+	var mine := w.spawn_toy("landmine", Vector2(0, 294))
+	mine.nailed = true
+	mine.update_freeze()
+	var mine_id := mine.uid
+	var walker := w.spawn_fighter("soldier", Vector2(-250, 150), "red", "peaceful")
+	walker.max_hp = 100000.0
+	walker.hp = 100000.0
+	await frames(40)
+	walker.player_id = 0
+	walker.move_input = 1.0
+	for i in 480:
+		await get_tree().physics_frame
+		if not w.things.has(mine_id):
+			break
+	walker.player_id = -1
+	check(not w.things.has(mine_id), "a nailed-down landmine still goes off when a soldier walks into it")
+	w._clear_all()
+	var belt := w.spawn_toy("conveyor", Vector2(0, 288))
+	belt.nailed = true
+	belt.update_freeze()
+	await frames(5)
+	var box := w.spawn_toy("wood_block", Vector2(-40, 240))
+	var bx := box.global_position.x
+	await frames(120)
+	check(box.global_position.x - bx > 40.0, "a nailed-down conveyor belt still carries things along (%.0f px)" % (box.global_position.x - bx))
+	w._clear_all()
+	var pad := w.spawn_toy("spring_pad", Vector2(0, 288))
+	pad.nailed = true
+	pad.update_freeze()
+	await frames(5)
+	var ball := w.spawn_toy("bowling_ball", Vector2(0, 150))
+	var top := INF
+	for i in 180:
+		await get_tree().physics_frame
+		if i > 40:
+			top = minf(top, ball.global_position.y)
+	check(top < 100.0, "a nailed-down spring pad still launches what lands on it (back up to y %.0f)" % top)
+	w._clear_all()
+	var hull = w.spawn("boat", Vector2(0, -200))
+	Builders.tub(w, "lava_tub", Vector2(0, 300))
+	var lx: float = hull.global_position.x
+	await frames(90)
+	check(not w.things.has(hull.uid) or absf(hull.global_position.x - lx) < 20.0, "a sail boat doesn't sail across lava (it just sinks)")
+
+
+## Every ready-made build comes out in one piece, even put down right on the
+## ground, and does its thing.
+func _builds() -> void:
+	w.load_world("canvas", false)
+	w.battle_on = false
+	var snaps := [0]
+	var count := func(n: String, _a: Dictionary) -> void:
+		if n == "snap":
+			snaps[0] += 1
+	w.fx.connect(count)
+	for bd in Catalog.BUILDS:
+		w._clear_all()
+		w.clear_placed()
+		await frames(2)   # (what was cleared away is gone at the end of the frame)
+		await get_tree().process_frame
+		snaps[0] = 0
+		w.apply_command(0, {"cmd": "spawn", "id": "build:" + bd.id, "x": 0, "y": 285})
+		var parts: Array = w.toys().duplicate()
+		await frames(5)
+		var fastest := 0.0
+		for t in parts:
+			if is_instance_valid(t):
+				fastest = maxf(fastest, (t as Toy).linear_velocity.length())
+		await frames(60)
+		var lost := parts.filter(func(t): return not is_instance_valid(t) or not w.things.has(t.uid)).size()
+		check(not parts.is_empty() and snaps[0] == 0 and lost == 0 and fastest < 400.0,
+			"%s put down on the ground comes out whole (%d parts, %d snapped, fastest %.0f px/s)" % [bd.name, parts.size(), snaps[0], fastest])
+	# the see-saw's stand is nailed down, with the plank level on top
+	w._clear_all()
+	var plank: Toy = w.spawn("build:seesaw", Vector2(0, 100))
+	await frames(60)
+	var stand := w.toys().filter(func(t): return t.id == "ramp")
+	check(stand.size() == 2 and stand.all(func(t): return t.nailed) and absf(plank.rotation) < 0.3 and plank.global_position.y > 150.0,
+		"the see-saw stands on the ground on a nailed A-frame, its plank on top (tilt %.2f)" % plank.rotation)
+	# the catapult throws its ball when you flip the switch
+	w._clear_all()
+	w.spawn("build:catapult", Vector2(0, 0))
+	await frames(120)
+	var ball: Toy = w.toys().filter(func(t): return t.id == "beach_ball")[0]
+	var sw: Toy = w.toys().filter(func(t): return t.id == "switch")[0]
+	var b0 := ball.global_position
+	w.apply_command(0, {"cmd": "use", "uid": sw.uid})
+	var hi := b0.y
+	var far := 0.0
+	for i in 300:
+		await get_tree().physics_frame
+		hi = minf(hi, ball.global_position.y)
+		far = maxf(far, absf(ball.global_position.x - b0.x))
+	check(b0.y - hi > 50.0 and far > 250.0, "flipping the catapult's switch flings the ball (%.0f px up, %.0f px away)" % [b0.y - hi, far])
+	# the rocket cart waits for its switch
+	w._clear_all()
+	var kart: Toy = w.spawn("build:rocket_cart", Vector2(0, 200))
+	await frames(120)
+	var k0 := kart.global_position
+	await frames(120)
+	check(kart.global_position.distance_to(k0) < 15.0, "a Rocket Cart stays put until you flip its switch (it used to drive off on its own) (%.0f px)" % kart.global_position.distance_to(k0))
+	var ksw: Toy = w.toys().filter(func(t): return t.id == "switch")[0]
+	w.apply_command(0, {"cmd": "use", "uid": ksw.uid})
+	await frames(120)
+	check(kart.global_position.distance_to(k0) > 120.0, "and then it zooms off (%.0f px in a second)" % kart.global_position.distance_to(k0))
+	# 🔌 Battle Trap Builds
+	w._clear_all()
+	var booms := [0]
+	var count_booms := func(n: String, _a: Dictionary) -> void:
+		if n == "boom":
+			booms[0] += 1
+	w.fx.connect(count_booms)
+	var plate: Toy = w.spawn("build:trap_minefield", Vector2(0, 200))
+	await frames(10)
+	var mines := w.toys().filter(func(t): return t.id == "landmine")
+	check(plate.nailed and plate.id == "button" and mines.size() == 3 and mines.all(func(t): return t.nailed), "the Minefield is a nailed pressure plate and three nailed landmines")
+	check(w.links.filter(func(l): return l.kind == "wire").size() == 3, "with a wire from the plate to every mine")
+	var ball2 := w.spawn_toy("bowling_ball", plate.global_position + Vector2(0, -60))
+	await frames(90)
+	check(w.toys().filter(func(t): return t.id == "landmine").is_empty() and booms[0] >= 3, "dropping something on the plate sets the whole field off (%d booms)" % booms[0])
+	w.fx.disconnect(count_booms)
+	w._clear_all()
+	w.spawn("build:disarm_gate", Vector2(0, 200))
+	var knight := w.spawn_fighter("knight", Vector2(-300, 150), "red", "peaceful")
+	knight.max_hp = 99999.0
+	knight.hp = 99999.0
+	await frames(40)
+	var sword: Toy = knight.weapon_toy
+	knight.player_id = 0
+	knight.move_input = 1.0
+	var yanked := false
+	for i in 480:
+		await get_tree().physics_frame
+		if knight.weapon_toy != sword:
+			yanked = true
+			break
+	knight.player_id = -1
+	check(yanked, "walking under the Disarm Gate's magnet yanks a knight's sword away")
+	w._clear_all()
+	w.spawn("build:ufo_abductor", Vector2(0, 200))
+	var ufo: Toy = w.toys().filter(func(t): return t.id == "saucer")[0]
+	var victim := w.spawn_fighter("stick", Vector2(0, 100), "red", "peaceful")
+	var hy := INF
+	for i in 240:
+		await get_tree().physics_frame
+		hy = minf(hy, victim.center().y)
+	check(ufo.nailed and hy < ufo.global_position.y + 120.0, "stepping on the UFO Abductor's plate beams you up (up to y %.0f, saucer at %.0f)" % [hy, ufo.global_position.y])
+	w.fx.disconnect(count)
+	# saves keep toys passing through each other (the Spinny Wheel's arms and its post)
+	w._clear_all()
+	w.spawn("build:ferris", Vector2(0, 0))
+	await frames(5)
+	var exc := 0
+	for t in w.toys():
+		exc += t.get_collision_exceptions().size()
+	var ice := w.spawn_toy("brick", Vector2(300, -200))
+	ice.frozen_t = 5.0
+	ice.update_freeze()
+	w.restore(w.serialize())
+	await frames(5)
+	var exc2 := 0
+	for t in w.toys():
+		exc2 += t.get_collision_exceptions().size()
+	check(exc2 == exc, "a save keeps the Spinny Wheel turning in front of its post (%d of %d)" % [exc2, exc])
+	check(w.toys().any(func(t): return t.id == "brick" and t.frozen_t > 0.0 and t.freeze), "and a toy frozen in mid-air stays frozen")
+
+
+## Painting, resizing, using, magic, and a fighter's team or personality can be
+## undone. Doing the same small thing again straight away is one undo step.
+func _small_undo() -> void:
+	w.load_world("canvas", false)
+	var ball := w.spawn_toy("beach_ball", Vector2(0, 200))
+	var f := w.spawn_fighter("soldier", Vector2(300, 150), "red", "ranged")
+	var sw := w.spawn_toy("switch", Vector2(-300, 280))
+	await frames(10)
+	var uid := ball.uid
+	var sw_id := sw.uid
+	var fid := f.uid
+	w._undo.clear()
+	w.apply_command(0, {"cmd": "paint", "uid": uid, "color": "ff0000"})
+	w.apply_command(0, {"cmd": "paint", "uid": uid, "color": "00ff00"})
+	w.apply_command(0, {"cmd": "paint", "uid": uid, "color": "0000ff"})
+	check(w._undo.size() == 1, "painting the same toy three times is one step to undo (%d)" % w._undo.size())
+	w.apply_command(0, {"cmd": "undo"})
+	await frames(3)
+	var back = w.things.get(uid)
+	check(back is Toy and back.paint.a == 0.0, "and undo takes the paint off")
+	w.apply_command(0, {"cmd": "resize", "uid": uid, "s": 2.0})
+	w.apply_command(0, {"cmd": "undo"})
+	await frames(3)
+	back = w.things.get(uid)
+	check(back is Toy and is_equal_approx(back.size_scale, 1.0), "undo puts a resized toy back to its size")
+	w.apply_command(0, {"cmd": "use", "uid": sw_id})
+	check(w.things.get(sw_id).on, "flipping a switch")
+	w.apply_command(0, {"cmd": "undo"})
+	await frames(3)
+	check(not w.things.get(sw_id).on, "can be undone")
+	w.apply_command(0, {"cmd": "team", "uid": fid, "team": "blue"})
+	w.apply_command(0, {"cmd": "pers", "uid": fid, "pers": "berserk"})
+	w.apply_command(0, {"cmd": "undo"})
+	await frames(3)
+	check(w.things.get(fid).pers == "ranged" and w.things.get(fid).team == "blue", "undo puts a fighter's personality back")
+	w.apply_command(0, {"cmd": "undo"})
+	await frames(3)
+	check(w.things.get(fid).team == "red", "and its team")
+	w.apply_command(0, {"cmd": "magic", "id": "rainbow"})
+	check(w.things.get(uid).paint.a > 0.0, "🌈 Rainbow Paint paints everything")
+	w.apply_command(0, {"cmd": "undo"})
+	await frames(3)
+	check(w.things.get(uid).paint.a == 0.0, "and undo takes the spell back")
+
+
+## Ropes hang by how much slack they have (and swing as they go slack); a
+## Wiggly pulled nearly to popping trembles.
+func _ropes_and_strain() -> void:
+	w.load_world("canvas", false)
+	var a := w.spawn_toy("wood_block", Vector2(-150, -100))
+	var b := w.spawn_toy("wood_block", Vector2(150, -100))
+	for t in [a, b]:
+		t.nailed = true
+		t.update_freeze()
+	var slack := w.add_link("rope", a, b, a.global_position, b.global_position)
+	slack.rest = 500.0   # a long rope between two blocks 300 px apart
+	var c := w.spawn_toy("wood_block", Vector2(-150, 100))
+	var d := w.spawn_toy("wood_block", Vector2(150, 100))
+	for t in [c, d]:
+		t.nailed = true
+		t.update_freeze()
+	var tight := w.add_link("rope", c, d, c.global_position, d.global_position)
+	for i in 90:
+		await get_tree().process_frame
+	var lv: LinkView = w.link_view
+	var hang: float = lv._sag.get(slack.get_instance_id(), [0.0])[0]
+	var taut: float = lv._sag.get(tight.get_instance_id(), [99.0])[0]
+	check(hang > 120.0 and taut < 8.0, "a slack rope hangs down (%.0f px) and a tight one is nearly straight (%.0f px)" % [hang, taut])
+	# let go of one end: the sag swings past where it settles, then comes back
+	lv._sag[tight.get_instance_id()] = [0.0, 0.0]
+	tight.rest = 500.0
+	var most := 0.0
+	var t0 := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < 1500:   # (real time: headless frames fly by)
+		await get_tree().process_frame
+		most = maxf(most, float(lv._sag[tight.get_instance_id()][0]))
+	var settled: float = lv._sag[tight.get_instance_id()][0]
+	check(most > settled + 3.0, "a rope that suddenly goes slack swings down and bounces (%.0f px, settling at %.0f)" % [most, settled])
+	var g := w.spawn_wiggly("gummy", Vector2(0, 200))
+	await frames(60)
+	check(Art._tremble(g) == 0.0, "a Wiggly sitting about doesn't tremble")
+	g.grabbed_by[5] = true
+	g.stretch = 2.2
+	g.mood = "strain"
+	check(Art._tremble(g) > 2.5, "one pulled nearly to popping trembles (%.1f px)" % Art._tremble(g))
+	g.grabbed_by.clear()
+

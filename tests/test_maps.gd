@@ -76,6 +76,7 @@ func _ready() -> void:
 	await _detail_fp()
 	await _detail_far()
 	await _models()
+	await _smooth_and_cache()
 	if b and is_instance_valid(b):
 		b.queue_free()
 	Engine.time_scale = 1.0
@@ -187,14 +188,19 @@ func _beach_water() -> void:
 	var bird = b.spawn_unit("ptero", "blue", at(0, 130) + Vector3(0, 6, 0), "peaceful")
 	b.set_fighting(true)
 	var deepest := 0.0
+	var splashes := 0
 	for i in 20:
 		await sim(0.5)
 		for u in [k, k2]:
 			if is_instance_valid(u) and not u.dead:
 				deepest = maxf(deepest, w.water_depth(u.position.x, u.position.z))
+		for r in b.fx._wades:
+			if (r as Node3D).visible:
+				splashes += 1
 	check(is_instance_valid(bird) and bird.position.z > 90.0, "the bird stays out at sea")
 	check(deepest < B3World.DEEP + 0.35, "walkers can't wade into deep water (deepest %.2f m)" % deepest)
 	check(is_instance_valid(k) and not k.dead and k.position.z > 35.0, "but they do go into the shallows (z %.0f)" % k.position.z)
+	check(splashes > 0, "💦 and splash as they wade about (%d splash rings seen)" % splashes)
 
 
 func _pass() -> void:
@@ -284,7 +290,12 @@ func _detail_fp() -> void:
 	var coarse := 0
 	for m in w._detail:
 		coarse += m.multimesh.instance_count
-	check(coarse > 3000 and w._detail_fp.is_empty(), "overhead: %d tufts and crops in big chunks" % coarse)
+	check(coarse > 3000 and not _any_shown(w._detail_fp), "overhead: %d tufts and crops in big chunks" % coarse)
+	# the finer pieces get made a little at a time while overhead (hidden)
+	for i in 60:
+		await get_tree().process_frame
+	var made := w._detail_fp.size()
+	check(made > 50 and w._cell_todo.is_empty() and w._cell_kinds.is_empty() and not _any_shown(w._detail_fp), "while overhead, the first-person pieces get made a little at a time, hidden (%d)" % made)
 	b.cam.cam.projection = Camera3D.PROJECTION_PERSPECTIVE
 	await get_tree().process_frame
 	await get_tree().process_frame
@@ -296,14 +307,21 @@ func _detail_fp() -> void:
 	var hidden := true
 	for m in w._detail:
 		hidden = hidden and not m.visible
-	check(fine == coarse and fades and hidden and w._detail_fp.size() > w._detail.size(), "first person: the same %d in %d finer pieces that fade out far away" % [fine, w._detail_fp.size()])
+	check(fine == coarse and fades and hidden and w._detail_fp.size() > w._detail.size() and w._detail_fp.size() == made, "first person: the same %d in %d finer pieces that fade out far away (none made now)" % [fine, w._detail_fp.size()])
 	b.cam.cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 	await get_tree().process_frame
 	await get_tree().process_frame
 	var shown := true
 	for m in w._detail:
 		shown = shown and m.visible
-	check(shown and w._detail_fp.is_empty(), "and back overhead, the big chunks again")
+	check(shown and not _any_shown(w._detail_fp), "and back overhead, the big chunks again")
+
+
+func _any_shown(list: Array) -> bool:
+	for m in list:
+		if is_instance_valid(m) and (m as Node3D).visible:
+			return true
+	return false
 
 
 ## Zoomed right out overhead, tufts and crops switch to simpler meshes (the
@@ -336,6 +354,22 @@ func _detail_far() -> void:
 	for m in w._detail:
 		n += m.multimesh.instance_count
 	check(all_lo.call(true) and n > 3000, "zoomed right out they're the simpler ones (all %d of them)" % n)
+	# (the fighters are a few pixels tall too: posed every 3rd frame)
+	var walker := B3Rig.new()
+	var wrng := RandomNumberGenerator.new()
+	walker.build("soldier", "red", wrng)
+	b.unit_root.add_child(walker)
+	var leg: Node3D = walker.pv.leg_l
+	var moved := 0
+	var last := leg.transform
+	for i in 12:
+		await get_tree().process_frame
+		walker.animate(1.0 / 60.0, 3.0, "", 0.0, false, "")       # (walking)
+		if not leg.transform.is_equal_approx(last):
+			moved += 1
+		last = leg.transform
+	walker.queue_free()
+	check(B3Rig.anim_every == 3 and moved >= 3 and moved <= 5, "and the fighters are posed every 3rd frame (%d of 12)" % moved)
 	b.cam.fit(Vector3.ZERO, B3World.DETAIL_LO_ZOOM - 2.0)
 	await get_tree().process_frame
 	await get_tree().process_frame
@@ -343,7 +377,7 @@ func _detail_far() -> void:
 	b.cam.fit(Vector3.ZERO, 60.0)
 	await get_tree().process_frame
 	await get_tree().process_frame
-	check(all_lo.call(false), "and closer in they're detailed again")
+	check(all_lo.call(false) and B3Rig.anim_every == 1, "and closer in they're detailed again (and the fighters posed every frame)")
 
 
 ## The fighters' and vehicles' models are merged into a few meshes each,
@@ -377,12 +411,51 @@ func _models() -> void:
 	await sim(0.3)
 	check(ok, "every fighter and vehicle is merged into fewer meshes than it has pieces")
 	check(shared, "the same kind on two teams shares its merged meshes")
+	# the pieces' shapes are worked out here (B3Mats.prim_arrays), not read
+	# back from the graphics card: exactly as Godot makes them
+	var same_prims := 0
+	var diff_prims := 0
+	for k in B3Mats._meshes:
+		var pm: Mesh = B3Mats._meshes[k]
+		var mine := B3Mats.prim_arrays(pm)
+		if mine.is_empty():
+			continue
+		var theirs := pm.surface_get_arrays(0)
+		var ok_p := (mine[Mesh.ARRAY_INDEX] as PackedInt32Array) == (theirs[Mesh.ARRAY_INDEX] as PackedInt32Array)
+		var mv: PackedVector3Array = mine[Mesh.ARRAY_VERTEX]
+		var tv: PackedVector3Array = theirs[Mesh.ARRAY_VERTEX]
+		var mn: PackedVector3Array = mine[Mesh.ARRAY_NORMAL]
+		var tn: PackedVector3Array = theirs[Mesh.ARRAY_NORMAL]
+		ok_p = ok_p and mv.size() == tv.size()
+		for i in (mv.size() if ok_p else 0):
+			# (normals come back squeezed into fewer bits)
+			if mv[i].distance_to(tv[i]) > 1e-5 or mn[i].distance_to(tn[i]) > 2e-3:
+				ok_p = false
+				break
+		if ok_p:
+			same_prims += 1
+		else:
+			diff_prims += 1
+			print("    %s: made differently from Godot's" % k)
+	check(same_prims > 300 and diff_prims == 0, "every piece's shape is made the same as Godot makes it (%d, %d different)" % [same_prims, diff_prims])
 	var pieces := 0
 	var meshes := 0
 	for u in b.units:
 		pieces += u.rig.pieces
 		meshes += u.rig.meshes.size()
 	check(meshes * 2 < pieces, "%d pieces drawn as %d meshes" % [pieces, meshes])
+	# no shadow-only copies: where only some pieces cast a shadow, the
+	# material leaves the others out of it
+	var only_shadow := 0
+	var mixed := 0
+	for u in b.units:
+		for c in u.rig.find_children("*", "MeshInstance3D", true, false):
+			var gi := c as MeshInstance3D
+			if gi.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY:
+				only_shadow += 1
+			elif gi.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_ON and gi.material_override is ShaderMaterial and bool(gi.material_override.get_meta("rig_mix", false)):
+				mixed += 1
+	check(only_shadow == 0 and mixed > 20 and B3Mats.shader("rig_pm_mix").code.contains("IN_SHADOW_PASS"), "no shadow-only copies of the models (%d): %d meshes leave the pieces that cast no shadow out of it" % [only_shadow, mixed])
 	# knocked out: the merged pieces go grey like the rest (the body parts'
 	# own pieces; a held weapon, on its hand, keeps its colours as it always did)
 	var ko: B3Unit = null
@@ -402,7 +475,7 @@ func _models() -> void:
 			var m := (c as MeshInstance3D).material_override
 			if m is ShaderMaterial and m.has_meta("rig_pm") and c.get_parent() is RigidBody3D:
 				merged += 1
-				if m == B3Mats.rig_mat("ko", true) or m == B3Mats.rig_mat("ko", false):
+				if String(m.get_meta("rig_look", "")) == "ko":
 					grey += 1
 	check(rd != null and merged > 3 and grey == merged, "a knocked-out soldier's merged pieces go grey (%d of %d)" % [grey, merged])
 	# a King's crown sits on top of the head, helmet and all
@@ -414,6 +487,53 @@ func _models() -> void:
 	var head: Node3D = k.rig.pv.head
 	var crown := head.get_node_or_null("Crown") as Node3D
 	check(crown != null and crown.position.y > 0.5 and crown.get_child_count() >= 2, "a King's crown sits on the helmet (%.2f m up)" % (crown.position.y if crown else 0.0))
+	# hit just before going down: no hit flash stays on (an animal's or
+	# dinosaur's head, a horse's head and a crown sit on plain nodes under the
+	# body parts), and the whole body greys, but not the crown
+	var pick := func(kind: String) -> B3Unit:
+		for u in b.units:
+			if u.kind == kind and not u.down and u != k:
+				return u
+		return null
+	var kod: Array[B3Unit] = [pick.call("wolf"), pick.call("trex"), pick.call("horseknight"), pick.call("knight")]
+	var downed: B3Unit = pick.call("bear")
+	kod[3].make_king()
+	for u in kod:
+		u.rig.flash()
+	downed.rig.flash()
+	for u in kod:
+		u._ko(Vector3(0, 3, 1), null)
+	downed.knock_down(Vector3(0, 3, 1))
+	await sim(0.2)
+	var lit := 0
+	var coloured := 0
+	var crowns := 0
+	var crown_grey := 0
+	for r in b.ragdolls:
+		if not is_instance_valid(r) or not r.kind in ["wolf", "trex", "horseknight", "knight", "bear"]:
+			continue
+		for c in r.find_children("*", "MeshInstance3D", true, false):
+			var mi := c as MeshInstance3D
+			if mi.material_overlay != null:
+				lit += 1
+			if not r.dead:
+				continue
+			var gear := ""
+			var p := mi.get_parent()
+			while p != null and not p is RigidBody3D:
+				if String(p.name) in ["Hand", "Shield", "Crown"]:
+					gear = String(p.name)
+				p = p.get_parent()
+			var mt := mi.material_override
+			var grey_mt := mt is ShaderMaterial and String(mt.get_meta("rig_look", "")) == "ko"
+			if gear == "Crown":
+				crowns += 1
+				if grey_mt:
+					crown_grey += 1
+			elif gear == "" and mt is ShaderMaterial and mt.has_meta("rig_pm") and not grey_mt:
+				coloured += 1
+	check(lit == 0, "hit just before being knocked out or over, nothing stays flashing white (%d pieces)" % lit)
+	check(coloured == 0 and crowns > 0 and crown_grey == 0, "knocked out, an animal's, a dinosaur's and a horse's head go grey too (%d not), and a King's crown stays gold" % coloured)
 	# changing team: a new model in the new team's colour, still merged
 	k.set_team("green")
 	var tm := Color()
@@ -437,9 +557,30 @@ func _models() -> void:
 			continue
 		for c in rb.find_children("*", "MeshInstance3D", true, false):
 			var m := (c as MeshInstance3D).material_override
-			if m == B3Mats.rig_mat("char", true) or m == B3Mats.rig_mat("char", false):
+			if m is ShaderMaterial and String(m.get_meta("rig_look", "")) == "char":
 				scorched += 1
 	check(scorched >= 6, "a wrecked tank's pieces fly off scorched (%d merged meshes)" % scorched)
+
+
+## Settings.smooth_3d turns 2x MSAA on for 3D Battle (and off), and leaving
+## 3D Battle for the title screen turns it off and drops the kept maps.
+func _smooth_and_cache() -> void:
+	print("smooth edges and leaving")
+	var was: bool = Settings.smooth_3d
+	await fresh("grassland")
+	var vp: Viewport = b.get_viewport()
+	check(vp.msaa_3d == (Viewport.MSAA_2X if was else Viewport.MSAA_DISABLED), "3D Battle opens with smooth edges as set (%s)" % was)
+	Settings.set_smooth_3d(not was)
+	var flipped: bool = vp.msaa_3d == (Viewport.MSAA_2X if not was else Viewport.MSAA_DISABLED)
+	Settings.set_smooth_3d(was)
+	check(flipped and vp.msaa_3d == (Viewport.MSAA_2X if was else Viewport.MSAA_DISABLED), "and changes with the setting")
+	check(not B3World._memo.is_empty(), "maps are kept for the next battle while it's open")
+	b.main = self      # (as if it were the game's: leaving goes back to the title screen)
+	b.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	b = null
+	check(vp.msaa_3d == Viewport.MSAA_DISABLED and B3World._memo.is_empty() and B3World._kmesh.is_empty(), "leaving 3D Battle turns smooth edges off and drops the kept maps")
 
 
 # ------------------------------------------------------------- screenshots

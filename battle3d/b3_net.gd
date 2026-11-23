@@ -6,9 +6,12 @@ extends Node
 ## friends a snapshot: every fighter and vehicle (where, which way, what it's
 ## doing, health), barrels and crates, flying rockets, pools, buildings, the
 ## knocked-out, the battle state and who's playing what, the 🏁 battle goal
-## (Kings, the hill, 🌊 waves) and the 🪙 points to spend. Effects and sounds
-## that happened since the last snapshot ride along. Things that must not get
-## lost (a fighter knocked out, a wall piece breaking) go on a reliable channel.
+## (Kings, the hill, 🌊 waves), the 🧩 puzzle, the 🪙 points to spend and the
+## 🏆 scoreboard. Each one only carries what changed since the last snapshot
+## that friend got (NetDelta: the friend says which one with an "ak"); a
+## friend who has just joined, or lost too many, gets a whole one. Things
+## that must not get lost go on reliable channels: a fighter knocked out, a
+## wall piece breaking (channel 0), and the effects and sounds (channel 2).
 ##
 ## A friend's computer shows "puppets": the same fighters, built the same way,
 ## but with their physics and brains switched off, glided smoothly to where the
@@ -18,10 +21,16 @@ extends Node
 ## Friends can place things from the Toy Box, erase, press Fight/Pause/Reset,
 ## and play any fighter or vehicle: their keys and mouse go to the host ~30
 ## times a second (B3Ctl.pack) and the host's copy of that fighter obeys them.
+## Presses that happen once (a jump, a quick click or right-click) are
+## counted, and every controls packet carries the counts so far, so a lost
+## packet can't lose one. The host can stop friends changing the battle
+## (allow_changes): then they can only play.
 
 const PORT := 24710
 const GAME_ID := "wiggle-works-3d"
-const VERSION := 1
+const VERSION := 2      # 2: small snapshots (NetDelta), effects on their own channel, counted presses
+const CH_SNAP := 1      # snapshots (unreliable) and acks
+const CH_FX := 2        # effects and sounds (reliable, so a lost packet can't lose the nuke's flash)
 const MAX_FRIENDS := 7
 const SNAP_HZ := 20.0
 const CTL_HZ := 30.0
@@ -53,13 +62,46 @@ const FX_ARGS := {
 	"word": [TYPE_VECTOR3, TYPE_STRING, TYPE_COLOR],
 	"splash": [TYPE_VECTOR3, TYPE_BOOL],
 	"nuke": [TYPE_VECTOR3],
+	"chute": [TYPE_VECTOR3, TYPE_VECTOR3, TYPE_COLOR],      # 🪂 a pilot bailing out (B3Chute)
 }
+
+## The tables of a snapshot (see NetDelta), field by field after the id:
+## fighters and vehicles: kind, team, size, where, facing (or the whole body's
+## turn), flags (see _unit_entry), health, action, how far through it, speed,
+## mood, velocity (knocked down only), a vehicle's own state, look (seed), and
+## for whoever plays it, how ready its right-click power and its weapon are
+## (B3Player.net_gauges: the meters).
+const UNITS := [NetDelta.STR | NetDelta.ONCE, NetDelta.STR, NetDelta.FIX16, NetDelta.POS, NetDelta.ROT, NetDelta.U32, NetDelta.FRAC,
+	NetDelta.STR, NetDelta.FRAC, NetDelta.FIX16, NetDelta.STR, NetDelta.VEL, NetDelta.NUMS, NetDelta.I64 | NetDelta.ONCE,
+	NetDelta.FRAC, NetDelta.FRAC]
+const PROPS := [NetDelta.STR | NetDelta.ONCE, NetDelta.POS, NetDelta.QUAT, NetDelta.U8]          # kind, where, turn, lit
+const PROJS := [NetDelta.STR | NetDelta.ONCE, NetDelta.POS, NetDelta.VEL]                       # kind, where, velocity
+const POOLS := [NetDelta.STR | NetDelta.ONCE, NetDelta.POS, NetDelta.FIX32, NetDelta.BOOL]       # kind, where, size, the puzzle's own
+## buildings: kind, where, yaw, length, look (seed), the pieces still standing,
+## a History building's whole shape (new ones only), the puzzle's own
+const STRUCTS := [NetDelta.STR | NetDelta.ONCE, NetDelta.POS, NetDelta.F32, NetDelta.F32, NetDelta.I64 | NetDelta.ONCE, NetDelta.VAR,
+	NetDelta.VAR | NetDelta.ONCE, NetDelta.BOOL]
+const PLANES := [NetDelta.POS, NetDelta.VEL]                                                     # ✈️ airstrike planes
+const CORPSES := [NetDelta.STR | NetDelta.ONCE, NetDelta.STR | NetDelta.ONCE, NetDelta.POSC]     # kind, team, where (roughly)
+static var TABLES: Array = [["u", PackedInt32Array(UNITS)], ["p", PackedInt32Array(PROPS)], ["j", PackedInt32Array(PROJS)],
+	["h", PackedInt32Array(POOLS)], ["s", PackedInt32Array(STRUCTS)], ["a", PackedInt32Array(PLANES)], ["c", PackedInt32Array(CORPSES)]]
+## ...and the single values, sent only when they change: the battle state,
+## the 🏆 scoreboard, rules, 🏁 battle goal, 🪙 points, players, 🧩 puzzle and the lock.
+const SINGLES := ["st", "sb", "r", "md", "bg", "pl", "pz", "lk"]
+## What a friend can't do when the host has locked the battle (allow_changes).
+const LOCKED := ["place", "drop", "erase", "erase_corpse", "reset", "c4", "launch", "heal", "team", "mood"]
+## Stickers a friend earns in the host's battle (knock-outs by the fighter they play).
+const FRIEND_STICKERS := ["ace", "hero", "tankbuster"]
+## flags (_unit_entry) bits past the ones B3Unit has
+const F_PUZZLE := 1024     # 🧩 the puzzle's own army
+const F_WAVE := 2048       # 🌊 a Wave Defense attacker
+const F_ROUTED := 4096     # 🏳️ its King fell: running off home, arms waving (B3Modes)
 
 var battle = null
 var mode := ""                 # "host" or "client"
 var peer: ENetMultiplayerPeer = null
 var mp: SceneMultiplayer = null
-var friends := {}              # host: peer id -> {name, color, ctl: B3Ctl, uid: int}
+var friends := {}              # host: peer id -> {name, color, ctl: B3Ctl, uid: int, ack: int, taps, kills}
 var players: Array = []        # everyone: [{id, name, col, uid}] (the client gets it from the host)
 var my_id := 1
 var host_name := ""
@@ -70,9 +112,14 @@ var _beacon := PacketPeerUDP.new()
 var _beacon_t := 0.0
 var _snap_t := 0.0
 var _snap_n := 0
-var _fx: Array = []            # effects and sounds for the next snapshot
+var _fx: Array = []            # effects and sounds since the last snapshot
 var _ev: Array = []            # reliable events
 var _last_us := 0
+var _tx := NetDelta.Sender.new(TABLES)
+var _beacon_said := ""
+var _strangers := {}           # rate limits for copies of the game that aren't friends yet
+var allow_changes := true      # 🔒 friends may place, erase, blow things up and ⏮ reset (false: only play)
+var bytes_out := 0             # bytes sent to friends (for tests)
 # client
 var puppets := {}              # host instance id -> our node (unit, prop, projectile, hazard, structure)
 var corpses := {}              # host unit id -> our knocked-out ragdoll
@@ -89,6 +136,14 @@ var _replaying := false        # client: showing the host's effects right now
 var _trees := PackedInt32Array()   # client: trees and rocks still standing in the host's battle when we joined
 var _trees_map := ""
 var _c4_shown := -1
+var _rx := NetDelta.Receiver.new(TABLES)   # client: rebuilds whole snapshots from the host's changes
+var _sb := PackedStringArray()             # client: the 🏆 scoreboard under the banner
+var _taps := PackedInt32Array([0, 0, 0])   # client: jumps, clicks and right-clicks so far (see _client_tick)
+var _held := [false, false]                # client: attack / right-click held last frame
+var _jumped := false                       # client: a jump since the last controls packet
+var _zone_map := ""                        # client: the map the glowing build area was laid on
+var _pz_over := false                      # client: the 🧩 puzzle's ⭐ card is showing
+var host_locked := false                   # client: the host has stopped friends changing the battle
 
 
 func is_host() -> bool:
@@ -153,6 +208,7 @@ func close() -> void:
 			battle.clear_budget()
 		if battle.modes:
 			battle.modes.apply_net([""])
+		_puzzle([""])
 	if mp and peer:
 		if is_host():
 			_send({"m": "bye", "why": "The host stopped sharing the battle."}, true)
@@ -202,6 +258,28 @@ func rec_fx(e: Array) -> void:
 func rec_event(e: Array) -> void:
 	if is_host() and not friends.is_empty():
 		_ev.append(e)
+		if e.size() > 1 and e[0] is String and String(e[0]) == "ko":
+			_friend_ko(int(e[1]))
+
+
+## Host: fighter `vid` was just knocked out. If the fighter or vehicle a
+## friend is playing did it (its knock-outs just went up), that friend earns
+## the 📒 stickers the host would for its own (B3Battle._ko_stickers).
+func _friend_ko(vid: int) -> void:
+	var o: Object = instance_from_id(vid) if vid != 0 else null
+	var victim: B3Unit = o as B3Unit if o is B3Unit and is_instance_valid(o) else null
+	for id in friends:
+		var f: Dictionary = friends[id]
+		var by: Object = instance_from_id(int(f.get("uid", 0))) if int(f.get("uid", 0)) != 0 else null
+		if not (by is B3Unit) or not is_instance_valid(by) or (by as B3Unit).ctl != f.ctl:
+			continue
+		var bu := by as B3Unit
+		if bu.kills <= int(f.get("kills", 0)):
+			continue
+		f.kills = bu.kills
+		var got := B3Battle.ko_stickers_for(bu, victim, true)
+		if not got.is_empty():
+			_send({"m": "stk", "l": Array(got)}, true, id)
 
 
 # ------------------------------------------------------------------- tick
@@ -222,14 +300,16 @@ func _process(_d: float) -> void:
 
 
 func _host_tick(dt: float) -> void:
+	# the beacon: once a second, and straight away when the map or the number of players changes
 	_beacon_t -= dt
-	if _beacon_t <= 0.0:
+	var md: Dictionary = B3Defs.MAPS.get(battle.map_id, {})
+	var bc := JSON.stringify({"game": GAME_ID, "v": VERSION, "name": Settings.player_name,
+		"world": "%s %s" % [md.get("icon", ""), md.get("name", "")], "players": friends.size() + 1, "port": PORT})
+	if _beacon_t <= 0.0 or bc != _beacon_said:
 		_beacon_t = 1.0
-		var md: Dictionary = B3Defs.MAPS.get(battle.map_id, {})
-		var b := JSON.stringify({"game": GAME_ID, "v": VERSION, "name": Settings.player_name,
-			"world": "%s %s" % [md.get("icon", ""), md.get("name", "")], "players": friends.size() + 1, "port": PORT})
+		_beacon_said = bc
 		_beacon.set_dest_address("255.255.255.255", NetCommon.BEACON_PORT)
-		_beacon.put_packet(b.to_utf8_buffer())
+		_beacon.put_packet(bc.to_utf8_buffer())
 	# friends' fighters: drop control if the fighter is gone
 	for id in friends:
 		var f: Dictionary = friends[id]
@@ -246,16 +326,43 @@ func _host_tick(dt: float) -> void:
 		_snap_t = 1.0 / SNAP_HZ
 		_snap_n += 1
 		_refresh_players()
-		_send(snapshot(), false)
-		_fx = []
+		var st := delta_state(snapshot())
+		_tx.push(st[0], st[1])
+		for id in friends:
+			# just what's changed since the last snapshot this friend got (all of it if none)
+			var pkt := _tx.packet(int(friends[id].get("ack", -1)))
+			bytes_out += pkt.size()
+			mp.send_bytes(pkt, id, MultiplayerPeer.TRANSFER_MODE_UNRELIABLE_ORDERED, CH_SNAP)
+		if not _fx.is_empty():
+			_send({"m": "fx", "l": _fx}, true, 0, CH_FX)
+			_fx = []
 
 
-func _send(d: Dictionary, reliable: bool, to := 0) -> void:
+func _send(d: Dictionary, reliable: bool, to := 0, ch := -1) -> void:
 	if mp == null or peer == null:
 		return
 	var pkt := NetCommon.encode(d)
 	var m := MultiplayerPeer.TRANSFER_MODE_RELIABLE if reliable else MultiplayerPeer.TRANSFER_MODE_UNRELIABLE_ORDERED
-	mp.send_bytes(pkt, to, m, 0 if reliable else 1)
+	var c := ch if ch >= 0 else (0 if reliable else CH_SNAP)
+	if to == 0 and is_host():
+		# everyone who has said hello (not a copy of the game that's still saying it, or can't)
+		for id in friends:
+			bytes_out += pkt.size()
+			mp.send_bytes(pkt, id, m, c)
+		return
+	bytes_out += pkt.size()
+	mp.send_bytes(pkt, to, m, c)
+
+
+## snapshot() split for NetDelta.Sender.push: [each table's entries, the single values].
+static func delta_state(s: Dictionary) -> Array:
+	var t := {}
+	for tp: Array in TABLES:
+		t[tp[0]] = s.get(tp[0], [])
+	var g := {}
+	for k: String in SINGLES:
+		g[k] = s.get(k)
+	return [t, g]
 
 
 # ----------------------------------------------------------- host: friends
@@ -284,7 +391,9 @@ func _host_packet(id: int, m: String, d: Dictionary) -> void:
 	match m:
 		"hello":
 			if not (d.get("v") is int) or int(d.v) != VERSION:
-				_send({"m": "bye", "why": "Different game version. Update Wiggle Works on both computers."}, true, id)
+				_send({"m": "bye", "why": NetCommon.WRONG_VERSION}, true, id)
+				if battle.ui and NetCommon.allow(_strangers, "version", 0.2, 1.0):
+					battle.ui.toast("👋 " + NetCommon.WRONG_VERSION, false)      # (just here: it's not about the friends already in)
 				return
 			if friends.has(id):
 				return      # already said hello
@@ -292,7 +401,7 @@ func _host_packet(id: int, m: String, d: Dictionary) -> void:
 			c.peer = id
 			c.who = NetCommon.clean_name(d.get("name"))
 			c.color = d.color if d.get("color") is Color else Color.WHITE
-			friends[id] = {"name": c.who, "color": c.color, "ctl": c, "uid": 0}
+			friends[id] = {"name": c.who, "color": c.color, "ctl": c, "uid": 0, "ack": -1}
 			var hi := {"m": "welcome", "id": id, "host": Settings.player_name}
 			if battle.world and battle.world.scenery:
 				hi["map"] = battle.map_id
@@ -306,21 +415,53 @@ func _host_packet(id: int, m: String, d: Dictionary) -> void:
 			battle.snd("pop", null, 0.7)
 		"ctl":
 			if friends.has(id) and d.get("a") is Array and ctl_ok(d.a):
-				(friends[id].ctl as B3Ctl).unpack(d.a)
+				var ctl: B3Ctl = friends[id].ctl
+				ctl.unpack(d.a)
+				if (d.a as Array).size() > 9:
+					_count_taps(friends[id], ctl, int(d.a[9]))
+		"ak":
+			# the last snapshot this friend got: the next ones only say what's changed since
+			if friends.has(id) and d.get("n") is int:
+				friends[id].ack = int(d.n)
 		"cmd":
 			if friends.has(id) and d.get("c") is Dictionary:
 				_command(id, d.c)
 
 
-## A friend's controls (B3Ctl.pack): only real, sensible numbers get through
-## (NaN or infinity would send their fighter flying off the map).
+## A friend's controls (B3Ctl.pack, then the counted presses): only real,
+## sensible numbers get through (NaN or infinity would send their fighter
+## flying off the map).
 static func ctl_ok(a: Array) -> bool:
-	if a.size() != 9 or not (a[8] is int):
+	if (a.size() != 9 and a.size() != 10) or not (a[8] is int):
+		return false
+	if a.size() == 10 and not (a[9] is int and int(a[9]) >= 0 and int(a[9]) < (1 << 24)):
 		return false
 	for i in [0, 1, 2, 3, 4, 6, 7]:
 		if not NetCommon.num_ok(a[i], 1000.0):
 			return false
 	return NetCommon.vec3_ok(a[5])
+
+
+## The friend's counts of jumps, clicks and right-clicks so far (8 bits
+## each). Any that went up since their last packet happen now, even if the
+## packet with the press in it got lost, or the button was let go before a
+## packet went: a jump, one attack, one power.
+static func _count_taps(f: Dictionary, ctl: B3Ctl, t: int) -> void:
+	var last: Variant = f.get("taps")
+	f["taps"] = t
+	if not (last is int):
+		return      # the first one: just where the counts start
+	for k in 3:
+		var n := ((t >> (8 * k)) - (int(last) >> (8 * k))) & 255
+		if n == 0 or n > 64:
+			continue
+		match k:
+			0:
+				ctl.jump = true
+			1:
+				ctl.fire = true       # (the next packet says whether it's still held)
+			2:
+				ctl.fire2 = true
 
 
 ## The number a friend sent for something in the battle (0 if it isn't one).
@@ -331,17 +472,40 @@ static func _nid(c: Dictionary) -> int:
 
 ## A friend pressed something: do it here, on the real battle. What they send
 ## is checked first: made-up names, NaN positions or things that aren't in
-## this battle are ignored, and placing and dropping is rate-limited.
+## this battle are ignored, and placing, dropping and the big buttons are
+## rate-limited (a whole block of fighters counts one each). The puzzle's
+## army and Wave Defense's attackers are hands off for friends too, and
+## when the host has locked the battle (allow_changes) friends can only play.
 func _command(id: int, c: Dictionary) -> void:
 	var f: Dictionary = friends[id]
 	var cmd: Variant = c.get("c", "")
-	match String(cmd) if cmd is String else "":
+	var cs := String(cmd) if cmd is String else ""
+	if not allow_changes and LOCKED.has(cs):
+		_tell(id, "🔒 %s has locked the battle: you can play fighters, but not change things." % Settings.player_name)
+		return
+	match cs:
 		"place":
 			var pc := _clean_place(c)
 			if battle.tools and not pc.is_empty() and NetCommon.allow(f, "spawn", 8.0, 20.0):
-				if not _can_place(id, String(pc.id), pc.a):
+				var what := String(pc.id)
+				if not _can_place(id, what, pc.a, 0 if B3Defs.HAZARDS.has(what) else 1):
 					return
+				if B3Defs.HAZARDS.has(what) and int(battle.budget) >= 0 and battle.tools.has_method("_pool_r"):
+					# 🪙 a pool costs what it is once it's dragged out: a Pool, or a Lake past 5 m
+					var hd: Dictionary = B3Defs.HAZARDS[what]
+					var r: float = battle.pool_room(pc.a, float(battle.tools.call("_pool_r", hd, pc.a, pc.b, pc.dragged)))
+					if not _can_place(id, B3Battle.pool_id(String(hd.kind), r), pc.a):
+						return
+				if not NetCommon.allow(f, "units", 40.0, 160.0):
+					_tell(id, "✋ Whoa, that's a lot! Wait a moment before placing more.")
+					return
+				var before: int = _things() + battle.props.size()
 				battle.tools.place_for(pc)
+				var made: int = _things() + battle.props.size() - before
+				# a Shift-drag block can be 144 fighters: each one counts
+				NetCommon.charge(f, "units", 40.0, 160.0, float(made - 1))
+				if made == 0 and B3Defs.STRUCTS.has(what) and int(battle.budget) >= 0:
+					_tell(id, "🚧 That sticks out past your side. Build it inside the glowing area!")
 		"drop":
 			var bid: Variant = c.get("id")
 			var pos: Variant = c.get("pos")
@@ -352,13 +516,19 @@ func _command(id: int, c: Dictionary) -> void:
 				return
 			if bid == "nuke" and not NetCommon.allow(f, "nuke", 0.25, 1.0):
 				return      # one nuke every few seconds is plenty
+			if battle.puzzle != null and String(bid) in B3Puzzles.BIG_BOOMS:
+				var bd: Dictionary = B3Defs.BOOMS[bid]
+				_tell(id, "🚫 The %s %s is too big for a puzzle: it would blow up the whole thing! Try mines, barrels or C4." % [bd.icon, bd.name])
+				return
 			var at: Vector3 = pos
 			var way: Vector3 = dir
 			if not _can_place(id, String(bid), at):
 				return
-			battle.drop(String(bid), at, way)
+			battle.drop(String(bid), at, way, false)      # (the friend's boom: no stickers for the host)
 		"erase":
 			var o = _thing(_nid(c))
+			if o != null and not _hands_ok(id, o as Node, "erase"):
+				return
 			if o is B3Unit:
 				battle.remove_unit(o)
 			elif o is B3Prop:
@@ -378,12 +548,15 @@ func _command(id: int, c: Dictionary) -> void:
 			if u == null or (u.ctl != null and u.ctl != f.ctl):
 				_send({"m": "toast", "t": "Someone is already playing that one!"}, true, id)
 				return
+			if not _hands_ok(id, u, "play"):
+				return
 			_unplay(f)
 			var ctl: B3Ctl = f.ctl
 			ctl.clear_buttons()
 			ctl.look_yaw = u.facing
 			B3Player.attach(u, ctl)
 			f.uid = u.get_instance_id()
+			f.kills = u.kills      # (its knock-outs from now on are this friend's: _friend_ko)
 			if not battle.fighting:
 				battle.set_fighting(true)
 			if battle.paused:
@@ -391,45 +564,76 @@ func _command(id: int, c: Dictionary) -> void:
 		"unplay":
 			_unplay(f)
 		"fight":
-			battle.toggle_play()
+			if NetCommon.allow(f, "toggle", 4.0, 6.0):
+				battle.toggle_play()
 		"slowmo":
-			battle.set_slowmo(not battle.slowmo)
+			# 🐢 G or the button on a friend's screen: the host's slow motion, for everyone
+			if NetCommon.allow(f, "toggle", 4.0, 6.0):
+				var on: Variant = c.get("on")
+				battle.set_slowmo(bool(on) if on is bool else not battle.slowmo)
 		"reset":
-			battle.reset_battle()
+			if NetCommon.allow(f, "reset", 0.5, 2.0):
+				battle.reset_battle()
 		"c4":
-			battle.detonate_c4()
+			if NetCommon.allow(f, "toggle", 4.0, 6.0):
+				battle.detonate_c4(false)
 		"wave":
 			# 🌊 ▶ Next wave (or start wave 1)
-			if battle.modes and NetCommon.allow(f, "wave", 0.5, 2.0):
+			# (only counted when there's a wave to start, so pressing it at other times costs nothing)
+			if battle.modes and String(battle.modes.kind) == "waves" and String(battle.modes.phase) in ["build", "break"] \
+					and NetCommon.allow(f, "wave", 0.5, 2.0):
 				battle.modes.next_wave()
 		"launch":
 			var ul := _unit(_nid(c))
-			if ul:
+			if ul and _hands_ok(id, ul, "launch"):
 				ul.knock_down(Vector3(randf_range(-4, 4), 18.0, randf_range(-4, 4)))
 		"heal":
 			var uh := _unit(_nid(c))
-			if uh:
+			if uh and _hands_ok(id, uh, "heal"):
 				uh.hp = uh.max_hp
 				battle.fx.heal(uh.center() + Vector3(0, 0.6, 0))
 				battle.snd("heal", uh.position, 0.8)
 		"team":
 			var u2 := _unit(_nid(c))
 			var t: Variant = c.get("t")
-			if u2 and t is String and B3Defs.TEAM.has(t):
+			if u2 and t is String and B3Defs.TEAM.has(t) and _hands_ok(id, u2, "team"):
 				u2.set_team(String(t))
 		"mood":
 			var u3 := _unit(_nid(c))
 			var p: Variant = c.get("p")
-			if u3 and p is String and B3Defs.PERS.has(p):
+			if u3 and p is String and B3Defs.PERS.has(p) and _hands_ok(id, u3, "mood"):
 				u3.set_personality(String(p))
+
+
+## Fighters, buildings and pools in the battle (to count what a placing made).
+func _things() -> int:
+	return battle.units.size() + battle.structs.size() + battle.hazards.size()
+
+
+## True if a friend may do `what` to `n` (B3Battle.hands_off: the 🧩
+## puzzle's army, 🌊 the attackers...); if not, they're told why.
+func _hands_ok(id: int, n: Node, what: String) -> bool:
+	if not battle.has_method("hands_off"):
+		return true
+	var why := String(battle.call("hands_off", n, what))
+	if why == "":
+		return true
+	_tell(id, why)
+	return false
+
+
+## A message at the top of friend `id`'s screen (not too many of them).
+func _tell(id: int, txt: String) -> void:
+	if friends.has(id) and NetCommon.allow(friends[id], "tell", 1.0, 3.0):
+		_send({"m": "toast", "t": txt}, true, id)
 
 
 ## 🪙 Budget battles (🌊 Wave Defense, 🧩 puzzles): a friend can only place
 ## what there are points for, in the glowing area. If not, they're told why.
-func _can_place(id: int, what: String, at: Vector3) -> bool:
+func _can_place(id: int, what: String, at: Vector3, count := 1) -> bool:
 	if int(battle.budget) < 0:
 		return true
-	var why: String = battle.can_place(what, at)
+	var why: String = battle.can_place(what, at, count)
 	if why == "":
 		return true
 	_send({"m": "toast", "t": why}, true, id)
@@ -519,7 +723,7 @@ func snapshot() -> Dictionary:
 	var hs: Array = []
 	for h: B3Hazard in b.hazards:
 		if is_instance_valid(h):
-			hs.append([h.get_instance_id(), h.kind, h.position, h.radius])
+			hs.append([h.get_instance_id(), h.kind, h.position, h.radius, h.has_meta("puzzle")])
 	var ss: Array = []
 	for s: B3Struct in b.structs:
 		if is_instance_valid(s) and not s.pieces.is_empty():
@@ -528,41 +732,56 @@ func snapshot() -> Dictionary:
 			for pc in s.pieces:
 				if is_instance_valid(pc):
 					alive.append(int(pc.get_meta("pi", 0)))
-			var se := [s.get_instance_id(), s.kind, s.position, s.rotation.y, s.length, int(s.get_meta("seed", 0)), alive]
+			var shape: Variant = null
 			if not B3Defs.STRUCTS.has(s.kind):
-				# History battles' own pieces: the whole shape, once a second
-				se.append(s.piece_data() if _snap_n % 20 == 1 else null)
-			ss.append(se)
+				# History battles' own pieces: the whole shape (only sent to friends
+				# who haven't got this building yet; worked out again once a second)
+				if not s.has_meta("net_shape") or _snap_n % 20 == 1:
+					s.set_meta("net_shape", s.piece_data())
+				shape = s.get_meta("net_shape")
+			ss.append([s.get_instance_id(), s.kind, s.position, s.rotation.y, s.length, int(s.get_meta("seed", 0)), alive, shape, s.has_meta("puzzle")])
 	var ap: Array = []
 	for pl: Dictionary in b.planes:      # ✈️ airstrike planes
 		var pn = pl.node
 		if is_instance_valid(pn):
 			var pv: Vector3 = pl.dir
 			ap.append([(pn as Node3D).get_instance_id(), (pn as Node3D).global_position, pv * float(pl.speed)])
-	var out := {"m": "snap", "u": us, "p": ps, "j": js, "h": hs, "s": ss, "a": ap, "fx": _fx, "pl": players,
-		"st": [b.map_id, b.fighting, b.paused, b.slowmo, b.ui.banner_lbl.text if b.ui and b.ui.banner_lbl.visible else "",
+	var cs: Array = []
+	for rd: B3Ragdoll in b.ragdolls:
+		if is_instance_valid(rd) and rd.dead and rd.has_meta("nid"):
+			cs.append([int(rd.get_meta("nid")), rd.kind, rd.team, rd.center()])
+	# the winner banner's headline, and the 🏆 scoreboard under it as data (B3Battle.scoreboard)
+	var head := ""
+	if b.ui and b.ui.banner_lbl.visible:
+		head = String(b.ui.banner_lbl.text).get_slice("\n", 0)
+	var sb := PackedStringArray()
+	if head != "" and String(b.winner) != "":
+		sb = b.scoreboard()
+	var pz: Array = [""]
+	if b.puzzle != null and is_instance_valid(b.puzzle):
+		pz = [String(b.puzzle.id), bool(b.puzzle.over), int(b.puzzle.won)]
+	return {"m": "snap", "u": us, "p": ps, "j": js, "h": hs, "s": ss, "a": ap, "c": cs, "pl": players,
+		"st": [b.map_id, b.fighting, b.paused, b.slowmo, head,
 			b.ui.banner_lbl.get_theme_color("font_color") if b.ui else Color.WHITE, b.c4_count()],
-		"r": B3Rules.values,
+		"sb": sb,
+		"r": B3Rules.values.duplicate(),
 		"md": b.modes.net_state() if b.modes else [""],
-		"bg": [int(b.budget), int(b.spent), b.build_zone, String(b.build_team)]}
-	if _snap_n % 5 == 0:
-		var cs: Array = []
-		for rd: B3Ragdoll in b.ragdolls:
-			if is_instance_valid(rd) and rd.dead and rd.has_meta("nid"):
-				cs.append([int(rd.get_meta("nid")), rd.kind, rd.team, rd.center()])
-		out["c"] = cs
-	return out
+		"bg": [int(b.budget), int(b.spent), b.build_zone, String(b.build_team)],
+		"pz": pz,
+		"lk": not allow_changes}
 
 
 ## flags: 1 down, 2 aiming, 4 cheering, 8 on fire, 16 scared, 32 swooping, 64 played by someone, 128 held,
-## 256 shield up (right-click, B3Player), 512 a 👑 King (B3Modes)
+## 256 shield up (right-click, B3Player), 512 a 👑 King (B3Modes), 1024 the 🧩 puzzle's own (F_PUZZLE),
+## 2048 a 🌊 Wave Defense attacker (F_WAVE), 4096 running away, its King fallen (F_ROUTED)
 func _unit_entry(u: B3Unit) -> Array:
 	var aiming: bool = (u.target != null or (u.player and B3Player.steady(u, u.ctl))) and b_fighting()
 	var flags := int(u.down) | (int(aiming) << 1) | (int(u.cheer) << 2) | (int(u.burn_t > 0.0) << 3) \
 		| (int(u.fleeing) << 4) | (int(u._swoop) << 5) | (int(u.player) << 6) | (int(u.held) << 7) | (int(u.shield_up) << 8) \
-		| (int(u.king) << 9)
+		| (int(u.king) << 9) | (F_PUZZLE if u.has_meta("puzzle") else 0) | (F_WAVE if u.has_meta("wave") else 0) \
+		| (F_ROUTED if u.routed else 0)
 	var pos: Vector3 = u.global_position
-	var vel: Vector3 = u.linear_velocity
+	var vel := Vector3.ZERO      # (only needed for knocking a friend's copy down the same way)
 	if u.down and u.ragdoll and is_instance_valid(u.ragdoll):
 		pos = u.ragdoll.center()
 		u.ragdoll.set_meta("nid", u.get_instance_id())
@@ -570,8 +789,11 @@ func _unit_entry(u: B3Unit) -> Array:
 			vel = u.ragdoll.root_body.linear_velocity
 	var rot: Variant = u.global_basis.get_rotation_quaternion() if u is B3Vehicle else u.facing
 	var ns: Variant = u.call("net_state") if u.has_method("net_state") else null
+	# how ready the power and the weapon are, for whoever plays it (their meters)
+	var gauges := B3Player.net_gauges(u) if u.player else PackedFloat32Array([1.0, 1.0])
 	return [u.get_instance_id(), u.kind, u.team, u.size_mult, pos, rot, flags, u.hp / maxf(1.0, u.max_hp),
-		u.act, u.act_t / maxf(u.act_len, 0.01), u._spd, u.pers, vel, ns, int(u.get_meta("seed", -1))]
+		u.act, u.act_t / maxf(u.act_len, 0.01), u._spd, u.pers, vel, ns, int(u.get_meta("seed", -1)),
+		gauges[0], gauges[1]]
 
 
 func b_fighting() -> bool:
@@ -600,19 +822,40 @@ func _client_packet(m: String, d: Dictionary) -> void:
 			if d.get("trees") is PackedInt32Array and d.get("map") is String:
 				_trees = d.trees       # taken away once we're on the host's map (_apply_snapshot)
 				_trees_map = d.map
+			Settings.award("friends")      # 📒 played together (the host gets it too)
 			if battle.ui:
 				battle.ui.toast("👋 You joined %s's battle!" % host_name)
 				battle.ui.refresh_net()
 		"bye":
-			_lost(String(d.get("why", "The host left the battle.")))
+			var why: Variant = d.get("why")
+			_lost(String(why).left(200) if why is String else "The host left the battle.")
 		"toast":
-			if battle.ui:
-				battle.ui.toast(String(d.get("t", "")))
+			if battle.ui and d.get("t") is String:
+				battle.ui.toast(String(d.t).left(200))
 		"ev":
-			for e in d.get("list", []):
-				_apply_event(e)
+			if d.get("list") is Array:
+				for e in d.list:
+					if e is Array:
+						_apply_event(e)
+		"fx":
+			# the host's effects and sounds (reliable: the nuke's flash can't get lost)
+			if d.get("l") is Array and battle.puppet:
+				for e in (d.l as Array).slice(0, 800):
+					if e is Array:
+						_play_fx(e)
+		"stk":
+			# 📒 the fighter we play knocked someone out (see _friend_ko)
+			if d.get("l") is Array:
+				for k in (d.l as Array).slice(0, 4):
+					if k is String and FRIEND_STICKERS.has(k):
+						B3Battle.give_ko_sticker(String(k))
 		"snap":
-			_apply_snapshot(d)
+			if not _rx.take(d):
+				if _rx.need_full:
+					_send({"m": "ak", "n": -1}, false)      # one we can't use: ask for all of it
+				return
+			_send({"m": "ak", "n": _rx.last}, false)
+			_apply_snapshot(_rx.snapshot())
 
 
 func _lost(why: String) -> void:
@@ -632,13 +875,29 @@ func _client_tick(dt: float) -> void:
 	_clock += dt
 	if not connected:
 		return
-	# my controls go to the host
+	# my controls go to the host. Presses that happen once are counted every
+	# frame, and each packet says the counts so far (see _count_taps): a packet that
+	# gets lost, or a click let go before the next packet, can't lose one.
+	var me := B3Player.me
+	if B3Player.unit != null:
+		if me.jump:
+			_taps[0] = (_taps[0] + 1) & 255
+			_jumped = true
+			me.jump = false
+		if me.fire and not _held[0]:
+			_taps[1] = (_taps[1] + 1) & 255
+		if me.fire2 and not _held[1]:
+			_taps[2] = (_taps[2] + 1) & 255
+		_held = [me.fire, me.fire2]
 	_ctl_t -= dt
 	if B3Player.unit != null and _ctl_t <= 0.0:
 		_ctl_t = 1.0 / CTL_HZ
-		var me := B3Player.me
-		_send({"m": "ctl", "a": me.pack()}, false)
-		me.jump = false
+		var a := me.pack()
+		if _jumped:
+			a[8] = int(a[8]) | 4
+			_jumped = false
+		a.append(_taps[0] | (_taps[1] << 8) | (_taps[2] << 16))
+		_send({"m": "ctl", "a": a}, false)
 	# glide puppets toward where the host says they are
 	var k := minf(1.0, dt * 14.0)
 	for id in puppets.keys():
@@ -723,14 +982,19 @@ func _apply_snapshot(s: Dictionary) -> void:
 		if bool(st[2]) != b.paused:
 			b.set_paused(bool(st[2]))
 		if bool(st[3]) != b.slowmo:
-			b.set_slowmo(bool(st[3]))
-		var bt := String(st[4])
-		if bt != _banner and b.ui:
+			b.set_slowmo(bool(st[3]))      # 🐢 the host's slow motion (and time) for everyone
+		# the winner banner, with the 🏆 scoreboard under it (sent as data: "sb")
+		var bt := String(st[4]).get_slice("\n", 0).left(200)
+		var sbv: Variant = s.get("sb")
+		var sb: PackedStringArray = PackedStringArray((sbv as PackedStringArray).slice(0, 24)) if sbv is PackedStringArray else PackedStringArray()
+		if (bt != _banner or sb != _sb) and b.ui:
 			_banner = bt
+			_sb = sb
 			if bt == "":
 				b.ui.hide_banner()
 			else:
-				b.ui.banner(bt, st[5] if st[5] is Color else Color.WHITE)
+				b.ui.banner(bt, st[5] if st[5] is Color else Color.WHITE, sb)
+	host_locked = s.get("lk") is bool and bool(s.lk)
 	if _trees_map != "":
 		if _trees_map == b.map_id:
 			_take_away_scenery()
@@ -744,14 +1008,31 @@ func _apply_snapshot(s: Dictionary) -> void:
 			b.ui.refresh()
 	if b.modes:
 		b.modes.apply_net(s.get("md"))     # 🏁 the hill, the Kings' health, 🌊 the wave
+	_puzzle(s.get("pz"))
 	_budget(s.get("bg"))
-	players = s.get("pl", [])
-	for p in players:
-		# the host says we're not playing anything (our fighter got knocked out);
-		# not just after asking to play one, while the answer is on its way
-		if int(p.get("id", 0)) == my_id and B3Player.playing and int(p.get("uid", 0)) == 0 \
-				and _clock - _play_asked > 1.0:
+	var pl: Variant = s.get("pl", [])
+	players = []
+	if pl is Array:
+		for p in (pl as Array).slice(0, MAX_FRIENDS + 1):
+			if p is Dictionary:
+				players.append(p)
+	for p: Dictionary in players:
+		if int(p.get("id", 0)) != my_id or not B3Player.playing or _clock - _play_asked <= 1.0:
+			continue      # (not just after asking to play one, while the answer is on its way)
+		var uid := int(p.get("uid", 0)) if p.get("uid") is int else 0
+		var mine := B3Player.unit
+		var mine_id := int(mine.get_meta("nid", 0)) if mine != null and is_instance_valid(mine) else 0
+		if uid == 0:
+			# the host says we're not playing anything (our fighter got knocked out)
 			if b.tools:
+				b.tools.player_lost()
+		elif uid != mine_id:
+			# the host kept us on another one (⇥ Tab's pick was taken or knocked
+			# out on the way): look out of the one we really steer
+			var u = puppets.get(uid)
+			if u is B3Unit and is_instance_valid(u) and not (u as B3Unit).dead:
+				_play_here(u as B3Unit)
+			elif b.tools:
 				b.tools.player_lost()
 	for e in s.get("s", []):
 		_struct(e)
@@ -774,15 +1055,77 @@ func _apply_snapshot(s: Dictionary) -> void:
 			live[int(e[0])] = true
 			_corpse(e)
 		for nid in corpses.keys():
-			if not live.has(nid):
-				var rd = corpses[nid]
-				corpses.erase(nid)
-				if is_instance_valid(rd):
-					b.remove_ragdoll(rd, false)
-	for e in s.get("fx", []):
-		_play_fx(e)
+			var rd = corpses[nid]
+			if live.has(nid) or (is_instance_valid(rd) and _clock - float((rd as Node).get_meta("net_born", -10.0)) < 1.0):
+				continue      # (a knock-out's reliable "ko" can come before the snapshot that has it)
+			corpses.erase(nid)
+			if is_instance_valid(rd):
+				b.remove_ragdoll(rd, false)
 	if b.ui:
 		b.ui.counts_dirty = true
+
+
+## Look out of `u`, the one the host says we're playing (without asking it again).
+func _play_here(u: B3Unit) -> void:
+	var fp := B3Player.me.fp
+	B3Player.start(u)
+	battle.cam.follow = u
+	if battle.tools:
+		battle.tools.set_first_person(fp)
+
+
+## 🧩 The host's puzzle: its goal at the top of the Toy Box, and the ⭐ card
+## (or Try again) when the fight's over. A friend's copy has the puzzle's
+## goal but none of its own rules (the host runs those); a win gives the
+## friend the stars too.
+func _puzzle(pz: Variant) -> void:
+	var b = battle
+	if not (pz is Array) or (pz as Array).is_empty() or not ((pz as Array)[0] is String):
+		return
+	var a: Array = pz
+	var pid := String(a[0])
+	if pid != "" and (a.size() < 3 or B3Puzzles.info(pid).is_empty() or not (a[1] is bool) or not (a[2] is int)):
+		return
+	var cur = b.puzzle
+	if pid == "":
+		if cur != null:
+			b.puzzle = null
+			if is_instance_valid(cur):
+				(cur as Node).queue_free()
+			_pz_over = false
+			if b.ui:
+				b.ui.show_puzzle()
+		return
+	if cur == null or not is_instance_valid(cur) or String(cur.id) != pid:
+		if cur != null and is_instance_valid(cur):
+			(cur as Node).queue_free()
+		var p := B3Puzzles.new()
+		p.name = "NetPuzzle"
+		p.b = b
+		p.id = pid
+		p.stage = B3Puzzles.info(pid)
+		b.add_child(p)
+		p.set_physics_process(false)      # (its guards and the ⭐ are the host's job)
+		b.puzzle = p
+		_pz_over = false
+		cur = p
+		if b.ui:
+			b.ui.show_puzzle()
+	var over := bool(a[1])
+	var won := clampi(int(a[2]), 0, 3)
+	cur.over = over
+	cur.won = won
+	if over and not _pz_over:
+		_pz_over = true
+		var best := B3Puzzles.stars(pid)
+		if won > best:
+			Settings.puzzle_won(pid, won)
+		if b.ui:
+			b.ui.puzzle_result(won, best, "")      # (only the host can go on to the next one)
+	elif not over and _pz_over:
+		_pz_over = false
+		if b.ui:
+			b.ui.show_puzzle()
 
 
 ## 🪙 The host's points to spend and the glowing area to build in (a budget
@@ -799,11 +1142,14 @@ func _budget(bg: Variant) -> void:
 	var b = battle
 	var pts := clampi(int(a[0]), -1, 999999)
 	var team := String(a[3]) if B3Defs.TEAM.has(String(a[3])) else ""
-	if zone != b.build_zone or team != b.build_team or (pts < 0) != (int(b.budget) < 0):
+	# (the same area on another map, like 🧩 puzzles 1 to 4, is laid on new ground)
+	var moved: bool = pts >= 0 and zone.size != Vector2.ZERO and (_zone_map != b.map_id or b.zone_vis == null or not is_instance_valid(b.zone_vis))
+	if zone != b.build_zone or team != b.build_team or (pts < 0) != (int(b.budget) < 0) or moved:
 		if pts < 0:
 			b.clear_budget()
 		else:
 			b.set_budget(pts, zone, team)
+		_zone_map = b.map_id
 	var sp := clampi(int(a[1]), 0, 999999)
 	if pts != int(b.budget) or sp != int(b.spent):
 		b.budget = pts
@@ -858,6 +1204,17 @@ func _unit_apply(e: Array) -> void:
 	u.shield_up = flags & 256 != 0
 	if flags & 512 != 0 and not u.king:
 		u.make_king()       # 👑 just the crown: its health comes from the host
+	u.routed = flags & F_ROUTED != 0      # 🏳️ arms waving as it runs off
+	# hands off (B3Battle.protected): the 🧩 puzzle's army, 🌊 the attackers
+	for fm: Array in [[F_PUZZLE, "puzzle"], [F_WAVE, "wave"]]:
+		if flags & int(fm[0]) != 0:
+			u.set_meta(String(fm[1]), true)
+		elif u.has_meta(String(fm[1])):
+			u.remove_meta(String(fm[1]))
+	if e.size() > 16 and flags & 64 != 0:
+		B3Player.set_net_gauges(u, [e[15], e[16]])      # the power and reload meters of whoever plays it
+	elif u.has_meta("net_gauges"):
+		u.remove_meta("net_gauges")
 	var down := flags & 1 != 0
 	if down and not u.down:
 		u.knock_down(e[12] if e[12] is Vector3 else Vector3.ZERO)
@@ -933,6 +1290,7 @@ func _knock_out(u: B3Unit, nid: int, vel: Vector3) -> void:
 	if u.ragdoll and is_instance_valid(u.ragdoll):
 		var rd := u.ragdoll
 		rd.set_meta("nid", nid)
+		rd.set_meta("net_born", _clock)
 		rd.set_dead()
 		corpses[nid] = rd
 		u.dead = true
@@ -968,9 +1326,35 @@ func _apply_event(e: Array) -> void:
 		"uproot":
 			if b.world.has_method("uproot_index"):
 				b.world.call("uproot_index", int(e[1]), e[2] if e[2] is Vector3 else Vector3.UP, b)
+		"burn":
+			_burn(e)
 		"toast":
 			if b.ui:
 				b.ui.toast(String(e[1]))
+
+
+## 🔥 The host says a wooden building piece (["burn", "p", building, piece
+## number]) or a tree (["burn", "t", scenery number]) caught fire (B3Fire).
+func _burn(e: Array) -> void:
+	if e.size() < 3 or not (e[1] is String) or not (e[2] is int):
+		return      # (a building's number is a big one: B3Net ids are instance ids)
+	var b = battle
+	var n: Node = null
+	if String(e[1]) == "t":
+		var bs: Variant = b.world.get("_by_sid")
+		if bs is Dictionary:
+			var o: Variant = (bs as Dictionary).get(int(e[2]))
+			if o is Node and is_instance_valid(o):
+				n = o as Node
+	elif String(e[1]) == "p" and e.size() > 3 and e[3] is int:
+		var s = puppets.get(int(e[2]))
+		if s is B3Struct and is_instance_valid(s):
+			for pc in (s as B3Struct).pieces:
+				if is_instance_valid(pc) and int(pc.get_meta("pi", -1)) == int(e[3]):
+					n = pc
+					break
+	if n != null:
+		B3Fire.of(b).net_ignite(n)
 
 
 func _struct(e: Array) -> void:
@@ -987,7 +1371,11 @@ func _struct(e: Array) -> void:
 		s.set_meta("nid", id)
 		s.set_meta("born", _clock)
 		puppets[id] = s
-		return
+	if e.size() > 8 and bool(e[8]) != s.has_meta("puzzle"):
+		if bool(e[8]):
+			s.set_meta("puzzle", true)       # 🧩 the puzzle's own building: hands off
+		else:
+			s.remove_meta("puzzle")
 	if _clock - float(s.get_meta("born", 0.0)) < 1.0:
 		return
 	# pieces the host has lost (broken while we weren't looking)
@@ -1013,6 +1401,11 @@ func _hazard(e: Array) -> void:
 			h = battle.spawn_hazard(String(e[1]), e[2], float(e[3]), -1.0)
 		h.set_meta("nid", id)
 		puppets[id] = h
+	if e.size() > 4 and bool(e[4]) != h.has_meta("puzzle"):
+		if bool(e[4]):
+			h.set_meta("puzzle", true)       # 🧩 the puzzle's own pool: hands off
+		else:
+			h.remove_meta("puzzle")
 
 
 func _prop(e: Array) -> void:

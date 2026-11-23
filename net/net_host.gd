@@ -3,15 +3,21 @@ extends Node
 ## Hosting: runs the real world and shares it with up to 7 friends over ENet.
 ## Channel 0 is reliable (commands, events); channel 1 carries snapshots and
 ## cursor moves. A UDP beacon lets friends find the game on the Wi-Fi.
+## Snapshots only carry what changed since the last one each friend got
+## (NetDelta); a friend says which one that was with every snapshot ("ak").
 
 var game = null
 var peer: ENetMultiplayerPeer
 var mp: SceneMultiplayer
-var friends := {}            # peer id -> {name, color, cursor, emote, emo_t, ctrl}
+var friends := {}            # peer id -> {name, color, cursor, emote, emo_t, ctrl, ack}
+var _strangers := {}         # rate limits for copies of the game that aren't friends yet
 var _beacon := PacketPeerUDP.new()
 var _beacon_t := 0.0
 var _snap_t := 0.0
 var _fx: Array = []
+var _tx := NetDelta.Sender.new(NetCommon.TABLES)
+var _beacon_said := ""
+var bytes_out := 0           # bytes sent to friends (for tests)
 var my_cursor := Vector2.ZERO
 var my_emote := -1
 var my_emote_t := 0.0
@@ -69,15 +75,21 @@ func emote(id: int) -> void:
 	my_emote_t = Time.get_ticks_msec() / 1000.0
 
 
+## Who's here, where their cursors are and what they're doing. (An emote's
+## age only counts while it shows, so the list only changes when something
+## really does: snapshots only send it then.)
 func players_snapshot() -> Array:
 	var now := Time.get_ticks_msec() / 1000.0
-	var out: Array = [{"id": 1, "name": Settings.player_name, "col": Settings.player_color, "cur": my_cursor,
-		"emo": my_emote if now - my_emote_t < 3.0 else -1, "age": now - my_emote_t, "ctrl": game.playing_uid}]
+	var my_on := now - my_emote_t < 3.0
+	var out: Array = [{"id": 1, "name": Settings.player_name, "col": Settings.player_color, "cur": my_cursor.round(),
+		"emo": my_emote if my_on else -1, "age": snappedf(now - my_emote_t, 0.05) if my_on else 9.0, "ctrl": game.playing_uid}]
 	for id in friends:
 		var f: Dictionary = friends[id]
-		out.append({"id": id, "name": f.name, "col": f.color, "cur": f.get("cursor", null),
-			"emo": int(f.get("emote", -1)) if now - float(f.get("emo_t", 0.0)) < 3.0 else -1,
-			"age": now - float(f.get("emo_t", 0.0)), "ctrl": int(f.get("ctrl", -1))})
+		var age := now - float(f.get("emo_t", 0.0))
+		var cur: Variant = f.get("cursor", null)
+		out.append({"id": id, "name": f.name, "col": f.color, "cur": (cur as Vector2).round() if cur is Vector2 else null,
+			"emo": int(f.get("emote", -1)) if age < 3.0 else -1,
+			"age": snappedf(age, 0.05) if age < 3.0 else 9.0, "ctrl": int(f.get("ctrl", -1))})
 	return out
 
 
@@ -86,11 +98,13 @@ func _process(dt: float) -> void:
 		return
 	mp.poll()
 	my_cursor = game.local_pos()
+	# the beacon: once a second, and straight away when the world or the number of players changes
 	_beacon_t -= dt
-	if _beacon_t <= 0.0:
+	var b := JSON.stringify({"game": NetCommon.GAME_ID, "v": NetCommon.VERSION, "name": Settings.player_name,
+		"world": game.world.world_id, "players": friends.size() + 1, "port": NetCommon.PORT})
+	if _beacon_t <= 0.0 or b != _beacon_said:
 		_beacon_t = 1.0
-		var b := JSON.stringify({"game": NetCommon.GAME_ID, "v": NetCommon.VERSION, "name": Settings.player_name,
-			"world": game.world.world_id, "players": friends.size() + 1, "port": NetCommon.PORT})
+		_beacon_said = b
 		_beacon.set_dest_address("255.255.255.255", NetCommon.BEACON_PORT)
 		_beacon.put_packet(b.to_utf8_buffer())
 	if friends.is_empty():
@@ -101,7 +115,12 @@ func _process(dt: float) -> void:
 	_snap_t -= dt
 	if _snap_t <= 0.0:
 		_snap_t = 1.0 / NetCommon.SNAP_HZ
-		_send_all(NetCommon.snapshot(game), false)
+		var ds := NetCommon.delta_state(NetCommon.snapshot(game))
+		_tx.push(ds[0], ds[1])
+		for id in friends:
+			var pkt := _tx.packet(int(friends[id].get("ack", -1)))
+			bytes_out += pkt.size()
+			mp.send_bytes(pkt, id, MultiplayerPeer.TRANSFER_MODE_UNRELIABLE_ORDERED, 1)
 
 
 func _send_all(d: Dictionary, reliable: bool) -> void:
@@ -109,11 +128,16 @@ func _send_all(d: Dictionary, reliable: bool) -> void:
 		return
 	var pkt := NetCommon.encode(d)
 	var mode := MultiplayerPeer.TRANSFER_MODE_RELIABLE if reliable else MultiplayerPeer.TRANSFER_MODE_UNRELIABLE_ORDERED
-	mp.send_bytes(pkt, 0, mode, 0 if reliable else 1)
+	# everyone who has said hello (not a copy of the game that's still saying it, or can't)
+	for id in friends:
+		bytes_out += pkt.size()
+		mp.send_bytes(pkt, id, mode, 0 if reliable else 1)
 
 
 func _send_to(id: int, d: Dictionary) -> void:
-	mp.send_bytes(NetCommon.encode(d), id, MultiplayerPeer.TRANSFER_MODE_RELIABLE, 0)
+	var pkt := NetCommon.encode(d)
+	bytes_out += pkt.size()
+	mp.send_bytes(pkt, id, MultiplayerPeer.TRANSFER_MODE_RELIABLE, 0)
 
 
 func _on_connected(_id: int) -> void:
@@ -147,7 +171,9 @@ func _on_packet(id: int, pkt: PackedByteArray) -> void:
 	match String(d.get("m", "")):
 		"hello":
 			if not (d.get("v") is int) or int(d.v) != NetCommon.VERSION:
-				_send_to(id, {"m": "bye", "why": "Different game version. Update Wiggle Works on both computers."})
+				_send_to(id, {"m": "bye", "why": NetCommon.WRONG_VERSION})
+				if game.hud and NetCommon.allow(_strangers, "version", 0.2, 1.0):
+					game.hud.toast("👋 " + NetCommon.WRONG_VERSION, 4.0)
 				return
 			var first := not friends.has(id)
 			if first:
@@ -161,6 +187,10 @@ func _on_packet(id: int, pkt: PackedByteArray) -> void:
 					game.hud.toast("%s joined! 👋" % friends[id].name)
 					game.hud.refresh()
 				Sfx.play("merge", null, 0.8)
+		"ak":
+			# the last snapshot this friend got: the next ones only say what's changed since
+			if friends.has(id) and d.get("n") is int:
+				friends[id].ack = int(d.n)
 		"cmd":
 			if friends.has(id) and typeof(d.get("c")) == TYPE_DICTIONARY:
 				var c: Dictionary = d.c
@@ -170,7 +200,14 @@ func _on_packet(id: int, pkt: PackedByteArray) -> void:
 					return
 				if String(c.cmd) in SPAWNY and not NetCommon.allow(friends[id], "spawn", 6.0, 15.0):
 					return
+				if String(c.cmd) == "magic" and not NetCommon.allow(friends[id], "magic", 0.5, 3.0):
+					return      # spells make lots of things (an airstrike, a ball rain...)
+				var before: int = game.world.things.size() + game.world.links.size() + game.world.platforms.size()
 				game.world.apply_command(id, c)
+				if String(c.cmd) in SPAWNY:
+					# a ready-made contraption is many toys: each one counts
+					var made: int = game.world.things.size() + game.world.links.size() + game.world.platforms.size() - before
+					NetCommon.charge(friends[id], "spawn", 6.0, 15.0, float(made - 1))
 				if String(c.cmd) == "play":
 					friends[id].ctrl = int(c.get("uid", -1))
 		"cur":
@@ -187,7 +224,7 @@ func _on_packet(id: int, pkt: PackedByteArray) -> void:
 ## What friends may ask for. Anything else, a missing piece or something of
 ## the wrong kind (text where a number goes, NaN, a made-up team) is ignored,
 ## so a broken or hacked copy of the game can't crash the host.
-const CMDS := ["spawn", "grab", "drag", "release", "use", "team", "pers", "give", "drop", "fight", "platform",
+const CMDS := ["spawn", "grab", "drag", "release", "use", "team", "pers", "give", "drop", "revive", "fight", "platform",
 	"unplatform", "detonate", "link", "unlink", "paint", "erase", "clone", "resize", "flip", "nail", "rotate",
 	"play", "input", "magic", "gravity", "night", "pause", "speed", "world", "clear", "undo"]
 const NUMS := {"x": 1.0e5, "y": 1.0e5, "x0": 1.0e5, "y0": 1.0e5, "x1": 1.0e5, "y1": 1.0e5, "ax": 1.0e5, "ay": 1.0e5,

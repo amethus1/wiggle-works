@@ -101,7 +101,13 @@ func _ready() -> void:
 		await _edge_crash()
 		await _past_friends()
 		await _moon_bombs()
+		await _bomb_mark()
 		await _eyes()
+		await _bail_out()
+		await _crush()
+		await _recoil_dust()
+		await _mine_treads()
+		await _tank_clear_shot()
 		await _net()
 		await _scenarios()
 		await _performance()
@@ -669,6 +675,60 @@ func _bombs_in(gname: String) -> void:
 	b.apply_rules()
 
 
+# ------------------------------------------------------------ bomb marker
+## ✈️ Flying a fighter plane, a marker on the ground shows where a bomb let
+## go right now would land (B3Player.bomb_landing). Drop one: it lands there,
+## in Moon gravity too.
+func _bomb_mark() -> void:
+	for gname in ["normal", "moon"]:
+		print("the bomb marker (%s gravity)" % gname)
+		await fresh()
+		B3Rules.set_value("gravity", gname)
+		b.apply_rules()
+		clear_scenery()
+		var pl := spawn("plane", "red", at(0, -60), "auto", 0.0) as B3Aircraft
+		spawn("soldier", "blue", at(0, 150), "peaceful")
+		await sim(1.0)
+		B3Player.start(pl)
+		var c := B3Player.me
+		c.fp = true
+		c.look_yaw = pl.facing
+		c.look_pitch = -0.1
+		await sim(1.5)
+		await get_tree().process_frame
+		var mark: Node3D = b.cam._bomb_mark
+		var now := B3Player.bomb_landing(pl, pl.linear_velocity)
+		var ahead := (now - pl.position).dot(pl.forward())
+		check(mark != null and mark.visible and now != Vector3.INF and Vector2(mark.global_position.x - now.x, mark.global_position.z - now.z).length() < 4.0,
+			"%s: a marker on the ground where the bomb would land" % gname)
+		check(ahead > 2.0 and absf(now.y - float(b.world.height_at(now.x, now.z))) < 0.05, "%s: ahead of the plane (%.0f m), on the ground" % [gname, ahead])
+		# drop one, worked out in the same step it goes
+		await get_tree().physics_frame
+		var want := B3Player.bomb_landing(pl, pl.linear_velocity)
+		c.fire2 = true
+		await get_tree().physics_frame
+		c.fire2 = false
+		var bomb: B3Proj = null
+		for p in b.proj_root.get_children():
+			if p is B3Proj and (p as B3Proj).kind == "bomb":
+				bomb = p
+		var dropped := bomb != null
+		var last := Vector3.INF
+		var guard := 0
+		while is_instance_valid(bomb) and not bomb.is_queued_for_deletion() and guard < 6000:
+			last = bomb.global_position
+			await get_tree().physics_frame
+			guard += 1
+		var off := Vector2(last.x - want.x, last.z - want.z).length() if last != Vector3.INF else 99.0
+		check(dropped and off < 1.5, "%s: the bomb lands where the marker said (%.2f m off)" % [gname, off])
+		B3Player.stop()
+		await get_tree().process_frame
+		await get_tree().process_frame
+		check(not mark.visible, "%s: no marker once you stop flying" % gname)
+	B3Rules.set_value("gravity", "normal")
+	b.apply_rules()
+
+
 # ------------------------------------------------------------------- seats
 func _eyes() -> void:
 	print("first-person seats")
@@ -692,11 +752,12 @@ func _eyes() -> void:
 		var looks := -xf.basis.z
 		var ok := vr != null and vr.eye != null and rel.length() < 4.0 and rel.y > 0.9 and rel.y < 3.0
 		check(ok and looks.dot(u.forward()) > 0.9, "%s: the camera sits in the seat (%.1f m up) looking ahead" % [u.kind, rel.y])
+		# (the meshes you see: a merged model has no shadow-only copies any more)
 		var kept := 0
 		for n in u.find_children("*", "VisualInstance3D", true, false):
-			if b.cam._keep(n, u):
+			if b.cam._keep(n, u) and not (n is GeometryInstance3D and (n as GeometryInstance3D).cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY):
 				kept += 1
-		check(kept >= 3, "%s: some of it stays in view in first person (%d meshes)" % [u.kind, kept])
+		check(kept >= 2, "%s: some of it stays in view in first person (%d meshes)" % [u.kind, kept])
 		B3Player.stop()
 
 
@@ -759,6 +820,220 @@ func _net() -> void:
 	tank_pup._wreck(Vector3.ZERO, null)
 	await get_tree().process_frame
 	check(b.chunks.size() > c0 and (not is_instance_valid(tank_pup) or tank_pup.dead), "_wreck() on a puppet breaks it into pieces (%d)" % (b.chunks.size() - c0))
+
+
+# ------------------------------------------------------------ 🪂 bail out
+func _chutes() -> Array:
+	return b.fx.get_children().filter(func(c): return c is B3Chute)
+
+
+func _bail_out() -> void:
+	print("bailing out")
+	for kind in ["plane", "heli"]:
+		await fresh()
+		var a := spawn(String(kind), "red", at(0, 0)) as B3Aircraft
+		spawn("stick", "blue", at(30, 30), "peaceful")
+		await sim(2.0)
+		b.set_fighting(true)
+		var want := clampi((a.rig as B3VRig).crew.size(), 1, 2)
+		a.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+		await sim(0.6)
+		var ch := _chutes()
+		var crew_hidden := true
+		if alive(a) and a.rig:
+			for cm in (a.rig as B3VRig).crew:
+				crew_hidden = crew_hidden and not cm.visible
+		check(ch.size() == want and crew_hidden, "🪂 %s: shot down, the crew bail out (%d parachute(s)) and the seat's empty" % [kind, ch.size()])
+		var c0: B3Chute = ch[0] if not ch.is_empty() else null
+		var y0: float = c0.position.y if c0 else 0.0
+		await sim(2.5)
+		check(c0 != null and is_instance_valid(c0) and c0.open > 0.9 and c0.position.y < y0, "%s: the parachute opens and floats down" % kind)
+		var landed := false
+		var t := 0.0
+		while t < 25.0 and not _chutes().is_empty():
+			await sim(0.5)
+			t += 0.5
+			if is_instance_valid(c0) and c0.landed >= 0.0:
+				landed = true
+		check(landed and _chutes().is_empty(), "%s: it lands, flops over and the pilot's gone in a puff (%.0f s)" % [kind, t])
+		check(b.units.filter(func(u): return u.team == "red" and not u.dead).is_empty(), "%s: (just for show: no extra fighters)" % kind)
+	# a friend's screen gets it as an effect (in B3Net's list of allowed effects)
+	var args := B3Net._fx_args("chute", ["chute", Vector3(1, 20, 2), Vector3(0, 8, 0), Color.RED])
+	check(args.size() == 3 and B3Net._fx_args("chute", ["chute", Vector3(1, 20, 2), "junk", Color.RED]).is_empty(), "🪂 the parachute is an effect friends' screens are allowed to show")
+
+
+# ------------------------------------------------------------ 🚜 crushing
+## A History-style fence (B3History) across the way at x, three posts and rails.
+func _fence(x: float) -> B3Struct:
+	var st := B3Struct.new()
+	st.position = at(x, 0) - Vector3(0, 0.08, 0)
+	st.rotation.y = PI * 0.5
+	st.setup(b, "fence", 0.0, 1)
+	b.struct_root.add_child(st)
+	b.structs.append(st)
+	for i in 3:
+		var z := -3.0 + i * 3.0
+		st._piece(Vector3(0.18, 1.05, 0.18), Vector3(z, 0.52, 0), Color("a07a50"), 40.0)
+	for y: float in [0.4, 0.8]:
+		for i in 2:
+			st._piece(Vector3(2.9, 0.12, 0.09), Vector3(-1.5 + i * 3.0, y, 0), Color("a07a50"), 30.0)
+	return st
+
+
+func _crush() -> void:
+	print("crushing")
+	for kind in ["tank", "jeep"]:
+		await fresh()
+		clear_scenery()
+		await get_tree().physics_frame
+		var v := spawn(String(kind), "red", at(-14, 0), "attack", PI * 0.5) as B3Vehicle
+		var foe := spawn("knight", "blue", at(34, 0), "peaceful")
+		foe.speed = 0.0
+		spawn("knight", "blue", at(34, 8), "peaceful").speed = 0.0
+		var crates := []
+		for z: float in [-0.6, 0.6]:
+			crates.append(b.spawn_prop("crate", at(-5 if kind == "tank" else 0, z) + Vector3(0, 0.5, 0)))
+		var fence := _fence(4.0 if kind == "tank" else 8.0)
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 2
+		B3History._tree(b, at(11.0 if kind == "tank" else 15.0, 0.4), rng)
+		var tree: Node3D = null
+		for n in b.world.scenery.get_children():
+			if n is StaticBody3D and n.has_meta("scenery"):
+				tree = n
+		tree.set_meta("ks", 1.0 if kind == "tank" else 0.9)
+		var n0 := fence.pieces.size()
+		await sim(0.5)
+		b.set_fighting(true)
+		var t := 0.0
+		while t < 12.0 and v.position.x < 16.0 and alive(v):
+			await sim(0.25)
+			t += 0.25
+		var broken := 0
+		for c in crates:
+			if not is_instance_valid(c) or (c as Node).is_queued_for_deletion():
+				broken += 1
+		var fence_left := fence.pieces.size() if is_instance_valid(fence) else 0
+		check(broken == 2, "🚜 %s: driving at speed it smashes the crates in its way (%d)" % [kind, broken])
+		check(fence_left <= n0 - 3, "%s: and drives straight through a wooden fence (%d → %d pieces)" % [kind, n0, fence_left])
+		check(not is_instance_valid(tree) or tree.has_meta("gone"), "%s: and flattens a small tree" % kind)
+		check(v.position.x > 12.0, "%s: without getting stuck (got to x %.1f)" % [kind, v.position.x])
+	# a big tree still stops a jeep; a parked one crushes nothing
+	await fresh()
+	clear_scenery()
+	await get_tree().physics_frame
+	var jp := spawn("jeep", "red", at(0, 0), "attack", PI * 0.5) as B3Vehicle
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 3
+	B3History._tree(b, at(3.0, 0), rng2)
+	var big: Node3D = null
+	for n in b.world.scenery.get_children():
+		if n is StaticBody3D and n.has_meta("scenery"):
+			big = n
+	big.set_meta("ks", 1.3)
+	var cr = b.spawn_prop("crate", at(-3, 0) + Vector3(0, 0.5, 0))
+	jp.fwd_spd = 8.0
+	jp._grounded = true
+	jp._crush_t = 0.0
+	jp._crush_tick(0.1)
+	check(is_instance_valid(big) and not big.has_meta("gone"), "a big tree is too much for a jeep")
+	jp.fwd_spd = 0.5
+	jp._crush_t = 0.0
+	var jb := jp.global_basis
+	jp.global_basis = Basis(Vector3.UP, -PI * 0.5)
+	jp._crush_tick(0.1)
+	jp.global_basis = jb
+	check(is_instance_valid(cr) and not (cr as Node).is_queued_for_deletion(), "and creeping along slowly it crushes nothing")
+
+
+# --------------------------------------------------- 💥 recoil and 💨 dust
+func _recoil_dust() -> void:
+	print("recoil and dust")
+	await fresh()
+	clear_scenery()
+	var tk := spawn("tank", "red", at(0, 0), "attack", PI * 0.5) as B3Vehicle
+	var foe := spawn("knight", "blue", at(16, 0), "peaceful")
+	foe.speed = 0.0
+	await sim(0.5)
+	b.set_fighting(true)
+	var t := 0.0
+	while t < 8.0 and tk._kick_t > 0.05:
+		await sim(0.02)
+		t += 0.02
+	var fired := tk._kick_t < 0.3
+	var t2 := 0.0
+	var most := 0.0
+	var tilt0: Vector3 = tk._tilt
+	while t2 < 0.4:
+		await get_tree().physics_frame
+		t2 += get_physics_process_delta_time() * Engine.time_scale
+		if tk.rig:
+			most = maxf(most, (tk.rig.rotation - tk._tilt).length())
+	check(fired and most > 0.06, "💥 the tank's hull rocks back when it fires its big gun (%.2f rad)" % most)
+	var ns: Array = tk.net_state()
+	check(absf(float(ns[4]) - tk.rig.rotation.x) < 1e-4, "(in the tilt friends' copies get)")
+	await sim(1.6)
+	check(tk.rig and (tk.rig.rotation - tk._tilt).length() < 0.005, "and settles again after a second")
+	# dust behind the wheels while driving, none standing still
+	await fresh()
+	clear_scenery()
+	var jp := spawn("jeep", "red", at(0, 0), "attack", PI * 0.5) as B3Vehicle
+	spawn("knight", "blue", at(60, 0), "peaceful").speed = 0.0
+	await sim(0.5)
+	var still: bool = jp._dust == null or not jp._dust.emitting
+	b.set_fighting(true)
+	await sim(1.5)
+	check(still and jp._dust != null and jp._dust.emitting, "💨 a jeep driving along kicks up dust behind it (none parked)")
+	var pup := spawn("jeep", "red", at(0, 20), "auto", 0.0) as B3Vehicle
+	pup.set_physics_process(false)
+	pup.apply_net_state([0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0])
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(pup._dust != null and pup._dust.emitting, "and a friend's copy makes its own dust from its speed")
+
+
+# ------------------------------------------------------- 💣 mines and treads
+func _mine_treads() -> void:
+	print("mines under treads")
+	await fresh()
+	clear_scenery()
+	var m: B3Prop = b.spawn_prop("mine", at(0, 0))
+	await sim(1.2)
+	var tk := spawn("tank", "red", at(1.75, 0.2), "peaceful", 0.0)
+	var so := spawn("soldier", "red", at(-1.4, 0), "peaceful")
+	await get_tree().physics_frame
+	check(m.steps_on([so]) == false, "💣 a soldier a step away from a mine doesn't set it off")
+	check(m.steps_on([tk]), "but a tank whose tread is over it does (its middle is %.1f m away)" % Vector2(tk.position.x - m.global_position.x, tk.position.z - m.global_position.z).length())
+	await sim(0.6)
+	check(not is_instance_valid(m) or m.lit, "and it goes off")
+
+
+# ----------------------------------------------- 🧱 tank shells and walls
+func _tank_clear_shot() -> void:
+	print("tank clear shot")
+	await fresh()
+	clear_scenery()
+	var tk := spawn("tank", "red", at(0, 0), "ranged", PI * 0.5)
+	var wl: B3Struct = b.spawn_struct("wall", at(8, 0), PI * 0.5, 8.0)
+	var foe := spawn("knight", "blue", at(17, 0), "peaceful")
+	foe.speed = 0.0
+	await sim(0.5)
+	check(not tk.clear_shot(tk._muzzle_pos(), foe, 3.0), "🧱 a wall between a tank and its enemy: no clear shot")
+	b.set_fighting(true)
+	var shells := {}
+	var t := 0.0
+	var hit_wall := false
+	var n0 := wl.pieces.size()
+	while t < 16.0 and alive(foe) and not foe.down:
+		await sim(0.1)
+		t += 0.1
+		for pj in b.proj_root.get_children():
+			if pj is B3Proj and (pj as B3Proj).kind == "tankshell":
+				shells[pj.get_instance_id()] = true
+		if is_instance_valid(wl) and wl.pieces.size() < n0:
+			hit_wall = true
+	check(not hit_wall, "it doesn't fire its shells into the wall")
+	check(shells.size() > 0 and absf(tk.position.z) > 2.0, "it drives round to get a clear shot, then fires (%d shells, %.1f m to the side)" % [shells.size(), absf(tk.position.z)])
 
 
 # --------------------------------------------------------------- scenarios

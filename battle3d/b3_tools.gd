@@ -1,10 +1,14 @@
 extends Node
 ## Mouse and keys → battle actions. Tools: Place (click, or drag a line of
-## units / a wall / a ramp / a bigger pool), Select (inspect a unit), Grab
-## (pick up anything and fling it), Eraser. Also camera keys and the little
-## 3D cursor ghosts that show what will happen.
+## units / a wall / a ramp / a bigger pool; Shift-drag a block lined up with
+## the camera), Select (click a unit, Shift-click to add one, or drag a box
+## round lots of them: the Inspector then changes them all), Grab (pick up
+## anything and fling it), Eraser. ↶ Undo / ↷ Redo (Ctrl+Z / Ctrl+Y, see
+## B3Undo). Also camera keys and the little 3D cursor ghosts that show what
+## will happen.
 
 const MAX_UNITS := 400
+const LINE_MAX := 144           # the most placement dots shown at once (a 12 x 12 Shift-drag block)
 
 var battle = null
 var tool := "place"
@@ -15,6 +19,8 @@ var pers := "auto"
 var place_size := 1.0      # Toy Box size for new fighters
 var struct_yaw := 0.0
 var selected: B3Unit = null
+var group: Array[B3Unit] = []   # 🔍 everyone selected (a box drag or Shift-clicks); `selected` is the first
+var undo: B3Undo = null         # ↶ ↷ (B3Undo)
 var drag := {}
 var grab_body: RigidBody3D = null
 var grab_unit: B3Unit = null
@@ -27,6 +33,9 @@ var _ghost_ring: MeshInstance3D
 var _ghost_box: MeshInstance3D
 var _line: MultiMeshInstance3D
 var _sel_ring: MeshInstance3D
+var _grp_rings: MultiMeshInstance3D   # rings under every fighter in `group`
+var _grab_from := Vector3.ZERO        # ✋ where the grabbed thing was (↶ puts it back)
+var _recording := true                # false while placing for a friend (👥): that isn't yours to undo
 var _t := 0.0
 var _veh_yaw := INF             # a friend's battle: the car we drive, last frame's heading
 var _round: Array = []          # ⇥ Tab: ids of the teammates played this round (switch_teammate)
@@ -35,6 +44,8 @@ const ROUND_MS := 6000          # ...a new round starts after this long without 
 
 
 func _ready() -> void:
+	undo = B3Undo.new()
+	undo.battle = battle
 	_ghost_ring = MeshInstance3D.new()
 	_ghost_ring.mesh = B3Mats.torus(0.9, 1.0)
 	_ghost_ring.material_override = B3Mats.flat(Color(1.0, 0.85, 0.3, 0.8))
@@ -52,7 +63,7 @@ func _ready() -> void:
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
 	mm.mesh = B3Mats.cyl(0.35, 0.35, 0.05, 16)
-	mm.instance_count = 60
+	mm.instance_count = LINE_MAX
 	mm.visible_instance_count = 0
 	_line.multimesh = mm
 	_line.material_override = B3Mats.vcol(true, true)
@@ -66,6 +77,18 @@ func _ready() -> void:
 	_sel_ring.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_sel_ring.visible = false
 	battle.add_child.call_deferred(_sel_ring)
+	_grp_rings = MultiMeshInstance3D.new()
+	var gm := MultiMesh.new()
+	gm.transform_format = MultiMesh.TRANSFORM_3D
+	gm.mesh = B3Mats.torus(0.85, 1.0)
+	gm.instance_count = MAX_UNITS
+	gm.visible_instance_count = 0
+	_grp_rings.multimesh = gm
+	_grp_rings.material_override = _sel_ring.material_override
+	_grp_rings.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_grp_rings.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_grp_rings.visible = false
+	battle.add_child.call_deferred(_grp_rings)
 
 
 # --------------------------------------------------------------- choosing
@@ -104,6 +127,10 @@ func set_team(t: String) -> void:
 ## so just a short `msg` (the knock-out one if empty) instead of the full help.
 func play_as(u: B3Unit, fp := false, jumped := false, msg := "") -> void:
 	if u == null or not is_instance_valid(u) or u.dead:
+		return
+	var why: String = battle.hands_off(u, "play")      # 🧩 not the puzzle's army (or 🌊 the attackers)
+	if why != "":
+		_nope(why, u.position)
 		return
 	if u.ctl != null and u.ctl != B3Player.me:
 		if battle.ui:
@@ -157,8 +184,11 @@ func player_lost() -> void:
 ## The teammate closest to where you were: standing fighters first, and the
 ## same sort as before (a fighter for a fighter, a vehicle for a vehicle).
 ## ⇥ Tab passes `same_sort` false (a tank or plane is fair game) and the ids
-## of the teammates it has already been round (`skip`).
-func next_teammate(skip: Array = [], same_sort := true) -> B3Unit:
+## of the teammates it has already been round (`skip`). A plane that's been
+## shot down (on its way to crash) is never picked, and with `standing` (⇥
+## Tab) nor is a teammate lying knocked down. (Knocked out, you'd still
+## rather jump into a downed teammate, who'll get back up, than stop playing.)
+func next_teammate(skip: Array = [], same_sort := true, standing := false) -> B3Unit:
 	var best: B3Unit = null
 	var bd := INF
 	for o: B3Unit in battle.units:
@@ -166,7 +196,7 @@ func next_teammate(skip: Array = [], same_sort := true) -> B3Unit:
 			continue
 		if o.team == "wild" and o.kind != B3Player.kind:
 			continue      # wild animals and monsters are each on their own side
-		if skip.has(o.get_instance_id()):
+		if skip.has(o.get_instance_id()) or (standing and o.down) or (o is B3Aircraft and (o as B3Aircraft).falling):
 			continue
 		var d := o.global_position.distance_to(B3Player.last_pos)
 		if o.down:
@@ -194,10 +224,10 @@ func switch_teammate() -> void:
 	if not _round.has(u.get_instance_id()):
 		_round.append(u.get_instance_id())
 	B3Player.last_pos = u.global_position
-	var next := next_teammate(_round, false)
+	var next := next_teammate(_round, false, true)
 	if next == null and _round.size() > 1:
 		_round = [u.get_instance_id()]       # been round everyone: start again
-		next = next_teammate(_round, false)
+		next = next_teammate(_round, false, true)
 	if next == null:
 		battle.snd("nope", null, 0.5)
 		if battle.ui:
@@ -265,8 +295,65 @@ func follow(u: B3Unit) -> void:
 
 func select(u: B3Unit) -> void:
 	selected = u
+	group.clear()
+	if u != null and is_instance_valid(u):
+		group.append(u)
 	if battle.ui:
 		battle.ui.show_inspect(u)
+
+
+## 🔍 Selects all of `us` at once (a box drag): the Inspector changes them all.
+func select_many(us: Array) -> void:
+	var keep: Array[B3Unit] = []
+	for u in us:
+		if u is B3Unit and is_instance_valid(u) and not (u as B3Unit).dead and not keep.has(u):
+			keep.append(u)
+	selected = keep[0] if not keep.is_empty() else null
+	group = keep
+	if battle.ui:
+		battle.ui.show_inspect(selected)
+
+
+## Shift-click: adds `u` to what's selected, or takes it out.
+func toggle_select(u: B3Unit) -> void:
+	var now: Array = group.duplicate()
+	if now.has(u):
+		now.erase(u)
+	else:
+		now.append(u)
+	select_many(now)
+
+
+## The fighters (not knocked out) whose middles are inside `r` on the screen.
+func units_in_rect(r: Rect2) -> Array[B3Unit]:
+	var out: Array[B3Unit] = []
+	for u: B3Unit in battle.units:
+		if not is_instance_valid(u) or u.dead:
+			continue
+		var c := u.center()
+		if battle.cam.cam.is_position_behind(c):
+			continue
+		if r.has_point(battle.cam.screen_pos(c)):
+			out.append(u)
+	return out
+
+
+## 🗑️ Erases these fighters (the Inspector's 🗑️, or Delete): one ↶ Undo
+## brings them all back. In a friend's battle the host does it.
+func erase_units(us: Array) -> void:
+	if us.is_empty():
+		return
+	if battle.net and battle.net.is_client():
+		for u in us:
+			if is_instance_valid(u) and (u as Node).has_meta("nid"):
+				battle.net.send_cmd({"c": "erase", "nid": int((u as Node).get_meta("nid"))})
+		return
+	undo.begin_erase()
+	for u in us:
+		if is_instance_valid(u) and battle.hands_off(u, "erase") == "":
+			undo.will_erase(u)
+			battle.remove_unit(u)
+	undo.end_erase()
 
 
 # ------------------------------------------------------------------ input
@@ -283,6 +370,8 @@ func _unhandled_input(e: InputEvent) -> void:
 				battle.cam.pan_screen(m.position - m.relative, m.position)
 			"erase":
 				_erase_at(m.position)
+			"box":
+				_show_box(drag.sp, m.position)
 	elif e is InputEventMagnifyGesture:
 		var g := e as InputEventMagnifyGesture
 		battle.cam.zoom_at(g.position, g.factor)
@@ -332,25 +421,34 @@ func _left_down(e: InputEventMouseButton) -> void:
 			var hit := pick(e.position)
 			if B3Defs.BOOMS.has(place_id):
 				var right: Vector3 = battle.cam.basis_now().x
+				var np0: int = battle.props.size()
 				battle.drop(place_id, hit.pos, right)
 				battle.snd("click", null, 0.4)
+				if battle.props.size() > np0:
+					undo.did_place(battle.props.slice(np0), String(B3Defs.BOOMS[place_id].name))      # (C4, mines, barrels stay: ↶ takes them back)
 				return
 			drag = {"mode": "place", "start": hit.pos, "sp": e.position}
 		"select":
 			var u := unit_at(e.position)
-			select(u)
-			if u:
+			if u and e.shift_pressed:
+				toggle_select(u)      # Shift-click: add it (or take it out)
+				battle.snd("click", null, 0.5)
+			elif u:
+				select(u)
 				battle.snd("click", null, 0.5)
 			else:
-				drag = {"mode": "pan"}
+				# drag a box round lots of them (Shift keeps the ones you have)
+				drag = {"mode": "box", "sp": e.position, "add": e.shift_pressed}
 		"grab":
 			if not _grab_start(e.position):
 				drag = {"mode": "pan"}
 			else:
 				drag = {"mode": "grab"}
 		"erase":
-			_erase_at(e.position)
+			if not (battle.net and battle.net.is_client()):
+				undo.begin_erase()      # everything this drag erases is one ↶ Undo
 			drag = {"mode": "erase"}
+			_erase_at(e.position)
 
 
 func _left_up(e: InputEventMouseButton) -> void:
@@ -362,7 +460,42 @@ func _left_up(e: InputEventMouseButton) -> void:
 		_place(a, b, dragged, e.shift_pressed)
 	elif mode == "grab":
 		_grab_end(true)
+	elif mode == "erase":
+		undo.end_erase()
+	elif mode == "box":
+		_end_box(drag.sp, e.position, bool(drag.get("add", false)))
 	drag = {}
+
+
+## 🔍 The box you're dragging round fighters, on the screen.
+func _show_box(a: Vector2, b: Vector2) -> void:
+	if battle.ui and battle.ui.box_rect:
+		var r := Rect2(a, Vector2.ZERO).expand(b)
+		battle.ui.box_rect.position = r.position
+		battle.ui.box_rect.size = r.size
+		battle.ui.box_rect.visible = r.size.length() > 8.0
+
+
+## Let go of the box: everyone in it is selected (with Shift, added). A
+## click with no drag on empty ground lets go of what was selected.
+func _end_box(a: Vector2, b: Vector2, add: bool) -> void:
+	if battle.ui and battle.ui.box_rect:
+		battle.ui.box_rect.visible = false
+	var r := Rect2(a, Vector2.ZERO).expand(b)
+	if r.size.length() < 8.0:
+		if not add:
+			select(null)
+		return
+	var got: Array = units_in_rect(r)
+	if add:
+		got = group.duplicate() + got
+	if got.is_empty():
+		select(null)
+		return
+	select_many(got)
+	battle.snd("click", null, 0.5, 1.2)
+	if battle.ui and group.size() > 1:
+		battle.ui.toast("👥 %d fighters picked! Change their team or mood in the Inspector." % group.size(), false)
 
 
 ## Input while playing a fighter. Returns true when it used the event.
@@ -424,6 +557,13 @@ func _player_input(e: InputEvent) -> bool:
 func _key(e: InputEventKey) -> void:
 	if _typing():
 		return
+	if (e.ctrl_pressed or e.meta_pressed) and e.keycode in [KEY_Z, KEY_Y]:
+		# ↶ Ctrl+Z / ↷ Ctrl+Y (or Ctrl+Shift+Z)
+		if e.keycode == KEY_Y or e.shift_pressed:
+			undo.redo()
+		else:
+			undo.undo()
+		return
 	match e.keycode:
 		KEY_P:
 			if selected and is_instance_valid(selected) and not selected.dead:
@@ -434,7 +574,11 @@ func _key(e: InputEventKey) -> void:
 		KEY_SPACE:
 			battle.toggle_play()
 		KEY_G, KEY_T:
-			battle.set_slowmo(not battle.slowmo)
+			if battle.puppet and battle.net:
+				# 🐢 in a friend's battle the host's slow motion is everyone's: ask the host
+				battle.net.send_cmd({"c": "slowmo", "on": not battle.slowmo})
+			else:
+				battle.set_slowmo(not battle.slowmo)
 		KEY_Q:
 			battle.cam.rotate_view(-1.0)
 		KEY_E:
@@ -462,12 +606,17 @@ func _key(e: InputEventKey) -> void:
 				set_tool("select")
 		KEY_DELETE, KEY_BACKSPACE, KEY_X:
 			if selected and is_instance_valid(selected):
-				if battle.net and battle.net.is_client():
-					# in a friend's battle: ask the host to remove it (like the Eraser does)
-					if selected.has_meta("nid"):
-						battle.net.send_cmd({"c": "erase", "nid": int(selected.get_meta("nid"))})
+				var all: Array = group.duplicate() if group.size() > 1 else [selected]
+				var friend: bool = battle.net != null and battle.net.is_client()
+				var mine: Array = []
+				for u in all:
+					if is_instance_valid(u) and battle.hands_off(u, "erase") == "":
+						mine.append(u)
+				if mine.is_empty() and not friend:
+					_nope(battle.hands_off(selected, "erase"), selected.position)      # 🧩 / 🌊 not theirs to remove
 				else:
-					battle.remove_unit(selected)
+					# (in a friend's battle erase_units asks the host, like the Eraser does)
+					erase_units(all if friend else mine)
 				select(null)
 		KEY_EQUAL, KEY_KP_ADD:
 			battle.cam.zoom_at(get_viewport().get_visible_rect().size * 0.5, 1.2)
@@ -536,7 +685,9 @@ func place_for(c: Dictionary) -> void:
 	place_size = clampf(float(c.get("size", 1.0)), 0.5, 2.5)
 	struct_yaw = float(c.get("yaw", 0.0)) - deg_to_rad(battle.cam.yaw)
 	if B3Defs.UNITS.has(place_id) or B3Defs.HAZARDS.has(place_id) or B3Defs.STRUCTS.has(place_id):
+		_recording = false      # (a friend's: not ours to undo)
 		_place(c.get("a", Vector3.ZERO), c.get("b", Vector3.ZERO), bool(c.get("dragged", false)), bool(c.get("box", false)))
+		_recording = true
 	place_id = keep[0]
 	team = keep[1]
 	pers = keep[2]
@@ -545,19 +696,34 @@ func place_for(c: Dictionary) -> void:
 
 
 func _place(a: Vector3, b: Vector3, dragged: bool, box: bool) -> void:
+	var counts := [battle.units.size(), battle.structs.size(), battle.hazards.size(), battle.props.size()]
+	_place_now(a, b, dragged, box)
+	if not _recording or (battle.net and battle.net.is_client()):
+		return
+	# ↶ what that just made can be taken back
+	var made: Array = []
+	var arrs: Array = [battle.units, battle.structs, battle.hazards, battle.props]
+	for i in arrs.size():
+		var arr: Array = arrs[i]
+		if arr.size() > int(counts[i]):
+			made.append_array(arr.slice(int(counts[i])))
+	if not made.is_empty():
+		undo.did_place(made, B3Undo._what(made))
+
+
+func _place_now(a: Vector3, b: Vector3, dragged: bool, box: bool) -> void:
 	var id := place_id
 	if battle.net and battle.net.is_client():
 		battle.net.send_cmd({"c": "place", "id": id, "team": team, "pers": pers, "size": place_size, "a": a, "b": b,
 			"dragged": dragged, "box": box, "yaw": deg_to_rad(battle.cam.yaw) + struct_yaw})
 		battle.snd("spawn", b, 0.5)
 		return
-	# 🪙 budget battles: only on your side, only what you can pay for
-	var tm: String = battle.build_team if battle.build_team != "" else team
-	var why: String = battle.can_place(id, a)
+	# 🪙 budget battles: only on your side, only what you can pay for (a
+	# pool's price depends on how big you drag it: checked below)
+	var tm := place_team()
+	var why: String = battle.can_place(id, a, 0 if B3Defs.HAZARDS.has(id) else 1)
 	if why != "":
-		if battle.ui:
-			battle.ui.toast(why, false)
-		battle.snd("nope", a, 0.6)
+		_nope(why, a)
 		return
 	if B3Defs.UNITS.has(id):
 		if battle.budget >= 0:
@@ -586,36 +752,86 @@ func _place(a: Vector3, b: Vector3, dragged: bool, box: bool) -> void:
 			battle.ui.counts_dirty = true
 	elif B3Defs.HAZARDS.has(id):
 		var d: Dictionary = B3Defs.HAZARDS[id]
-		var r := float(d.radius)
-		if dragged:
-			r = clampf(Vector2(b.x - a.x, b.z - a.z).length(), 1.5, 12.0)
-		battle.buy(battle.spawn_hazard(String(d.kind), a, r), id)
+		var kind := String(d.kind)
+		var r: float = battle.pool_room(a, _pool_r(d, a, b, dragged))
+		# 🪙 priced by how big it really is (a Pool, or a Lake past 5 m)
+		var pid := B3Battle.pool_id(kind, r) if battle.budget >= 0 else id
+		why = battle.can_place(pid, a)
+		if why != "":
+			_nope(why, a)
+			return
+		battle.buy(battle.spawn_hazard(kind, a, r), pid)
 		battle.snd("splash", a, 0.8)
 	elif B3Defs.STRUCTS.has(id):
-		var flat := Vector3(b.x - a.x, 0, b.z - a.z)
-		var len_ := flat.length()
-		var yaw: float = deg_to_rad(battle.cam.yaw) + struct_yaw
-		var st: B3Struct = null
-		match id:
-			"wall":
-				if dragged and len_ > 1.5:
-					st = battle.spawn_struct("wall", (a + b) * 0.5, atan2(-flat.z, flat.x), len_)
-				else:
-					st = battle.spawn_struct("wall", a, yaw, 6.0)
-			"ramp":
-				if dragged and len_ > 1.0:
-					var dir := flat / len_
-					st = battle.spawn_struct("ramp", a + dir * 3.0, atan2(dir.x, dir.z))
-				else:
-					st = battle.spawn_struct("ramp", a, yaw + PI)
-			"bridge":
-				if dragged and len_ > 1.0:
-					st = battle.spawn_struct("bridge", (a + b) * 0.5, atan2(flat.x, flat.z))
-				else:
-					st = battle.spawn_struct("bridge", a, yaw + PI * 0.5)
-			_:
-				st = battle.spawn_struct(id, a, yaw)
-		battle.buy(st, id)
+		var pl := _struct_spot(id, a, b, dragged)
+		var at: Vector3 = pl[0]
+		var rot: float = pl[1]
+		var len_: float = pl[2]
+		# 🚧 budget battles: the whole building has to stand on your side
+		if not battle.fits_zone(id, at, rot, len_):
+			_nope("🚧 That sticks out past your side. Build it inside the glowing area!", a)
+			return
+		if id == "crates":
+			# a stack of 6 crates (props, not a building): bought as one
+			var n0: int = battle.props.size()
+			battle.spawn_struct(id, at, rot)
+			battle.buy_stack(battle.props.slice(n0), id)
+			return
+		battle.buy(battle.spawn_struct(id, at, rot, len_), id)
+
+
+## No! (a message and a "nope" sound)
+func _nope(why: String, at: Vector3) -> void:
+	if battle.ui:
+		battle.ui.toast(why, false)
+	battle.snd("nope", at, 0.6)
+
+
+## The team what you place joins: the Toy Box's, or in a budget battle
+## always yours (B3Battle.build_team; 🧩 puzzles: red, even on the Animals
+## and Dinos tabs, whose own team is wild).
+func place_team() -> String:
+	return String(battle.build_team) if String(battle.build_team) != "" else team
+
+
+## Which way a Shift-drag block of fighters lines up: with the camera (and
+## R's quarter turns). A friend's block comes with their camera's turn in
+## struct_yaw (place_for), so it lines up with their screen.
+func grid_yaw() -> float:
+	return deg_to_rad(battle.cam.yaw) + struct_yaw
+
+
+## A pool's radius: its own, or as far as you dragged it.
+func _pool_r(d: Dictionary, a: Vector3, b: Vector3, dragged: bool) -> float:
+	if dragged:
+		return clampf(Vector2(b.x - a.x, b.z - a.z).length(), 1.5, 12.0)
+	return float(d.radius)
+
+
+## Where building `id` goes when placed from `a` (and dragged to `b`):
+## [middle, yaw, length (walls)]. In a budget battle a drag stops at the
+## edge of your side.
+func _struct_spot(id: String, a: Vector3, b: Vector3, dragged: bool) -> Array:
+	if dragged:
+		b = battle.zone_clamp(b)
+	var flat := Vector3(b.x - a.x, 0, b.z - a.z)
+	var len_ := flat.length()
+	var yaw: float = deg_to_rad(battle.cam.yaw) + struct_yaw
+	match id:
+		"wall":
+			if dragged and len_ > 1.5:
+				return [(a + b) * 0.5, atan2(-flat.z, flat.x), len_]
+			return [a, yaw, 6.0]
+		"ramp":
+			if dragged and len_ > 1.0:
+				var dir := flat / len_
+				return [a + dir * 3.0, atan2(dir.x, dir.z), 0.0]
+			return [a, yaw + PI, 0.0]
+		"bridge":
+			if dragged and len_ > 1.0:
+				return [(a + b) * 0.5, atan2(flat.x, flat.z), 0.0]
+			return [a, yaw + PI * 0.5, 0.0]
+	return [a, yaw, 0.0]
 
 
 func _line_spots(a: Vector3, b: Vector3, dragged: bool, box: bool) -> Array:
@@ -638,13 +854,19 @@ func _line_spots(a: Vector3, b: Vector3, dragged: bool, box: bool) -> Array:
 			rig_r = 0.75      # a horse is long
 	var spacing := maxf(1.1, rig_r * 2.4) * (place_size if not String(def.body) in ["vehicle"] else 1.0)
 	if box:
-		var dx := absf(b.x - a.x)
-		var dz := absf(b.z - a.z)
-		var nx := clampi(int(dx / spacing) + 1, 1, 12)
-		var nz := clampi(int(dz / spacing) + 1, 1, 12)
+		# the block's rows run across the screen and its columns up it, however
+		# the camera is turned (R turns it a quarter more, like a building)
+		var yaw := grid_yaw()
+		var ax := Vector3(cos(yaw), 0, -sin(yaw))       # across
+		var az := Vector3(sin(yaw), 0, cos(yaw))        # up / down the screen
+		var d := Vector3(b.x - a.x, 0, b.z - a.z)
+		var dx := d.dot(ax)
+		var dz := d.dot(az)
+		var nx := clampi(int(absf(dx) / spacing) + 1, 1, 12)
+		var nz := clampi(int(absf(dz) / spacing) + 1, 1, 12)
 		for ix in nx:
 			for iz in nz:
-				var p := Vector3(lerpf(a.x, b.x, ix / maxf(1.0, nx - 1.0)), 0, lerpf(a.z, b.z, iz / maxf(1.0, nz - 1.0)))
+				var p := a + ax * (dx * ix / maxf(1.0, nx - 1.0)) + az * (dz * iz / maxf(1.0, nz - 1.0))
 				p.y = battle.surface_y(Vector3(p.x, 60.0, p.z))
 				out.append(p)
 		return out
@@ -665,6 +887,22 @@ func _grab_start(sp: Vector2) -> bool:
 			battle.ui.toast("✋ Only the host can grab things in a shared battle.", false)
 		return false
 	var u := unit_at(sp, 24.0)
+	# 🧩 / 🌊 some things can't be grabbed (B3Battle.hands_off): the puzzle's
+	# army, or anything once a puzzle's fight is on
+	var who: Node = u if u and not u.dead else null
+	if who == null:
+		var c0 := body_at(sp, B3Defs.L_RAGDOLL | B3Defs.L_PROP)
+		if c0 is RigidBody3D:
+			who = c0 as Node
+			if who.has_meta("ragdoll"):
+				var rd0 = who.get_meta("ragdoll")
+				if is_instance_valid(rd0) and rd0.unit and is_instance_valid(rd0.unit):
+					who = rd0.unit
+	if who:
+		var why: String = battle.hands_off(who, "grab")
+		if why != "":
+			_nope(why, pick(sp).pos)
+			return false
 	if u is B3Vehicle and not u.dead:
 		# vehicles are picked up whole: they dangle, then land back on their wheels
 		grab_body = u
@@ -693,6 +931,7 @@ func _grab_start(sp: Vector2) -> bool:
 	if grab_body == null:
 		return false
 	_grab_prev = grab_body.global_position
+	_grab_from = grab_unit.center() if grab_unit and is_instance_valid(grab_unit) else grab_body.global_position
 	_grab_vel = Vector3.ZERO
 	grab_h = clampf(2.5 + grab_body.mass * 0.0, 2.5, 4.0)
 	battle.snd("grab", grab_body.global_position, 0.8)
@@ -701,6 +940,10 @@ func _grab_start(sp: Vector2) -> bool:
 
 func _grab_end(fling: bool) -> void:
 	if grab_body and is_instance_valid(grab_body):
+		if _zone_held():
+			# 🧩 before a puzzle's fight you can move your army about your side, not throw it
+			fling = false
+			grab_body.linear_velocity = Vector3.ZERO
 		if fling:
 			var v := _grab_vel * 1.3
 			if v.length() > 45.0:
@@ -708,6 +951,11 @@ func _grab_end(fling: bool) -> void:
 			grab_body.linear_velocity = v
 			if v.length() > 8.0:
 				battle.snd("whoosh", grab_body.global_position, 0.8)
+	# ↶ puts it back where it was
+	var moved: Node = grab_unit if grab_unit and is_instance_valid(grab_unit) else (grab_body if grab_body is B3Prop else null)
+	if moved and is_instance_valid(moved) and not (moved is B3Unit and (moved as B3Unit).dead):
+		var to: Vector3 = (moved as B3Unit).center() if moved is B3Unit else (moved as Node3D).global_position
+		undo.did_move(moved, _grab_from, to)
 	if grab_unit and is_instance_valid(grab_unit):
 		grab_unit.held = false
 	grab_body = null
@@ -723,6 +971,10 @@ func _physics_process(dt: float) -> void:
 			grab_unit = null
 			return
 		var target: Vector3 = pick(_mouse).pos + Vector3(0, grab_h, 0)
+		if _zone_held():
+			var inner: Rect2 = battle.build_zone.grow(-0.5)
+			target.x = clampf(target.x, inner.position.x, inner.end.x)      # 🧩 it stays on your side
+			target.z = clampf(target.z, inner.position.y, inner.end.y)
 		var to := target - grab_body.global_position
 		var v := to * 14.0
 		if v.length() > 40.0:
@@ -736,6 +988,12 @@ func _physics_process(dt: float) -> void:
 			grab_unit.down_t = 0.0
 
 
+## 🧩 In a puzzle, before ▶ Fight!, what you grab stays on your side (the
+## glowing area) and is put down, not thrown.
+func _zone_held() -> bool:
+	return battle.puzzle != null and not battle.fighting and battle.build_zone.size != Vector2.ZERO
+
+
 # ------------------------------------------------------------------ erase
 func _erase_at(sp: Vector2) -> void:
 	if battle.net and battle.net.is_client():
@@ -743,28 +1001,49 @@ func _erase_at(sp: Vector2) -> void:
 		return
 	var u := unit_at(sp, 22.0)
 	if u:
+		if _kept(u):
+			return
 		if u == selected:
 			select(null)
+		undo.will_erase(u)      # (↶ brings it back)
 		battle.remove_unit(u)
 		return
 	var c := body_at(sp, B3Defs.L_RAGDOLL | B3Defs.L_PROP | B3Defs.L_STRUCT)
 	if c:
 		if c is RigidBody3D and (c as Node).has_meta("ragdoll"):
-			battle.remove_ragdoll((c as Node).get_meta("ragdoll"))
+			var rd = (c as Node).get_meta("ragdoll")
+			if is_instance_valid(rd) and rd.unit and is_instance_valid(rd.unit) and not rd.unit.dead:
+				undo.will_erase(rd.unit)      # a fighter lying knocked down (not a knocked-out one)
+			battle.remove_ragdoll(rd)
 			return
 		if c is B3Prop:
+			undo.will_erase(c as B3Prop)
 			battle.remove_prop(c as B3Prop)
 			return
 		if c is RigidBody3D and (c as Node).has_meta("debris"):
 			battle.remove_chunk(c as RigidBody3D)
 			return
 		if c is B3Piece:
-			battle.remove_struct((c as B3Piece).structure)
+			if not _kept((c as B3Piece).structure):
+				undo.will_erase((c as B3Piece).structure)
+				battle.remove_struct((c as B3Piece).structure)
 			return
 	var g: Vector3 = pick(sp).pos
 	var h: B3Hazard = battle.hazard_at(g + Vector3(0, 0.2, 0), 0.0)
-	if h:
+	if h and not _kept(h):
+		undo.will_erase(h)
 		battle.remove_hazard(h, true)
+
+
+## True (and, on a click, says why) if the Eraser has to leave `n` alone:
+## 🧩 the puzzle's army, buildings and pools, 🌊 the attackers.
+func _kept(n: Node) -> bool:
+	var why: String = battle.hands_off(n, "erase")
+	if why == "":
+		return false
+	if drag.get("mode", "") != "erase":      # (not again for every wiggle of a drag)
+		_nope(why, (n as Node3D).global_position if n is Node3D else Vector3.ZERO)
+	return true
 
 
 ## In a friend's battle: tell the host what to erase.
@@ -826,7 +1105,39 @@ func _process(_d: float) -> void:
 	else:
 		_sel_ring.visible = false
 		if selected != null:
-			select(null)
+			if group.size() > 1:
+				select_many(group)      # (the first one's gone: the others stay picked)
+			else:
+				select(null)
+	_group_rings()
+
+
+## 👥 A ring under every other fighter picked with a box (the first has its own).
+func _group_rings() -> void:
+	if _grp_rings == null or not is_instance_valid(_grp_rings):
+		return
+	var mm := _grp_rings.multimesh
+	if group.size() < 2 or B3Player.active():
+		if _grp_rings.visible:
+			_grp_rings.visible = false
+			mm.visible_instance_count = 0
+		return
+	var n := 0
+	var gone := false
+	for u in group:
+		if not is_instance_valid(u) or u.dead:
+			gone = true
+			continue
+		if u == selected or n >= mm.instance_count:
+			continue
+		var p := u.position if not u.down else u.center()
+		var r := u.radius * 1.5 + 0.25
+		mm.set_instance_transform(n, Transform3D(Basis(Vector3.UP, _t * 2.0).scaled(Vector3(r, 0.5, r)), Vector3(p.x, p.y + 0.08, p.z)))
+		n += 1
+	mm.visible_instance_count = n
+	_grp_rings.visible = n > 0
+	if gone:
+		select_many(group)      # (knocked out or erased: they drop out of the group)
 
 
 func _player_tick(v: Vector2) -> void:
@@ -901,7 +1212,7 @@ func _update_ghost() -> void:
 		return
 	var hit := pick(mp)
 	var p: Vector3 = hit.pos
-	var tc := B3Defs.team_col(team)
+	var tc := B3Defs.team_col(place_team())
 	if B3Defs.UNITS.has(place_id):
 		if drag.get("mode", "") == "place":
 			var a: Vector3 = drag.start
@@ -935,6 +1246,7 @@ func _update_ghost() -> void:
 			c = drag.start
 			if (mp - (drag.sp as Vector2)).length() > 12.0:
 				r2 = clampf(Vector2(p.x - c.x, p.z - c.z).length(), 1.5, 12.0)
+		r2 = battle.pool_room(c, r2)      # (as big as it'll really be: see _place)
 		_ring_at(c, r2, Color(1.0, 0.5, 0.1, 0.9) if String(d2.kind) == "lava" else Color(0.4, 1.0, 0.3, 0.9))
 	elif B3Defs.STRUCTS.has(place_id):
 		var size := Vector3(3, 1.2, 3)
@@ -945,6 +1257,7 @@ func _update_ghost() -> void:
 				size = Vector3(6, 2.8, 0.6)
 				if drag.get("mode", "") == "place":
 					var a2: Vector3 = drag.start
+					p = battle.zone_clamp(p)      # (a drag stops at the edge of your side, see _struct_spot)
 					var f := Vector3(p.x - a2.x, 0, p.z - a2.z)
 					if f.length() > 1.5:
 						size.x = clampf(f.length(), 2.0, 24.0)

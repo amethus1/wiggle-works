@@ -132,15 +132,23 @@ func _ready() -> void:
 
 func _all() -> void:
 	await _budget()
+	await _prices()
 	await _data()
 	await _tab()
 	await _setup()
 	await _guard()
+	await _fair_play()
+	await _zone_build()
+	await _booms()
+	await _rules()
+	await _quick_fight()
+	await _won_stays()
 	await _lose_and_retry()
 	await _leave()
 	await _solve_all()
 	await _history_stars()
 	await _surprise()
+	await _saves_keep()
 	await _saved()
 
 
@@ -177,6 +185,107 @@ func _budget() -> void:
 	await frames()
 	check(not b.ui.coin_lbl.visible and b.points_left() > 1000, "back to free")
 	check(b.zone_vis == null, "and the glowing zone is gone")
+
+
+## What's on the field adds up to what's been spent (booms that went off aside).
+func paid_for() -> int:
+	var n := 0
+	for arr: Array in [b.units, b.structs, b.hazards, b.props]:
+		for o in arr:
+			if is_instance_valid(o) and (o as Node).has_meta("cost"):
+				n += int((o as Node).get_meta("cost"))
+	return n
+
+
+func last_pool() -> B3Hazard:
+	return b.hazards[b.hazards.size() - 1] if not b.hazards.is_empty() else null
+
+
+## 🪙 Prices by real size, exact refunds (also after ⏮ Reset), crates and
+## booms that cost points and give them back.
+func _prices() -> void:
+	print("🪙 paying for what you really get")
+	await fresh()
+	await frames()
+	b.set_budget(100, Rect2(-30, -30, 60, 60), "red")
+	b.tools.place_id = "lava"
+	b.tools._place(at(0, 0), at(10, 0), true, false)
+	var h := last_pool()
+	check(h != null and absf(h.radius - B3Battle.LAKE_R) < 0.01 and int(h.get_meta("cost", 0)) == B3Defs.cost("lava_lake") and b.spent == 8,
+		"a lava pool dragged past a lake's size is a lake: as big as one, and it costs as much (r %.1f, 🪙 %d)" % [h.radius if h else 0.0, b.spent])
+	b.tools.place_id = "lava_lake"
+	b.tools._place(at(12, 12), at(13.5, 12), true, false)
+	h = last_pool()
+	check(h != null and absf(h.radius - 1.5) < 0.01 and int(h.get_meta("cost", 0)) == B3Defs.cost("lava") and b.spent == 12,
+		"a lava lake dragged small is a pool, at a pool's price (🪙 %d)" % b.spent)
+	b.tools.place_id = "acid_swamp"
+	b.tools._place(at(-29.5, 0), at(-29.5, 0), false, false)
+	h = last_pool()
+	check(h != null and h.radius <= 1.5 + 0.01 and h.position.x - h.radius >= -31.01 and int(h.get_meta("cost", 0)) == B3Defs.cost("acid"),
+		"a pool at the edge of your side stops at the edge (r %.1f), and costs what it is" % (h.radius if h else 0.0))
+	# crates: 6 of them for one price, and they go (and pay back) as one
+	b.tools.place_id = "crates"
+	var s0: int = b.spent
+	var p0: int = b.props.size()
+	b.tools._place(at(-10, -10), at(-10, -10), false, false)
+	var crates: Array = b.props.slice(p0)
+	check(crates.size() == 6 and b.spent == s0 + B3Defs.cost("crates"), "📦 a stack of crates costs %d (%d crates, 🪙 %d)" % [B3Defs.cost("crates"), crates.size(), b.spent - s0])
+	b.remove_prop(crates[3] as B3Prop)
+	await frames()
+	check(b.props.size() == p0 and b.spent == s0, "erasing one crate takes the stack and gives its points back (%d props, 🪙 %d)" % [b.props.size(), b.spent])
+	check(b.spent == paid_for(), "what's spent is what's on the field (🪙 %d, %d)" % [b.spent, paid_for()])
+
+	# 🧩 the Lava loop: buy, ▶ Fight!, ⏮ Reset, erase... never makes points
+	await fresh()
+	B3Puzzles.start(b, "sticks")
+	await sim(0.4)
+	b.tools.place_id = "gorilla"
+	b.tools._place(at(-18, 0), at(-18, 0), false, false)
+	b.tools.place_id = "lava"
+	b.tools._place(at(-24, 6), at(-16, 6), true, false)
+	check(b.spent == 6 and b.hazards.filter(func(x: B3Hazard) -> bool: return not x.has_meta("puzzle")).is_empty(), "a lake-sized pool needs a lake's points (🪙 %d of 12)" % b.spent)
+	var ok := true
+	for i in 3:
+		b.tools.place_id = "lava"
+		b.tools._place(at(-24, 6), at(-19.5, 6), true, false)
+		var paid: int = b.spent
+		b.set_fighting(true)
+		await sim(0.2)
+		b.reset_battle()
+		await sim(0.2)
+		var mine: B3Hazard = null
+		for o: B3Hazard in b.hazards:
+			if not o.has_meta("puzzle"):
+				mine = o
+		var kept: int = int(mine.get_meta("cost", -1)) if mine else -1
+		if mine:
+			b.remove_hazard(mine, true)
+		if paid != 10 or kept != 4 or b.spent != 6:
+			ok = false
+			print("    loop %d: paid %d, the pool kept %d, then 🪙 %d" % [i, paid, kept, b.spent])
+	check(ok, "🌋 buy a pool, Fight!, ⏮ Reset, erase it: you get back what you paid, never more (🪙 %d)" % b.spent)
+	# a landmine and C4 give their points back too, before and after ⏮ Reset
+	b.drop("mine", at(-20, -6))
+	b.drop("c4", at(-20, 6))
+	var mn: B3Prop = null
+	for pr: B3Prop in b.props:
+		if pr.kind == "mine":
+			mn = pr
+	check(b.spent == 6 + 2 + 3 and mn != null and int(mn.get_meta("cost", 0)) == 2, "🪤 a landmine costs 2 and keeps it (🪙 %d)" % b.spent)
+	b.remove_prop(mn)
+	check(b.spent == 9, "erasing it gives them back (🪙 %d)" % b.spent)
+	b.set_fighting(true)
+	await sim(0.2)
+	b.reset_battle()
+	await sim(0.2)
+	var c4: B3Prop = null
+	for pr: B3Prop in b.props:
+		if pr.kind == "c4":
+			c4 = pr
+	check(c4 != null and int(c4.get_meta("cost", 0)) == 3 and b.spent == paid_for(), "after ⏮ Reset the C4 still knows its price (🪙 %d, %d on the field)" % [b.spent, paid_for()])
+	if c4:
+		b.remove_prop(c4)
+	check(b.spent == 6, "and erasing it then gives back exactly that (🪙 %d)" % b.spent)
 
 
 # ------------------------------------------------------------------- data
@@ -362,6 +471,260 @@ func _guard() -> void:
 	check(mine.team == "red" and b.spent == 3, "your knight costs 3")
 	b.remove_unit(mine)
 	check(b.spent == 0, "and erasing it before the fight gives the points back")
+
+
+# ------------------------------------------------------- 🛡️ fair play
+func _blue() -> B3Unit:
+	for u: B3Unit in b.units:
+		if u.team == "blue" and not u.dead:
+			return u
+	return null
+
+
+func _red() -> B3Unit:
+	for u: B3Unit in b.units:
+		if u.team == "red" and not u.dead:
+			return u
+	return null
+
+
+## One rule (B3Battle.protected / hands_off) for the Eraser, the Inspector,
+## 🎮 Play as, ✋ Grab and 🚀 Launch, and fair play with your own army.
+func _fair_play() -> void:
+	print("🛡️ the puzzle's army is hands off, and yours plays fair")
+	await fresh()
+	B3Puzzles.start(b, "sticks")
+	await sim(0.4)
+	var en := _blue()
+	check(b.protected(en) and not b.protected(null), "the puzzle's fighters are protected")
+	b.tools.select(en)
+	await frames()
+	(b.ui.insp_acts.launch as Button).pressed.emit()
+	(b.ui.insp_pers.peaceful as Button).pressed.emit()
+	(b.ui.insp_team.green as Button).pressed.emit()
+	en.hp = 5.0
+	(b.ui.insp_acts.heal as Button).pressed.emit()
+	(b.ui.insp_acts.erase as Button).pressed.emit()
+	check(is_instance_valid(en) and not en.dead and not en.down and en.pers_choice == "attack" and en.team == "blue" and en.hp == 5.0,
+		"🔍 the Inspector can't 🚀 launch, 🌼 calm, recolour, 💚 heal or 🗑️ remove them (down %s, %s, %s)" % [en.down, en.pers_choice, en.team])
+	b.tools.select(en)
+	await frames()
+	check((b.ui.insp_acts.launch as Control).modulate.a < 0.5 and (b.ui.insp_pers.attack as Control).modulate.a < 0.5,
+		"those buttons are dimmed for them")
+	b.tools.play_as(en)
+	check(B3Player.unit != en and not b.fighting, "🎮 you can't play as one of them")
+	var sp: Vector2 = b.cam.screen_pos(en.center())
+	check(not b.tools._grab_start(sp) and not en.held, "✋ or grab one")
+	b.tools._erase_at(sp)
+	check(is_instance_valid(en) and not en.dead and live("blue") == 10, "🧽 or erase one with the Eraser")
+	# your own army
+	b.tools.place_id = "knight"
+	b.tools._place(at(-20, 0), at(-20, 0), false, false)
+	var me := _red()
+	check(me != null and not b.protected(me), "your knight isn't protected")
+	b.tools.select(me)
+	await frames()
+	me.hp = 10.0
+	(b.ui.insp_acts.heal as Button).pressed.emit()
+	(b.ui.insp_acts.launch as Button).pressed.emit()
+	(b.ui.insp_team.blue as Button).pressed.emit()
+	(b.ui.insp_pers.defend as Button).pressed.emit()
+	check(me.hp == 10.0 and not me.down and me.team == "red" and me.pers_choice == "defend" and b.spent == 3,
+		"your own: no free 💚 heal or 🚀 launch, it stays red, but you can change its mood (%.0f hp, down %s, %s, %s)" % [me.hp, me.down, me.team, me.pers_choice])
+	# ✋ moving it before the fight: only about your side, and it's put down, not thrown
+	var msp: Vector2 = b.cam.screen_pos(me.center())
+	check(b.tools._grab_start(msp), "✋ you can pick your knight up before the fight")
+	b.tools._mouse = b.cam.screen_pos(at(20, 0))
+	await sim(1.0)
+	b.tools._grab_end(true)
+	await sim(2.5)
+	var zone: Rect2 = (B3Puzzles.info("sticks").zone as Rect2).grow(1.0)
+	var mp: Vector3 = me.center()
+	check(zone.has_point(Vector2(mp.x, mp.z)), "...but it stays on your side (at x %.1f)" % mp.x)
+	b.tools._erase_at(b.cam.screen_pos(me.center()))
+	check(not is_instance_valid(me) or me.dead or not b.units.has(me), "🧽 you can still erase your own")
+	check(b.spent == 0, "for your points back (🪙 %d)" % b.spent)
+	# during the fight
+	b.tools._place(at(-20, 0), at(-20, 0), false, false)
+	me = _red()
+	b.tools.play_as(me)
+	check(B3Player.unit == me and b.fighting, "🎮 you can play your own (and that starts the fight)")
+	b.tools.stop_playing()
+	B3Player.stop()
+	check(not b.tools._grab_start(b.cam.screen_pos(me.center())), "✋ no grabbing once the fight's on")
+	en = _blue()
+	en.set_personality("peaceful")
+	await sim(0.5)
+	check(en.pers_choice == "attack", "and the blue army keeps its mood during the fight too (%s)" % en.pers_choice)
+
+
+## 🚧 Every building you place has to stand on your side, dragged or not.
+func _zone_build() -> void:
+	print("🚧 buildings stay on your side")
+	await fresh()
+	B3Puzzles.start(b, "sticks")
+	await sim(0.4)
+	var zone: Rect2 = (B3Puzzles.info("sticks").zone as Rect2).grow(B3Battle.ZONE_SLACK + 0.01)
+	var n0: int = b.structs.size()
+	b.tools.place_id = "wall"
+	b.tools._place(at(-30, 0), at(16, 0), true, false)
+	var all_in: bool = b.structs.size() == n0 + 1
+	if all_in:
+		for pc: B3Piece in (b.structs[n0] as B3Struct).pieces:
+			var bb := pc.world_aabb()
+			all_in = all_in and zone.has_point(Vector2(bb.position.x, bb.position.z)) and zone.has_point(Vector2(bb.end.x, bb.end.z))
+	check(all_in and b.spent == 2, "a wall dragged towards the blue army stops at the edge of your side")
+	b.tools.place_id = "bridge"
+	b.tools._place(at(-15, 0), at(-15, 0), false, false)
+	b.tools.place_id = "tower"
+	b.tools._place(at(-14.2, 11.5), at(-14.2, 11.5), false, false)
+	check(b.structs.size() == n0 + 1 and b.spent == 2, "a bridge or tower that would stick out past your side isn't built (or paid for)")
+	b.tools._place(at(-24, 0), at(-24, 0), false, false)
+	check(b.structs.size() == n0 + 2 and b.spent == 7, "one in the middle is")
+
+
+## 💣 Booms in a puzzle: the big ones are off, and anything that hurts the
+## blue army before ▶ Fight! is put right when you press it.
+func _booms() -> void:
+	print("💣 booms in a puzzle")
+	await fresh("volcano")
+	B3Puzzles.start(b, "finale")
+	await sim(0.4)
+	var blue := live("blue")
+	for boom in B3Puzzles.BIG_BOOMS:
+		b.drop(String(boom), at(-19, 0))
+	await sim(0.2)
+	check(b.spent == 0 and b.proj_root.get_child_count() == 0 and b.planes.is_empty(), "☢️ no nukes, ✈️ airstrikes or ☄️ artillery in a puzzle")
+	b.ui.set_cat("booms")
+	await frames()
+	var tag: Label = (b.ui.item_btns.nuke as Button).get_node_or_null("Price")
+	check(tag != null and tag.text == "🚫" and (b.ui.item_btns.nuke as Control).modulate.a < 0.9 and (b.ui.item_btns.mine.get_node("Price") as Label).text == "🪙 2",
+		"their cards say 🚫 (the small ones still have a price)")
+	# hurt, moved or knocked out before the fight: all put back at ▶ Fight!
+	var es: Array = b.units.filter(func(u: B3Unit) -> bool: return u.team == "blue")
+	ko(es[0])
+	ko(es[1])
+	(es[2] as B3Unit).hp *= 0.3
+	(es[3] as B3Unit).knock_down(Vector3(0, 6, 0))
+	await sim(0.5)
+	b.set_fighting(true)
+	await frames()
+	var saved: int = (b.start_layout.get("units", []) as Array).filter(func(e: Dictionary) -> bool: return String(e.t) == "blue").size()
+	var full := true
+	for u: B3Unit in b.units:
+		if u.team == "blue" and not u.dead and (u.hp < u.max_hp - 0.5 or u.down):
+			full = false
+	check(live("blue") == blue and saved == blue and full, "▶ Fight! puts back a blue army hurt before the fight, all %d of them (%d saved for ⏮ Reset)" % [live("blue"), saved])
+	# all of them gone before the fight can't leave a puzzle you can't win
+	await fresh()
+	B3Puzzles.start(b, "sticks")
+	await sim(0.4)
+	b.tools.place_id = "gorilla"
+	b.tools._place(at(-18, 0), at(-18, 0), false, false)
+	for u: B3Unit in b.units.duplicate():
+		if u.team == "blue":
+			ko(u)
+	await sim(0.5)
+	b.set_fighting(true)
+	await sim(0.5)
+	check(live("blue") == 10 and b.winner == "", "even when every one of them was knocked out first (%d blue, winner '%s')" % [live("blue"), b.winner])
+
+
+## ⚙️ Your Battle Rules don't leak into a puzzle, and come back after.
+func _rules() -> void:
+	print("⚙️ puzzles use the normal rules")
+	var shake0 := B3Rules.value("shake")
+	B3Rules.reset()
+	B3Rules.set_value("respawn", "on")
+	B3Rules.set_value("booms", "mega")
+	B3Rules.set_value("health", "glass")
+	B3Rules.set_value("shake", "lots")
+	await fresh()
+	B3Puzzles.start(b, "sticks")
+	await sim(0.3)
+	check(not B3Rules.respawn() and B3Rules.boom_r() == 1.0 and B3Rules.toughness() == 1.0 and B3Rules.value("shake") == "lots",
+		"♾️ no reinforcements, normal blasts and toughness (screen shake stays how you like it)")
+	check(String(Settings.b3_rules.get("respawn", "")) == "on" and String(Settings.b3_rules.get("booms", "")) == "mega", "your own rules are still saved")
+	b.ui._show_rules()
+	await frames()
+	var note: Node = b.ui.popup.find_child("PuzzleRules", true, false)
+	var locked := 0
+	var open := 0
+	for c in b.ui.popup.find_children("*", "Button", true, false):
+		if (c as Button).disabled:
+			locked += 1
+		elif "Lots" in (c as Button).text or "little" in (c as Button).text:
+			open += 1
+	check(note != null and locked >= 20 and open >= 2, "the ⚙️ panel says so and only Screen shake can change (%d locked)" % locked)
+	b.ui.close_top()
+	# a kid who loses can't turn MEGA on halfway through
+	b.ui._show_rules()
+	await frames()
+	for c in b.ui.popup.find_children("*", "Button", true, false):
+		if "A little" in (c as Button).text:
+			(c as Button).pressed.emit()
+			break
+	await frames()
+	check(B3Rules.value("shake") == "little" and String(Settings.b3_rules.get("shake", "")) == "little" and String(Settings.b3_rules.get("booms", "")) == "mega",
+		"changing Screen shake in a puzzle keeps the rest of your rules")
+	b.ui.close_top()
+	b.load_map("grassland")
+	check(B3Rules.respawn() and B3Rules.value("booms") == "mega" and B3Rules.value("health") == "glass", "leaving the puzzle brings your rules back")
+	B3Rules.reset()
+	B3Rules.set_value("shake", shake0)
+
+
+## 🗼 Fight! straight away on Tower Archers still has the archers up top.
+func _quick_fight() -> void:
+	print("🗼 a quick ▶ Fight!")
+	await fresh("farmland")
+	B3Puzzles.start(b, "towers")
+	b.set_fighting(true)
+	var n: int = (b.start_layout.get("units", []) as Array).size()
+	await sim(0.6)
+	var up := 0
+	for o: B3Unit in b.units:
+		if o.team == "blue" and o.position.y > b.world.height_at(o.position.x, o.position.z) + 3.0:
+			up += 1
+	check(n == 9 and up == 6, "Space right away still remembers all 9 for ⏮ Reset (%d), with 6 archers up the towers (%d)" % [n, up])
+	b.reset_battle()
+	await sim(0.6)
+	up = 0
+	for o: B3Unit in b.units:
+		if o.team == "blue" and o.position.y > b.world.height_at(o.position.x, o.position.z) + 3.0:
+			up += 1
+	check(live("blue") == 9 and up == 6, "and ⏮ Try again puts them all back up there (%d)" % up)
+	# 🐺 the Animals tab doesn't turn your side brown
+	b.ui.set_cat("animals")
+	await frames()
+	var red_sb: StyleBoxFlat = (b.ui.team_btns.red as Button).get_theme_stylebox("normal") as StyleBoxFlat
+	check(b.tools.place_team() == "red" and red_sb != null and red_sb.border_width_left == 4, "on the Animals tab your side is still red (and lit)")
+
+
+## 🏆 A won puzzle stays won on screen when the last red fighter burns out after.
+func _won_stays() -> void:
+	print("🏆 a win stays a win")
+	await fresh()
+	Settings.b3_puzzles = {}
+	B3Puzzles.start(b, "sticks")
+	await sim(0.4)
+	b.tools.place_id = "gorilla"
+	b.tools._place(at(-18, 0), at(-18, 0), false, false)
+	b.set_fighting(true)
+	await sim(0.3)
+	for u: B3Unit in b.units.duplicate():
+		if u.team == "blue":
+			ko(u)
+	await sim(1.0)
+	await frames(3)
+	var head: String = b.ui.banner_lbl.text.split("\n")[0]
+	check(b.winner == "red" and b.ui.puzzle_card.visible and not b.ui.score_card.visible, "red wins: the ⭐ card shows")
+	ko(_red())
+	await sim(1.0)
+	await frames(3)
+	check(b.winner == "nobody" and b.ui.puzzle_card.visible and not b.ui.score_card.visible and b.ui.banner_lbl.text.split("\n")[0] == head and B3Puzzles.stars("sticks") == 3,
+		"the gorilla burning out afterwards leaves the win, its banner and its ⭐ card up (not the scoreboard)")
+	Settings.b3_puzzles = {}
 
 
 # ------------------------------------------------------ 😵 lose and retry
@@ -613,6 +976,47 @@ func _surprise() -> void:
 			fair = false
 			worst = "seed %d: %s" % [s, pts]
 	check(fair, "every army costs about the same 🪙 %s" % worst)
+
+
+# ------------------------------------------------- 💾 what a save keeps
+## A loaded History battle still earns its ⭐ stars; planes keep their
+## height and parked ones stay parked.
+func _saves_keep() -> void:
+	print("💾 saves keep the History battle and flying heights")
+	await fresh()
+	Settings.b3_hist_stars = {}
+	b.run_history("hastings")
+	await sim(0.3)
+	check(B3Saves.save(b, 6), "saving Hastings")
+	b.load_map("grassland")
+	check(B3Saves.load_slot(b, 6) and b.history_id == "hastings", "loading it, it's still 📜 Hastings ('%s')" % b.history_id)
+	b.set_fighting(true)
+	await sim(0.2)
+	for u: B3Unit in b.units.duplicate():
+		if u.team == "blue":
+			ko(u)
+	await sim(1.0)
+	check(b.winner == "red" and B3History.stars_of("hastings").has("finish") and B3History.stars_of("hastings").has("change"),
+		"and winning it earns its ⭐ stars (%s)" % ", ".join(B3History.stars_of("hastings").keys()))
+	B3Saves.delete_all_test_saves()
+	Settings.b3_hist_stars = {}
+	await fresh()
+	var heli: B3Aircraft = b.spawn_unit("heli", "red", at(0, 0)) as B3Aircraft
+	var plane: B3Aircraft = b.spawn_unit("plane", "blue", at(10, 10)) as B3Aircraft
+	heli.parked = true
+	plane.alt = 33.5
+	await sim(0.3)
+	var d: Dictionary = B3Saves.snapshot(b)
+	B3Saves.restore(b, JSON.parse_string(JSON.stringify(d)) as Dictionary, false, true)
+	await sim(0.3)
+	var h2: B3Aircraft = null
+	var p2: B3Aircraft = null
+	for u: B3Unit in b.units:
+		if u.kind == "heli":
+			h2 = u as B3Aircraft
+		elif u.kind == "plane":
+			p2 = u as B3Aircraft
+	check(h2 != null and h2.parked and p2 != null and absf(p2.alt - 33.5) < 0.01, "a parked helicopter stays parked and a plane keeps its height")
 
 
 # --------------------------------------------------------------- saving

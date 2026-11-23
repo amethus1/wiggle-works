@@ -42,6 +42,10 @@ func build(rig: B3Rig, vel: Vector3, spin: float, rng: RandomNumberGenerator) ->
 	team = rig.team
 	if rig.parts.is_empty():
 		return       # nothing floppy to build (vehicles break apart instead)
+	# a hit flash on its way out stays on the pieces once the model is gone: take it off
+	for m in rig.meshes:
+		if is_instance_valid(m):
+			m.material_overlay = null
 	var xf: Array[Transform3D] = []
 	for p in rig.parts:
 		var n: Node3D = p.node
@@ -117,11 +121,7 @@ func set_dead() -> void:
 	unit = null
 	# grey it out + X eyes
 	for b in bodies:
-		for c in b.get_children():
-			if c is MeshInstance3D:
-				var mi := c as MeshInstance3D
-				mi.material_overlay = null
-				mi.material_override = B3Mats.ko(mi.material_override)
+		_grey(b, true)
 	for e in eyes:
 		if not is_instance_valid(e):
 			continue
@@ -138,6 +138,24 @@ func set_dead() -> void:
 	if B3Defs.unit_def(kind).get("body", "") == "robot" and not bodies.is_empty():
 		_fall_apart()
 	show_stars(3.5)
+
+
+const GEAR := ["Hand", "Shield", "Crown"]      # what it holds or wears (see _grey)
+
+
+## Greys out the pieces on `n` and on the plain nodes under it (an animal's
+## or dinosaur's head and jaw, a horse's head and tail, a dragon's front
+## legs), and takes off any hit flash. What it holds or wears (GEAR: a weapon
+## in its hand, a shield, a King's 👑 crown) keeps its colours, as always.
+func _grey(n: Node, grey: bool) -> void:
+	for c in n.get_children():
+		if c is MeshInstance3D:
+			var mi := c as MeshInstance3D
+			mi.material_overlay = null
+			if grey:
+				mi.material_override = B3Mats.ko(mi.material_override)
+		if c is Node3D and c.get_child_count() > 0:
+			_grey(c, grey and not GEAR.has(String(c.name)))
 
 
 ## Robots come apart into a pile of tin pieces when knocked out.

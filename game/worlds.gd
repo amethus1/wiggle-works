@@ -419,8 +419,10 @@ static func add_starters(world: World, id: String) -> void:
 				# just in front of the towers (not inside them)
 				world.spawn_fighter(ids[i], Vector2(-1040 + i * 55, 150), "red", "")
 				world.spawn_fighter(ids[i], Vector2(1040 - i * 55, 150), "blue", "")
-			world.spawn_fighter("sniper", Vector2(-680, -40), "red", "defend")
-			world.spawn_fighter("sniper", Vector2(680, -40), "blue", "defend")
+			# a sniper up on each tower (they used to stand out in front of the
+			# walls, at the tower's height, and fell down between the armies)
+			world.spawn_fighter("sniper", Vector2(-1120, -44), "red", "defend")
+			world.spawn_fighter("sniper", Vector2(1120, -44), "blue", "defend")
 			world.spawn_toy("barrel", Vector2(-500, 260))
 			world.spawn_toy("barrel", Vector2(500, 260))
 			world.battle_on = false

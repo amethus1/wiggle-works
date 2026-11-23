@@ -17,7 +17,7 @@ const SND_FALLBACK := {
 	"growl": "rumble", "bark": "pop", "moo": "rumble", "cluck": "pop", "trumpet": "wee", "stomp": "pound",
 	"nuke": "mega_boom", "whistle": "wee", "plane": "wind", "alarm": "nope", "sizzle": "steam", "fizz": "fuse",
 	"crumble": "thud", "metal_hit": "clink", "reload": "click", "pin": "tick", "victory": "yay",
-	"battle_start": "party", "snap": "snap", "honk": "nope",
+	"battle_start": "party", "snap": "snap", "honk": "nope", "defeat": "dizzy",
 }
 
 var main = null
@@ -72,8 +72,13 @@ var _settling := {}               # buildings (instance ids) with a settle() wai
 var _ray := PhysicsRayQueryParameters3D.new()
 var _shape_q := PhysicsShapeQueryParameters3D.new()
 var _sphere := SphereShape3D.new()
-var _old_tps := 60
-var _old_interp := false
+# the physics settings from outside 3D Battle, put back when the last battle
+# closes (a new battle can start while the old one is still closing: it must
+# not mistake the old one's 60 ticks for the game's own)
+static var _live := 0
+static var _old_tps := 60
+static var _old_interp := false
+var _counted := false
 var _hz_t := 0.0
 var _vic_t := 0.0
 var _began := false
@@ -99,6 +104,7 @@ var fight_end_t := 0.0            # ...and when it was won
 var fight_kos0 := 0               # `kos` then
 var fight_teams := {}             # team -> how many fighters it brought
 var fighter_log := {}             # uid -> {team, kind, kills, at}: everyone who knocked someone out
+var _scripted := false            # a later() script is running: booms it sets off aren't yours (no 📒 stickers)
 var _respawning := false
 const DRAW_TXT := "💥  Nobody wins! It's a draw!"
 ## Booms from the Toy Box that go off by themselves (the 🎆 Boom Boom Boom sticker counts them).
@@ -111,9 +117,13 @@ func begin(opts: Dictionary) -> void:
 		rng.seed = seed_v
 	else:
 		rng.randomize()
-	_old_tps = Engine.physics_ticks_per_second
+	if _live == 0:
+		_old_tps = Engine.physics_ticks_per_second
+		_old_interp = get_tree().physics_interpolation
+	if not _counted:
+		_counted = true
+		_live += 1
 	Engine.physics_ticks_per_second = 60
-	_old_interp = get_tree().physics_interpolation
 	get_tree().physics_interpolation = true
 	Engine.time_scale = 1.0
 	PhysicsServer3D.set_active(true)
@@ -197,6 +207,8 @@ func begin(opts: Dictionary) -> void:
 				ui.toggle_help()
 			"history":
 				ui._show_history("history")
+			"settings":
+				ui.show_settings()
 			"ready":
 				ui._show_history("ready")
 			var o:
@@ -327,9 +339,12 @@ func _exit_tree() -> void:
 	B3Hazard.clear_cache()
 	Engine.time_scale = 1.0
 	PhysicsServer3D.set_active(true)
-	if _began:
-		Engine.physics_ticks_per_second = _old_tps
-		get_tree().physics_interpolation = _old_interp
+	if _counted:
+		_counted = false
+		_live -= 1
+		if _live == 0:
+			Engine.physics_ticks_per_second = _old_tps
+			get_tree().physics_interpolation = _old_interp
 
 
 ## Applies the ⚙️ Battle Rules: gravity, lighting, weather and the numbers
@@ -375,6 +390,8 @@ func set_fighting(on: bool) -> void:
 		return
 	fighting = on
 	if on:
+		if puzzle:
+			puzzle.before_fight()      # 🧩 the blue army starts as the puzzle made it (and ⏮ Reset remembers it all)
 		_spent_at_fight = spent
 		if not units.is_empty():
 			start_layout = B3Saves.snapshot(self)
@@ -575,15 +592,21 @@ func spawn_proj(kind: String, pos: Vector3, vel: Vector3, shooter, w: Dictionary
 
 
 ## Things from the Booms tab: `dir` is the screen-right direction (airstrikes).
-func drop(id: String, pos: Vector3, dir := Vector3.RIGHT) -> void:
+## `mine` false: not this computer's person's doing (a friend's, sent to the
+## host), so no 📒 stickers here. Nor for booms a script sets off by itself
+## (🎯 Nuke! and C4 Surprise at Fight!, see later()).
+func drop(id: String, pos: Vector3, dir := Vector3.RIGHT, mine := true) -> void:
+	var spent0 := spent
 	if puzzle and not puzzle.pay_boom(id, pos):
 		return      # 🧩 in a puzzle, booms cost points and go on your side only
 	if modes and not modes.pay_boom(id, pos):
 		return      # 🌊 Wave Defense: the same, in your fort
-	if id == "nuke":
-		Settings.award("nuke")
-	if id in SELF_BOOMS:
-		Settings.count("booms", "boom", 10)
+	var paid := spent - spent0      # (a mine, barrel or C4 keeps it: erasing it before the fight gives it back)
+	if mine and not _scripted:
+		if id == "nuke":
+			Settings.award("nuke")
+		if id in SELF_BOOMS:
+			Settings.count("booms", "boom", 10)
 	if _client_cmd({"c": "drop", "id": id, "pos": pos, "dir": dir}):
 		return
 	var d: Dictionary = B3Defs.BOOMS.get(id, {})
@@ -592,7 +615,9 @@ func drop(id: String, pos: Vector3, dir := Vector3.RIGHT) -> void:
 			var p := spawn_proj("dropgrenade", pos + Vector3(0, 3.0, 0), Vector3(rng.randf_range(-1, 1), -1.0, rng.randf_range(-1, 1)), null, d)
 			p.fuse = 2.3
 		"dynamite", "c4", "mine", "xbarrel":
-			spawn_prop(id, pos, rng.randf() * TAU)
+			var bp := spawn_prop(id, pos, rng.randf() * TAU)
+			if paid > 0:
+				bp.set_meta("cost", paid)
 		"cluster", "napalm", "acidbomb":
 			spawn_proj(id, pos + Vector3(0, 26, 0), Vector3(0, -10, 0), null, d)
 			snd("whistle", pos, 0.8)
@@ -675,7 +700,9 @@ func explode(pos: Vector3, r: float, power: float, dmg: float, opts := {}) -> vo
 		if own != "wild":
 			spare_team = own
 	var hit: Dictionary = opts.get("hit", {})
-	_blast_bodies(pos, r, power * r_knock, dmg, up, opts.get("skip", {}), 0.0, 0.0, spare_team)
+	if modes and modes.keep_up:
+		modes.keep_blast(pos, r, dmg, String(by.team) if by is B3Unit else String(opts.get("team", "")))     # 🌊 the attackers' booms hurt the 🚩 keep
+	_blast_bodies(pos, r, power * r_knock, dmg, up, opts.get("skip", {}), 0.0, 0.0, spare_team, {}, by as B3Unit)
 	for u: B3Unit in units.duplicate():
 		if u.dead or not is_instance_valid(u) or hit.has(u.uid):
 			continue
@@ -689,8 +716,7 @@ func explode(pos: Vector3, r: float, power: float, dmg: float, opts := {}) -> vo
 		var f := clampf(1.0 - maxf(0.0, dist - u.radius) / r, 0.0, 1.0)
 		var dir := (Vector3(d.x, 0, d.z).normalized() + Vector3.UP * up).normalized()
 		hit[u.uid] = dmg * f
-		u.hurt(dmg * f, dir, power * f * 1.15 + 1.5, by, "blast")
-		player_hit(by, u)
+		u.hurt(dmg * f, dir, power * f * 1.15 + 1.5, by, "blast")      # (its hit marker for you, too)
 	if bool(opts.get("quiet", false)):
 		return
 	fx.explosion(pos, r, 1 if kind == "acid" else 0)
@@ -705,7 +731,8 @@ func explode(pos: Vector3, r: float, power: float, dmg: float, opts := {}) -> vo
 ## `spare`: a team whose fighters lying on the ground are left alone
 ## (Battle Rules: blasts don't hurt teammates). `units_hit`: uids of fighters
 ## already hurt by this blast, whose ragdolls are only pushed, not hurt again.
-func _blast_bodies(pos: Vector3, r: float, power: float, dmg: float, up: float, skip: Dictionary, r_min := 0.0, fall_r := 0.0, spare := "", units_hit: Dictionary = {}) -> void:
+## `by`: whose blast it is (knocking out someone lying on the ground counts for them).
+func _blast_bodies(pos: Vector3, r: float, power: float, dmg: float, up: float, skip: Dictionary, r_min := 0.0, fall_r := 0.0, spare := "", units_hit: Dictionary = {}, by: B3Unit = null) -> void:
 	var fr := fall_r if fall_r > 0.0 else r
 	_sphere.radius = r
 	_shape_q.transform = Transform3D(Basis.IDENTITY, pos)
@@ -755,7 +782,7 @@ func _blast_bodies(pos: Vector3, r: float, power: float, dmg: float, up: float, 
 						rd.unfreeze()
 					if rd.unit and is_instance_valid(rd.unit) and not hit_rd.has(rd.get_instance_id()) and not units_hit.has(rd.unit.uid):
 						hit_rd[rd.get_instance_id()] = true
-						rd.unit.hurt(dmg * f * 0.6, dir, 0.0, null, "blast")
+						rd.unit.hurt(dmg * f * 0.6, dir, 0.0, by, "blast")
 				if not b.freeze:
 					b.linear_velocity += dir * power * f * 1.1
 					b.angular_velocity += Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * power * f * 0.6
@@ -851,8 +878,7 @@ func shot_hit(hit: Dictionary, w: Dictionary, dir: Vector3, shooter) -> void:
 	var c = hit.collider
 	var p: Vector3 = hit.position
 	if c is B3Unit:
-		(c as B3Unit).hurt(float(w.dmg), dir, float(w.get("knock", 1.0)), shooter, "shot")
-		player_hit(shooter, c)
+		(c as B3Unit).hurt(float(w.dmg), dir, float(w.get("knock", 1.0)), shooter, "shot")      # (hurt shows your hit marker, not a dodge)
 	elif c is B3Prop:
 		var pr := c as B3Prop
 		pr.damage(float(w.dmg))
@@ -934,10 +960,13 @@ func _settle_soon(s: B3Struct) -> void:
 	if _settling.has(id):
 		return
 	_settling[id] = true
+	# (looked up by id when it fires: a lambda that captured the building
+	# itself makes Godot print an error if the building is gone by then)
 	later(0.0, func():
 		_settling.erase(id)
-		if is_instance_valid(s):
-			s.settle())
+		var st := instance_from_id(id) as B3Struct
+		if st != null and is_instance_valid(st):
+			st.settle())
 
 
 func _chunk_body(xf: Transform3D, size: Vector3, _k: float) -> RigidBody3D:
@@ -1002,7 +1031,9 @@ func on_unit_ko(u: B3Unit, by) -> void:
 			if is_instance_valid(u.ragdoll.root_body):
 				v = u.ragdoll.root_body.linear_velocity
 		net.rec_event(["ko", u.get_instance_id(), v])
-	if by != null and is_instance_valid(by) and by is B3Unit and by != u:
+	# knocking out a teammate (🤝 Blasts hurt teammates) or yourself scores
+	# nothing (B3Unit._credit_ko counts the same way)
+	if by != null and is_instance_valid(by) and by is B3Unit and by != u and (by as B3Unit).is_enemy(u):
 		team_kos[by.team] = int(team_kos.get(by.team, 0)) + 1
 		if by.kills > int(mvp.get("kills", 0)):
 			mvp = {"kind": by.kind, "team": by.team, "kills": by.kills, "uid": by.uid}
@@ -1079,6 +1110,17 @@ func remove_ragdoll(rd: B3Ragdoll, poof := true) -> void:
 
 
 func remove_prop(p: B3Prop, poof := true) -> void:
+	if poof and is_instance_valid(p):
+		# 🪙 erased (not blown up): a bought mine, barrel or C4 gives its points back,
+		# and a stack of crates was bought as one, so it goes (and pays back) as one
+		if p.has_meta("stack") and budget >= 0 and not fighting:
+			var sid := int(p.get_meta("stack"))
+			p.remove_meta("stack")
+			for o: B3Prop in props.duplicate():
+				if is_instance_valid(o) and int(o.get_meta("stack", -1)) == sid:
+					o.remove_meta("stack")
+					remove_prop(o, poof)
+		_refund(p)
 	props.erase(p)
 	if net and is_instance_valid(p):
 		net.rec_event(["rm", p.get_instance_id()])
@@ -1133,14 +1175,42 @@ func remove_hazard(h: B3Hazard, poof := false) -> void:
 func _ko_stickers(u: B3Unit, by) -> void:
 	var by_u: B3Unit = by if by != null and is_instance_valid(by) and by is B3Unit else null
 	var mine := by_u != null and by_u == B3Player.unit and by_u.ctl == B3Player.me
-	if mine and by_u.is_enemy(u):
-		if by_u is B3Aircraft:
-			Settings.count("b3_air_kos", "ace", 3)
-		elif not (by_u is B3Vehicle) and String(by_u.def.body) == "human":
-			Settings.count("b3_hero_kos", "hero", 5)
-	# 🪖 wrecked by you, or by a boom, a pool or a fall (not by the computer's fighters)
+	for k in ko_stickers_for(by_u, u, mine):
+		give_ko_sticker(k)
+
+
+## 📒 What knocking out `u` earns the person playing `by` (null: a boom, a
+## pool or a fall did it). `mine`: that person is the one who'd get them
+## (this computer's, or on the host a friend's, for B3Net to send on).
+##  - "ace": ✈️ knocked out by the plane or helicopter you fly (3 for Ace Pilot);
+##  - "hero": 🦸 by the person you play, on foot or on horseback (5 for Hero);
+##  - "tankbuster": 🧨 a tank wrecked by you, or by a boom, a pool or a fall
+##    (not by the computer's fighters).
+## Knocking out a teammate earns nothing.
+static func ko_stickers_for(by: B3Unit, u: B3Unit, mine: bool) -> PackedStringArray:
+	var out := PackedStringArray()
+	if u == null or not is_instance_valid(u):
+		return out
+	if mine and by != null and is_instance_valid(by) and by.is_enemy(u):
+		if by is B3Aircraft:
+			out.append("ace")
+		elif not (by is B3Vehicle) and String(by.def.body) in ["human", "rider"]:
+			out.append("hero")
 	if u.kind == "tank" and (mine or by == null):
-		Settings.award("tankbuster")
+		out.append("tankbuster")
+	return out
+
+
+## Earns (or counts towards) a sticker from ko_stickers_for. A friend's copy
+## calls it for the ones the host sends it.
+static func give_ko_sticker(id: String) -> void:
+	match id:
+		"ace":
+			Settings.count("b3_air_kos", "ace", 3)
+		"hero":
+			Settings.count("b3_hero_kos", "hero", 5)
+		"tankbuster":
+			Settings.award("tankbuster")
 
 
 func c4_count() -> int:
@@ -1151,9 +1221,11 @@ func c4_count() -> int:
 	return n
 
 
-func detonate_c4() -> void:
+## 💥 Sets off every C4. `mine`: as for drop() (a script's or a friend's
+## press earns no 📒 stickers on this computer).
+func detonate_c4(mine := true) -> void:
 	var n := c4_count()
-	if n > 0:
+	if n > 0 and mine and not _scripted:
 		Settings.count("booms", "boom", 10, n)
 	if _client_cmd({"c": "c4"}):
 		return
@@ -1201,12 +1273,18 @@ func points_left() -> int:
 func can_place(id: String, pos: Vector3, count := 1) -> String:
 	if build_zone.size != Vector2.ZERO and not build_zone.has_point(Vector2(pos.x, pos.z)):
 		return "🚧 You can only build on your side (the glowing area)."
+	# 🌊 Wave Defense: no walls or pools on the 🚩 Fort Keep (fighters may land on its roof)
+	if modes and modes.keep_up and (B3Defs.STRUCTS.has(id) or B3Defs.HAZARDS.has(id)) \
+			and Vector2(pos.x - modes.keep_pos.x, pos.z - modes.keep_pos.z).length() < B3Modes.KEEP_R + 2.0:
+		return "🚩 That's where the keep stands! Build round it."
 	if budget >= 0 and B3Defs.cost(id) * count > points_left():
 		return "🪙 Not enough points for that! You have %d left." % points_left()
 	return ""
 
 
-## Pays for `node` (a fighter, building or pool just placed as `id`).
+## Pays for `node` (a fighter, building or pool just placed as `id`). The
+## price paid stays on it (meta "cost", and in B3Saves snapshots, so ⏮ Reset
+## keeps it), and erasing it gives back exactly that.
 func buy(node: Node, id: String) -> void:
 	if budget < 0 or node == null:
 		return
@@ -1216,10 +1294,122 @@ func buy(node: Node, id: String) -> void:
 	budget_changed.emit()
 
 
+## Pays for a stack of crates (spawn_struct("crates") makes 6 props): one
+## price for the lot, kept on the first, and they all share meta "stack" so
+## erasing any of them before the fight takes (and pays back) the whole stack.
+func buy_stack(stack: Array, id: String) -> void:
+	if budget < 0 or stack.is_empty():
+		return
+	var sid: int = (stack[0] as Node).get_instance_id()
+	for o in stack:
+		(o as Node).set_meta("stack", sid)
+	buy(stack[0] as Node, id)
+
+
+## 🪙 What a pool of `kind` ("lava" or "acid") with radius `r` is sold as:
+## up to 5 m it's a Lava (Acid) Pool, bigger is a Lava Lake (Acid Swamp).
+## Pools are priced by their real size, however they were made.
+static func pool_id(kind: String, r: float) -> String:
+	if r > POOL_MAX_R:
+		return "lava_lake" if kind == "lava" else "acid_swamp"
+	return kind
+
+
+const POOL_MAX_R := 5.0       # the biggest pool that's still a Pool (see pool_id)
+const LAKE_R := 7.0           # 🪙 budget battles: the biggest pool you can buy (a Lake)
+const ZONE_SLACK := 1.0       # a building or pool may poke this far out of the glowing area
+
+
+## 🪙 Budget battles: how big a pool at `at` can be, at most `r`: no bigger
+## than a Lake, and only just over the edge of your side.
+func pool_room(at: Vector3, r: float) -> float:
+	if budget < 0:
+		return r
+	r = minf(r, LAKE_R)
+	if build_zone.size != Vector2.ZERO:
+		var edge := minf(minf(at.x - build_zone.position.x, build_zone.end.x - at.x), minf(at.z - build_zone.position.y, build_zone.end.y - at.z))
+		r = minf(r, maxf(1.5, edge + ZONE_SLACK))
+	return r
+
+
+## `p` moved onto your side (the glowing area), if there is one.
+func zone_clamp(p: Vector3) -> Vector3:
+	if build_zone.size == Vector2.ZERO:
+		return p
+	var x := clampf(p.x, build_zone.position.x, build_zone.end.x)
+	var z := clampf(p.z, build_zone.position.y, build_zone.end.y)
+	return Vector3(x, world.height_at(x, z), z)
+
+
+## Buildings' footprints on the ground (x across, z deep, as spawn_struct
+## builds them before turning them by their yaw). A wall is as long as its length.
+const FOOT := {"block": Vector2(3, 3), "wall": Vector2(6, 0.6), "ramp": Vector2(2.6, 6), "tower": Vector2(4, 4),
+	"bunker": Vector2(5.6, 5.6), "bridge": Vector2(3, 19), "sandbags": Vector2(5, 1.5), "crates": Vector2(3.2, 1.1)}
+
+
+## 🚧 True if building `id` at `at`, turned by `yaw` (a wall `length` long),
+## fits on your side (the glowing area, give or take ZONE_SLACK). Always
+## true when there's no zone.
+func fits_zone(id: String, at: Vector3, yaw: float, length := 0.0) -> bool:
+	if build_zone.size == Vector2.ZERO:
+		return true
+	var f: Vector2 = FOOT.get(id, Vector2(3, 3))
+	if id == "wall" and length > 0.5:
+		f.x = clampf(length, 2.0, 24.0)
+	var zone := build_zone.grow(ZONE_SLACK)
+	var rot := Basis(Vector3.UP, yaw)
+	for c in [Vector3(-f.x, 0, -f.y), Vector3(f.x, 0, -f.y), Vector3(f.x, 0, f.y), Vector3(-f.x, 0, f.y)]:
+		var w: Vector3 = at + rot * ((c as Vector3) * 0.5)
+		if not zone.has_point(Vector2(w.x, w.z)):
+			return false
+	return true
+
+
+## 🛡️ True for things nobody may change: a 🧩 puzzle's own army, buildings
+## and pools (B3Puzzles.keeps) and 🌊 Wave Defense's attackers (B3Modes.keeps).
+## The Eraser, the Inspector's buttons, 🎮 Play as, ✋ Grab and 🚀 Launch
+## leave them alone (see hands_off).
+func protected(n: Node) -> bool:
+	if n == null or not is_instance_valid(n):
+		return false
+	if puzzle and puzzle.keeps(n):
+		return true
+	return modes != null and modes.has_method("keeps") and bool(modes.call("keeps", n))
+
+
+## Why `what` ("erase", "team", "mood", "launch", "heal", "play" or "grab")
+## can't be done to `n` right now (a message), or "" if it can. Protected
+## things (see protected) can't be touched at all. In a 🧩 puzzle your own
+## army plays fair too: it stays red, there's no free 💚 healing or 🚀
+## launching, and ✋ you can only move it about your side before ▶ Fight!
+## (B3Tools keeps it in the glowing area).
+func hands_off(n: Node, what: String) -> String:
+	if protected(n):
+		var theirs := puzzle != null and puzzle.keeps(n)
+		if what == "play":
+			return "🎮 You can only play your own army in a puzzle." if theirs else "🎮 You can only play your own side."
+		return "🧩 The puzzle's army stays just as it is. Beat it in battle!" if theirs else "🛡️ Hands off! Beat them in battle."
+	if puzzle == null:
+		return ""
+	match what:
+		"team":
+			return "🧩 Your army stays red in a puzzle."
+		"heal":
+			return "💚 No free healing in a puzzle. Bring a medic!"
+		"launch":
+			return "🚀 No launching in a puzzle. Win it in battle!"
+		"grab":
+			if fighting:
+				return "✋ No grabbing once the fight's on. Your army's on its own!"
+	return ""
+
+
 ## Erasing something you bought before the fight gives its points back.
 func _refund(node: Node) -> void:
-	if budget < 0 or fighting or node == null or not is_instance_valid(node) or not node.has_meta("cost"):
+	if budget < 0 or node == null or not is_instance_valid(node) or not node.has_meta("cost"):
 		return
+	if fighting and not (modes and modes.can_refund(node)):
+		return      # (🌊 in a break between waves, what you bought since the last one still can)
 	spent = maxi(0, spent - int(node.get_meta("cost")))
 	node.remove_meta("cost")
 	budget_changed.emit()
@@ -1230,7 +1420,7 @@ func _recount_spent() -> void:
 	if budget < 0:
 		return
 	var n := 0
-	for arr: Array in [units, structs, hazards]:
+	for arr: Array in [units, structs, hazards, props]:
 		for o in arr:
 			if is_instance_valid(o) and (o as Node).has_meta("cost"):
 				n += int((o as Node).get_meta("cost"))
@@ -1241,6 +1431,8 @@ func _recount_spent() -> void:
 func clear_units() -> void:
 	if tools:
 		tools.stop_playing()      # quietly: your fighter is being cleared away, not knocked out
+		if tools.get("undo"):
+			tools.undo.clear()    # ↶ nothing to undo back to on a cleared field (B3Undo)
 	start_layout = {}             # nothing left to ⏮ Reset to (Reset itself puts its copy back)
 	history_id = ""               # not that battle any more (⏮ Reset puts these back too)
 	ready_id = ""
@@ -1253,6 +1445,7 @@ func clear_units() -> void:
 			u.dead = true
 			u.queue_free()
 	units.clear()
+	_grid_reset()
 	_recount_spent()
 	for rd in ragdolls:
 		if is_instance_valid(rd):
@@ -1391,7 +1584,7 @@ func unit_by_rid(rid: RID) -> B3Unit:
 ## friend's copy it isn't made: everyone is simply looked at, in `units` order.
 const GRID := 6.0
 const GRID_FAR := 2000.0           # further out than this (about to be removed): always looked at
-var grid_min := 120                # fewer fighters than this: not worth making (tests set 0)
+var grid_min := 64                 # fewer fighters than this: not worth making (tests set 0)
 var grid_r := 0.0                  # the biggest radius of a fighter in it
 var _grid := {}                    # square (cell_x * 4096 + cell_z) -> Array[B3Unit]
 var _grid_far: Array[B3Unit] = []
@@ -1480,6 +1673,26 @@ func _grid_build() -> void:
 	_grid_x1 = x1
 	_grid_z0 = z0
 	_grid_z1 = z1
+
+
+## Everyone's been cleared away: forget the map (it would otherwise hold on
+## to the old fighters, and their size, until the next one is made).
+func _grid_reset() -> void:
+	_grid.clear()
+	_grid_far.clear()
+	grid_r = 0.0
+	_grid_step = -1
+	_grid_on = false
+	_num_step = -1
+	_grid_n = 0
+	_grid_count = 0
+	_grid_x0 = 0
+	_grid_x1 = -1
+	_grid_z0 = 0
+	_grid_z1 = -1
+	_foes_step = -1
+	_side_n.clear()
+	_standing_n = 0
 
 
 ## Without the map: just numbers everyone in order (B3Unit.grid_i).
@@ -1710,7 +1923,12 @@ func _check_victory() -> void:
 	if modes:
 		txt = modes.win_text(k, txt)
 	for u in units:
-		u.cheer = true
+		u.cheer = (u.team if u.team != "wild" else "wild:" + u.kind) == k      # (only the winners cheer)
+	if modes and modes.is_defeat(k):
+		# 🌊 the keep fell: you lost. A gentle "aww", no confetti or fireworks.
+		_battle_over(txt, Color("aebbd6"))
+		snd("defeat", null, 0.9)
+		return
 	_battle_over(txt, col)
 	if ui:
 		var star := mvp_text()
@@ -1836,8 +2054,8 @@ func victory_stickers(sc: Dictionary) -> void:
 		Settings.mark("b3_history", hist, "historybuff", 3)
 		B3History.earn_stars(self, hist, String(sc.win))     # ⭐ finish, ⭐ change history, ⭐ hero
 	var win := String(sc.win)
-	if win == "nobody":
-		return
+	if win == "nobody" or (modes and modes.is_defeat(win)):
+		return      # (🌊 the keep fell: no 🏆 Victory or 🎖️ General for losing)
 	Settings.award("b3win")
 	# 🎖️ General: 5 or more on each team
 	var teams: Array = sc.teams
@@ -1862,11 +2080,39 @@ func snd(n: String, at = null, vol := 1.0, pitch := 1.0) -> void:
 	if not Sfx.has(name_s) and SND_FALLBACK.has(name_s):
 		name_s = String(SND_FALLBACK[name_s])
 	var v := vol
-	if at is Vector3 and cam:
-		var p := at as Vector3
-		var d := Vector2(p.x - cam.focus.x, p.z - cam.focus.z).length()
-		v *= clampf(1.25 - d / (cam.size * 1.4), 0.12, 1.0)
-	Sfx.play(name_s, null, v, pitch)
+	var pan := 0.0
+	if at is Vector3:
+		var h := hear(at as Vector3)
+		v *= h.x
+		pan = h.y
+	Sfx.play(name_s, null, v, pitch, pan)
+
+
+## How loud (x, 0..1) and how far left or right (y) a sound at `p` is for
+## whoever's watching (Sfx.hear3d), by its real 3D distance (height counts).
+## First person: heard from your eyes, panned by the way it comes from.
+## Overhead: heard from the ground in the middle of the view, panned by
+## where it is across the screen.
+func hear(p: Vector3) -> Vector2:
+	if cam == null or cam.cam == null or not is_inside_tree():
+		return Vector2(1.0, 0.0)
+	if cam.first_person():
+		return Sfx.hear3d(p, cam.cam.global_position, cam.cam.global_transform.basis, true)
+	var ear := cam.focus
+	if world:
+		ear.y = world.height_at(ear.x, ear.z)
+	var vp := get_viewport().get_visible_rect().size
+	var half_w := cam.size * 0.5 * vp.x / maxf(vp.y, 1.0)
+	return Sfx.hear3d(p, ear, cam.basis_now(), false, cam.size, half_w)
+
+
+## The music for this battle (Sfx.mood_now): "battle" while the fighting's
+## on (🌊 Wave Defense: while a wave is coming), otherwise "build" (setting
+## up, between waves, and once it's won or lost).
+func music_mood() -> String:
+	if modes and modes.kind == "waves":
+		return "battle" if modes.phase == "wave" else "build"
+	return "battle" if fighting and winner == "" else "build"
 
 
 ## Camera shake from something at `at`: fades with distance from what you're
@@ -1934,7 +2180,9 @@ func _events_tick(dt: float) -> void:
 			_events.remove_at(i)
 			var fn: Callable = e[1]
 			if fn.is_valid():
+				_scripted = true      # (whatever it sets off isn't yours: drop, detonate_c4)
 				fn.call()
+				_scripted = false
 		else:
 			i += 1
 

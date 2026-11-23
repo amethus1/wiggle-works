@@ -746,7 +746,7 @@ func _char(n: Node) -> void:
 			mi.material_overlay = null
 			var m := mi.material_override
 			if m is ShaderMaterial and m.has_meta("rig_pm"):
-				mi.material_override = B3Mats.rig_mat("char", bool(m.get_meta("rig_pm")))      # merged pieces scorch the same way
+				mi.material_override = B3Mats.rig_relook(m, "char")      # merged pieces scorch the same way
 			elif m is StandardMaterial3D and (m as StandardMaterial3D).shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL:
 				var sm := m as StandardMaterial3D
 				var g := sm.albedo_color.get_luminance()

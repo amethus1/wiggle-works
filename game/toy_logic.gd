@@ -191,6 +191,10 @@ static func step(world: World, t: Toy, dt: float) -> void:
 				t.extra.lit = lit
 				update_light(world, t)
 			if t.id == "saucer":
+				if t.powered:
+					# a pressure plate's press keeps the beam on a moment after
+					# whoever stood on it is lifted off (see Builders' UFO Abductor)
+					t.zap_power = maxf(t.zap_power, 1.5)
 				_hover(world, t, dt)
 		"bell":
 			if t.powered and not bool(t.extra.get("was", false)):
@@ -213,9 +217,30 @@ static func step(world: World, t: Toy, dt: float) -> void:
 		"propeller":
 			if on:
 				t.apply_central_force(up * 3600.0)
+		"landmine":
+			if t.freeze and _mine_stepped_on(world, t, up):
+				trigger(world, t)   # nailed down: it can't feel its own contacts
+				return
+		"spring_pad":
+			if t.freeze and t.cooldown <= 0.0:
+				# nailed down: look for whatever landed on it (one launch per Wiggly)
+				var seen := {}
+				for hit in _on_top(world, t, up):
+					var o = hit.collider
+					var who = o.wiggly if o is JellyPoint else o
+					if not seen.has(who):
+						seen[who] = true
+						if _spring(world, t, o, up, t.global_position + up * t.h * t.size_scale * 0.5):
+							t.cooldown = 0.3
 		"conveyor":
 			if on:
-				for b in t.get_colliding_bodies():
+				var riders: Array = []
+				if t.freeze:
+					for hit in _on_top(world, t, up, 12):   # nailed down: see _on_top
+						riders.append(hit.collider)
+				else:
+					riders = t.get_colliding_bodies()
+				for b in riders:
 					if b is RigidBody2D and not (b as RigidBody2D).freeze and (b.global_position - t.global_position).dot(up) > 0.0:
 						var rb := b as RigidBody2D
 						var along := dir.dot(rb.linear_velocity)
@@ -230,10 +255,9 @@ static func step(world: World, t: Toy, dt: float) -> void:
 		"go_kart", "monster_truck":
 			_drive(world, t, on, dt)
 		"boat":
-			for r in world.water:
-				if r.has_point(t.global_position + Vector2(0, 30)):
-					t.apply_central_force(Vector2(t.facing * 900.0, 0))
-					break
+			# sails on water (not lava or acid: there it just sinks)
+			if world.in_water(t.global_position + Vector2(0, 30)).size != Vector2.ZERO:
+				t.apply_central_force(Vector2(t.facing * 900.0, 0))
 
 
 ## A wire (or a zap) brought power to a boom: off it goes.
@@ -250,14 +274,62 @@ static var _plate_q: PhysicsShapeQueryParameters2D = null
 
 ## A nailed-down Big Button (a pressure plate): is anything standing on it?
 static func _pressed_from_above(world: World, t: Toy, up: Vector2) -> bool:
+	return not _on_top(world, t, up, 1).is_empty()
+
+
+## What's lying on (or just landing on) a nailed-down toy's top face: the
+## physics hits from a shape query a few pixels above it. Nailed toys are
+## frozen, and a frozen body can't feel its own contacts, so a Big Button,
+## landmine, spring pad or conveyor belt that's nailed looks for itself.
+## `sides`: what's touching its sides counts too.
+static func _on_top(world: World, t: Toy, up: Vector2, most := 8, sides := false) -> Array:
 	if _plate_q == null:
 		_plate_q = PhysicsShapeQueryParameters2D.new()
 		_plate_q.shape = RectangleShape2D.new()
 		_plate_q.collision_mask = Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | Toy.LAYER_FIGHTERS
-	(_plate_q.shape as RectangleShape2D).size = Vector2(t.w * t.size_scale * 0.9, 8.0)
-	_plate_q.transform = Transform2D(t.rotation, t.global_position + up * (t.h * t.size_scale * 0.5 + 5.0))
+	if sides:
+		(_plate_q.shape as RectangleShape2D).size = Vector2(t.w * t.size_scale + 8.0, t.h * t.size_scale + 4.0)
+		_plate_q.transform = Transform2D(t.rotation, t.global_position + up * 4.0)
+	else:
+		# (from 2 px inside its top: someone standing on it rests right on the top)
+		(_plate_q.shape as RectangleShape2D).size = Vector2(t.w * t.size_scale * 0.9, 8.0)
+		_plate_q.transform = Transform2D(t.rotation, t.global_position + up * (t.h * t.size_scale * 0.5 + 2.0))
 	_plate_q.exclude = [t.get_rid()]
-	return not world.get_world_2d().direct_space_state.intersect_shape(_plate_q, 1).is_empty()
+	var hits := world.get_world_2d().direct_space_state.intersect_shape(_plate_q, most)
+	# (not things that were just taken out of the world: they linger until the frame ends)
+	return hits.filter(func(h): return is_instance_valid(h.collider) and not (h.collider as Node).is_queued_for_deletion())
+
+
+## A nailed landmine: someone (or a Wiggly, or a toy thrown at it) is on it
+## or bumping into its sides (it's only 10 px tall: a soldier walks into it).
+static func _mine_stepped_on(world: World, t: Toy, up: Vector2) -> bool:
+	for hit in _on_top(world, t, up, 6, true):
+		var o = hit.collider
+		if o is FighterPart or o is JellyPoint:
+			return true
+		if o is Toy and not o.freeze and (o.linear_velocity as Vector2).length() > 80.0:
+			return true   # (one just lying there doesn't count: see impact())
+	return false
+
+
+## A spring pad throws `other` (touching its top) up into the air. Returns
+## true if it did.
+static func _spring(world: World, t: Toy, other, up: Vector2, at: Vector2) -> bool:
+	if not (other is RigidBody2D):
+		return false
+	var rel: Vector2 = (other as Node2D).global_position - t.global_position
+	if rel.dot(up) <= 0.0:
+		return false
+	if other is JellyPoint:
+		other.wiggly.add_velocity(up * 1150.0 - up * other.wiggly.com_vel.dot(up))
+	elif not (other as RigidBody2D).freeze:
+		var rb := other as RigidBody2D
+		rb.linear_velocity += up * (1100.0 - rb.linear_velocity.dot(up))
+	else:
+		return false
+	t.extra.art = str(randi())
+	world.fx_event("boing", {"p": at, "big": true})
+	return true
 
 
 static func _count_boom() -> void:
@@ -287,7 +359,7 @@ static func _fire_cannon(world: World, t: Toy) -> void:
 		ball.extra.from_cannon = true
 		ball.paint = Catalog.PAINT[randi() % 8]
 		ball.linear_velocity = dir * 1250.0 + t.linear_velocity
-		ball.add_collision_exception_with(t)
+		world.no_collide(ball, t)   # (and still after a save)
 	if not t.freeze:
 		t.linear_velocity -= dir * 120.0
 	world.fx_event("cannon", {"p": muzzle, "dir": dir})
@@ -296,7 +368,7 @@ static func _fire_cannon(world: World, t: Toy) -> void:
 static func _blow(world: World, t: Toy, dir: Vector2, dt: float) -> void:
 	var c := t.global_position
 	var reach := 420.0 * t.size_scale
-	for o in world.things.values():
+	for o in world.all_things():
 		if o == t:
 			continue
 		var p: Vector2 = world._pos_of(o)
@@ -317,7 +389,7 @@ static func _blow(world: World, t: Toy, dir: Vector2, dt: float) -> void:
 
 static func _magnet(world: World, t: Toy, dt: float) -> void:
 	var c := t.global_position
-	for o in world.things.values():
+	for o in world.all_things():
 		if o is Fighter:
 			# metal armor gets pulled, metal weapons get yanked out of their hands
 			var fd: float = o.center().distance_to(c)
@@ -336,23 +408,24 @@ static func _magnet(world: World, t: Toy, dt: float) -> void:
 
 
 static func _hover(world: World, t: Toy, dt: float) -> void:
-	if t.freeze:
-		return
-	var target_y := float(t.extra.get("hover_y", t.global_position.y))
 	var held := false
 	for g in world.grabs.values():
 		if g.uid == t.uid:
 			held = true
-	if held:
+	if held or t.freeze:
+		# carried about, or nailed in place: hover wherever it's left
 		t.extra.hover_y = t.global_position.y
+	else:
+		var target_y := float(t.extra.get("hover_y", t.global_position.y))
+		var err := target_y - t.global_position.y
+		t.linear_velocity.y += (err * 6.0 - t.linear_velocity.y * 2.5) * dt
+		t.linear_velocity.x *= 1.0 - dt * 0.8
+		t.angular_velocity += (-t.rotation * 6.0 - t.angular_velocity * 2.0) * dt
+	if held:
 		return
-	var err := target_y - t.global_position.y
-	t.linear_velocity.y += (err * 6.0 - t.linear_velocity.y * 2.5) * dt
-	t.linear_velocity.x *= 1.0 - dt * 0.8
-	t.angular_velocity += (-t.rotation * 6.0 - t.angular_velocity * 2.0) * dt
-	if t.on:
+	if t.is_on():   # (Use, a wire from a battery, switch or pressure plate, or a zap)
 		# tractor beam: lift things below toward the saucer
-		for o in world.things.values():
+		for o in world.all_things():
 			if o == t:
 				continue
 			var p: Vector2 = world._pos_of(o)
@@ -372,7 +445,7 @@ static func _blow_bubble(world: World, t: Toy, dir: Vector2) -> void:
 	var c := t.global_position + dir * 30.0
 	world.fx_event("bubble", {"p": c, "dir": dir})
 	# The first small thing in front gets caught in a bubble.
-	for o in world.things.values():
+	for o in world.all_things():
 		if o == t:
 			continue
 		var p: Vector2 = world._pos_of(o)
@@ -510,14 +583,14 @@ static func _go_off(world: World, t: Toy) -> void:
 			world.remove(t.uid, false)
 		"paint_bomb":
 			var col: Color = Catalog.PAINT[randi() % 8]
-			for o in world.things.values():
+			for o in world.all_things():
 				if o != t and world._pos_of(o).distance_to(p) < 200.0:
 					o.paint = col
 			world.fx_event("paint_splat", {"p": p, "c": col, "r": 200.0})
 			_count_boom()
 			world.remove(t.uid, false)
 		"bubble_bomb":
-			for o in world.things.values():
+			for o in world.all_things():
 				if o == t or world._pos_of(o).distance_to(p) > 210.0:
 					continue
 				if o is Toy and not o.freeze and o.parent_uid == 0:
@@ -595,6 +668,21 @@ static func boom(world: World, p: Vector2, rad: float, power: float, mega: bool,
 	_count_boom()
 
 
+## A toy breaks a frozen fighter's ice block. A driving monster truck bursts it
+## into chunks of ice and bowls whoever was inside up and over the bonnet.
+static func _smash_ice(world: World, t: Toy, f: Fighter, car: bool) -> void:
+	var ride: Toy = t
+	if t.parent_uid != 0 and world.things.get(t.parent_uid) is Toy:
+		ride = world.things.get(t.parent_uid)
+	if car and ride.id == "monster_truck":
+		var dir := Vector2(signf(f.center().x - ride.global_position.x), 0.0)
+		world.fx_event("ice_smash", {"p": f.center(), "r": f.radius(), "dir": dir})
+		f.thaw(true)
+		f.shove(Vector2(ride.linear_velocity.x * 0.5 + dir.x * 120.0, -560.0), 6.0)
+	else:
+		f.thaw(true)
+
+
 static func _shatter(world: World, t: Toy) -> void:
 	world.fx_event("shatter", {"p": t.global_position, "c": t.shown_color(), "glass": t.id == "glass_pane", "a": t.rotation, "w": t.w * t.size_scale, "h": t.h * t.size_scale})
 	world.remove(t.uid, false)
@@ -639,8 +727,12 @@ static func impact(world: World, t: Toy, other, closing: float, at: Vector2) -> 
 	if t.id == "landmine" and (other is FighterPart or (other is Toy and closing > 80.0) or other is JellyPoint):
 		trigger(world, t)
 		return
-	if other is FighterPart and other.fighter and other.fighter.frozen_t > 0.0 and closing * t.mass > 1500.0:
-		other.fighter.thaw(true)   # something heavy smashes the ice block
+	if other is FighterPart and other.fighter and other.fighter.frozen_t > 0.0:
+		# something heavy smashes the ice block. A driving car counts with its
+		# wheels and body (its wheels touch first), and always gets through.
+		var car := t.driving()
+		if car or closing * t.mass > 1500.0:
+			_smash_ice(world, t, other.fighter, car)
 	if t.id in ["barrel", "dynamite", "nuke", "c4"] and closing > 900.0:
 		trigger(world, t)
 		return
@@ -653,16 +745,7 @@ static func impact(world: World, t: Toy, other, closing: float, at: Vector2) -> 
 		_pop_balloon(world, t)
 		return
 	if t.id == "spring_pad" and other is RigidBody2D:
-		var up := Vector2.UP.rotated(t.rotation)
-		var rel: Vector2 = (other as Node2D).global_position - t.global_position
-		if rel.dot(up) > 0.0:
-			if other is JellyPoint:
-				other.wiggly.add_velocity(up * 1150.0 - up * other.wiggly.com_vel.dot(up))
-			elif not (other as RigidBody2D).freeze:
-				var rb := other as RigidBody2D
-				rb.linear_velocity += up * (1100.0 - rb.linear_velocity.dot(up))
-			t.extra.art = str(randi())
-			world.fx_event("boing", {"p": at, "big": true})
+		if _spring(world, t, other, Vector2.UP.rotated(t.rotation), at):
 			return
 	if t.id == "bell" and closing > 120.0:
 		_ding(world, t)
@@ -694,10 +777,18 @@ static func update_light(world: World, t: Toy) -> void:
 		light.texture = Art.light_texture()
 		light.texture_scale = 2.2 if t.id == "lamp" else 1.4
 		light.color = Color(1.0, 0.9, 0.6) if t.id == "lamp" else Color(0.6, 1.0, 0.9)
-		light.energy = 1.4 if world.night else 0.6
+		light.energy = _glow_energy(world, t)
 		light.blend_mode = Light2D.BLEND_MODE_ADD
 		t.add_child(light)
 	elif not want and light != null:
 		light.queue_free()
 	elif light:
-		light.energy = 1.4 if world.night else 0.6
+		light.energy = _glow_energy(world, t)
+
+
+## By day a saucer's glow is faint (brighter, it washed the saucer itself out
+## to a ghostly outline); at night everything glows its brightest.
+static func _glow_energy(world: World, t: Toy) -> float:
+	if world.night:
+		return 1.4
+	return 0.2 if t.id == "saucer" else 0.6

@@ -333,6 +333,9 @@ func _ready() -> void:
 	check(charged_at > 0 and charged_at / 120.0 >= World.QUIET_CHARGE - 1.0, "📣 after %.0f s with nobody hurt, everyone charges (at %.0f s)" % [World.QUIET_CHARGE, charged_at / 120.0])
 	check(w.last_winner != "", "so even two guards far apart finish the battle (%s won after %.0f s)" % [w.last_winner, st_t / 120.0])
 	check(not w.brave and w.quiet_t == 0.0, "and the charge is over once someone wins")
+	await _charge_fixes()
+	await _guards_and_saves()
+	await _breaking_platforms()
 
 	await _knocked_out()
 
@@ -353,6 +356,12 @@ func _ready() -> void:
 	var standing_after := w.fighters().filter(func(f): return f.alive()).size()
 	check(standing_after == 0, "a nuke knocks out everyone nearby (%d still up)" % standing_after)
 
+	await _wild_physics()
+	await _big_battle()
+	# (last: it waits on drawn frames, and how many physics steps go by meanwhile
+	# depends on how busy the computer is)
+	await _still_pictures()
+
 	print("test_fight: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
 
@@ -363,6 +372,10 @@ func _knocked_out() -> void:
 	print("knocked out")
 	await fresh()
 	w.battle_on = false
+	# (the same heap every run: how it lands used to hang on every random
+	# number drawn by the checks before this one, and some heaps take far
+	# longer than others to settle)
+	seed(3)
 	var heap: Array[Fighter] = []
 	for i in 14:
 		heap.append(w.spawn_fighter(["soldier", "knight", "viking", "wolf", "archer", "ninja", "bear"][i % 7], Vector2(-250 + (i % 7) * 45, 150 - (i / 7) * 100), "red", "peaceful"))
@@ -461,7 +474,9 @@ func _knocked_out() -> void:
 	var ball := w.spawn_toy("bowling_ball", c1 + Vector2(-300, -10))
 	ball.linear_velocity = Vector2(900, 0)
 	await frames(60)
-	check(lone.center().distance_to(c1) > 30.0, "a bowling ball thrown at one lying still knocks it along (%.0f px)" % lone.center().distance_to(c1))
+	# (how far depends on where the ball catches it: 19 to 70+ px. Lying
+	# frozen, it wouldn't move at all.)
+	check(lone.center().distance_to(c1) > 12.0, "a bowling ball thrown at one lying still knocks it along (%.0f px)" % lone.center().distance_to(c1))
 	# nobody rests on a Wiggly: it would hop out from under them
 	var jelly := w.spawn_wiggly("boulder", Vector2(-200, 200), 1.6)
 	jelly.player_id = 99   # keeps still
@@ -485,4 +500,276 @@ func _moved(fs: Array, spots: Dictionary) -> float:
 	for f in fs:
 		most = maxf(most, f.center().distance_to(spots[f]))
 	return most
+
+
+
+## Safety nets: one body the physics goes wild on can't take the crowd with it.
+func _wild_physics() -> void:
+	print("wild physics")
+	await fresh()
+	var guy := w.spawn_fighter("soldier", Vector2(0, 150), "red", "peaceful")
+	await frames(30)
+	guy.hurt(99999.0)
+	await frames(20)   # (still falling: not lying still yet, see _knocked_out)
+	# Squeezed in a heap, the physics engine now and then shoved one body
+	# thousands of pixels in a single step. (Setting the body's place straight
+	# in the physics engine, like this, looks the same to the game.)
+	var shin: FighterPart = guy.parts.shin_f
+	PhysicsServer2D.body_set_state(shin.get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM, Transform2D(shin.rotation, shin.global_position + Vector2(2000, -1500)))
+	await frames(3)
+	var knee := shin.global_position.distance_to(guy.parts.thigh_f.global_position)
+	check(knee < 60.0, "a limb the physics throws 2,500 px in one step is put back (%.0f px from the knee)" % knee)
+	var sword := w.spawn_toy("sword", Vector2(-300, 150))
+	await frames(60)
+	var at := sword.global_position
+	PhysicsServer2D.body_set_state(sword.get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM, Transform2D(sword.rotation, at + Vector2(-3000, 0)))
+	await frames(3)
+	check(sword.global_position.distance_to(at) < 60.0, "and so is a dropped sword (%.0f px)" % sword.global_position.distance_to(at))
+	sword.global_position = at + Vector2(400, -200)
+	await frames(3)
+	check(sword.global_position.distance_to(at + Vector2(400, -200)) < 60.0, "but one the game moves itself stays moved")
+	# a limb torn off at its joint (crushed in a heap) goes back on, instead of
+	# the joint flinging it, and everything with it
+	var arm: FighterPart = guy.parts.larm_f
+	arm.global_position += Vector2(300, -250)
+	await frames(2)
+	var off := arm.global_position.distance_to(guy.parts.uarm_f.global_position)
+	await frames(60)
+	var fastest := 0.0
+	var far := 0.0
+	for p in guy.all_bodies():
+		fastest = maxf(fastest, p.linear_velocity.length())
+		far = maxf(far, p.global_position.distance_to(guy.parts.torso.global_position))
+	check(off < 60.0 and far < 120.0 and fastest < 800.0, "an arm torn 400 px off goes back on (%.0f px from the elbow; the ragdoll %.0f px across, fastest part %.0f px/s)" % [off, far, fastest])
+	# getting up from lying flat on a seam between two pieces of the ground
+	# (it used to start with its feet 50 px in, got pushed sideways, sank right
+	# through and fell out of the world)
+	w.load_world("battle", false)
+	await frames(2)
+	var deep := 0
+	for x in range(-1460, 1461, 40):
+		var f := w.spawn_fighter("grenadier", Vector2(x, _ground_top(float(x)) - 12.0), "red", "peaceful")
+		var feet := f.center() + Vector2(0, f.half_size().y - 3.0)
+		if _in_ground(feet):
+			deep += 1
+		w.remove(f.uid, false)
+	check(deep == 0, "a fighter getting up stands on the ground, not in it, all across Battle Valley (%d in it)" % deep)
+	# squeezed deep into the ground (by a heap), things pop back out on top
+	# instead of sinking right through and out of the world
+	var plank := w.spawn_toy("plank", Vector2(-600, _ground_top(-600.0) - 40.0))
+	var sunk := w.spawn_fighter("soldier", Vector2(-400, _ground_top(-400.0) - 60.0), "red", "peaceful")
+	await frames(20)
+	plank.global_position.y += 160.0
+	sunk.body.global_position.y += 140.0
+	await frames(60)
+	check(is_instance_valid(plank) and not _in_ground(plank.global_position) and plank.global_position.y < _ground_top(plank.global_position.x), "a plank shoved 160 px into the ground pops back out on top (y %.0f)" % (plank.global_position.y if is_instance_valid(plank) else INF))
+	check(is_instance_valid(sunk) and sunk.center().y < _ground_top(sunk.center().x) - 20.0, "and so does a fighter shoved 140 px in (%.0f px above the ground)" % ((_ground_top(sunk.center().x) - sunk.center().y) if is_instance_valid(sunk) else -INF))
+	var g := w.spawn_fighter("grenadier", Vector2(1478, -60), "red", "peaceful")
+	await frames(30)
+	g.ragdoll()
+	await frames(90)
+	g.stand_up()
+	await frames(240)
+	check(is_instance_valid(g) and g.center().y < 10.0, "one getting up right on a seam stays on top (y %.0f; the ground is at 10)" % (g.center().y if is_instance_valid(g) else INF))
+
+
+## A big battle on Battle Valley, as big as the game lets it get. Squeezed in
+## heaps, limbs jammed into the ground or torn off at a joint flung whole
+## crowds (60 fighters and their weapons at once) out of the world in a step.
+func _big_battle() -> void:
+	print("big battle")
+	w.load_world("battle", false)
+	await frames(2)
+	seed(4)
+	var people := ["soldier", "knight", "viking", "archer", "gunner", "rocketeer", "grenadier", "ninja", "medic", "stick", "sniper", "soldier"]
+	var beasts := ["wolf", "bear", "raptor", "bull", "chicken", "triceratops"]
+	for i in World.MAX_FIGHTERS / 2:
+		var row := i / 20
+		var col := i % 20
+		for side in [-1.0, 1.0]:
+			var kind: String = people[(i + (3 if side > 0 else 0)) % people.size()]
+			if i % 9 == 4:
+				kind = beasts[(i / 9 + (1 if side > 0 else 0)) % beasts.size()]
+			var f := w.spawn_fighter(kind, Vector2(side * (320.0 + col * 55.0 + row * 18.0), 120.0 - row * 70.0), "red" if side < 0 else "blue", "")
+			if f:
+				f.max_hp *= 3.0   # most still fighting at the end
+				f.hp = f.max_hp
+	var n := w.fighters().size()
+	var blown0 := w.blown
+	w.battle_on = true
+	await frames(120 * 8)
+	var lost := n - w.fighters().size()
+	var bad := 0
+	for f in w.fighters():
+		for p in f.all_bodies():
+			if not p.global_position.is_finite() or p.linear_velocity.length() > Toy.MAX_SPEED:
+				bad += 1
+	check(lost == 0 and w.blown == blown0 and bad == 0, "nobody gets flung out of the world in a battle of %d (%d fighters lost, %d things thrown miles out, %d parts going wild)" % [n, lost, w.blown - blown0, bad])
+
+
+## The height of the first solid ground at `x`, coming down from the sky.
+func _ground_top(x: float) -> float:
+	for y in range(-2000, 2000, 2):
+		if _in_ground(Vector2(x, y)):
+			return float(y)
+	return 2000.0
+
+
+func _in_ground(p: Vector2) -> bool:
+	for g in w.terrain.get_children():
+		if g is Ground and not g.is_queued_for_deletion() and Geometry2D.is_point_in_polygon(p, g.poly):
+			return true
+	return false
+
+
+## 📣 CHARGE! only counts a stand-off while two teams are up, and makes
+## cowards brave too.
+func _charge_fixes() -> void:
+	await fresh()
+	w.spawn_fighter("soldier", Vector2(-600, 150), "red", "")
+	w.spawn_fighter("knight", Vector2(-500, 150), "red", "")
+	await frames(120 * 17)
+	check(w.quiet_t < 1.0 and not w.brave, "building an army on your own isn't a stand-off (quiet for %.1f s)" % w.quiet_t)
+	w.spawn_fighter("soldier", Vector2(900, 150), "blue", "defend")
+	await frames(120)
+	check(not w.brave, "so putting down the first enemy doesn't set off 📣 CHARGE! straight away")
+	await fresh()
+	var cow := w.spawn_fighter("knight", Vector2(-250, 150), "red", "coward")
+	var foe := w.spawn_fighter("knight", Vector2(250, 150), "blue", "peaceful")
+	foe.max_hp = 99999.0
+	foe.hp = 99999.0
+	await frames(90)
+	cow.hp = cow.max_hp * 0.3
+	var hp0 := foe.hp
+	var x0 := cow.center().x
+	await frames(120)
+	check(cow.mood == "scared" and cow.center().x < x0 - 50.0, "a hurt coward runs away")
+	w.brave = true
+	var swung: bool = await wait_for(func(): return foe.hp < hp0, 6.0)
+	check(swung and cow.mood != "scared", "but with 📣 CHARGE! it finds its courage and fights (it used to run at the enemy too scared to swing)")
+	w.brave = false
+
+
+## Guards stay at their post (a sniper on a tower doesn't walk off it); Battle
+## Valley's snipers start on the towers; saves keep what toys and powers are
+## doing to fighters.
+func _guards_and_saves() -> void:
+	w.load_world("battle")
+	await frames(240)
+	var snipers := w.fighters().filter(func(f): return f.type == "sniper")
+	var on_towers := snipers.all(func(f): return absf(absf(f.center().x) - 1120.0) < 50.0 and f.center().y < 0.0)
+	check(snipers.size() == 2 and on_towers, "Battle Valley's snipers stand on the towers (they used to drop down in front of the walls)")
+	# (just the snipers: with nobody in reach they used to wander about at their
+	# post, and walked right off the top. In a real battle a rocket can still
+	# blow one off, which is fair.)
+	for f in w.fighters():
+		if f.type != "sniper":
+			w.remove(f.uid, false)
+	w.apply_command(0, {"cmd": "fight", "on": true})
+	await frames(120 * 8)
+	on_towers = snipers.all(func(f): return is_instance_valid(f) and f.state == "stand" and absf(absf(f.center().x) - 1120.0) < 50.0 and f.center().y < 0.0)
+	check(on_towers, "and stay up there keeping watch once the battle starts (no wandering off the top)")
+	w.load_world("canvas", false)
+	await fresh()
+	w.battle_on = false
+	w.apply_command(0, {"cmd": "platform", "x0": -60, "y0": 0, "x1": 60, "y1": 20})
+	var guard := w.spawn_fighter("archer", Vector2(0, -50), "red", "defend")
+	w.battle_on = true
+	await frames(120 * 8)
+	check(absf(guard.center().x) < 40.0 and guard.center().y < 0.0, "a guard with nobody to fight stays on its little platform (at %s)" % str(guard.center()))
+	await fresh()
+	w.battle_on = false
+	var ice := w.spawn_fighter("soldier", Vector2(-300, 150), "red", "peaceful")
+	var goo := w.spawn_fighter("knight", Vector2(0, 150), "red", "peaceful")
+	var fizz := w.spawn_fighter("viking", Vector2(300, 150), "red", "peaceful")
+	await frames(40)
+	ice.set_frozen(3.5)
+	goo.stick(6.0)
+	goo.wet = 1.0
+	fizz.zap()
+	fizz.burning = 2.0
+	w.restore(w.serialize())
+	await frames(3)
+	var by_type := {}
+	for f in w.fighters():
+		by_type[f.type] = f
+	check(by_type.soldier.frozen_t > 2.0 and by_type.soldier.shows("ice"), "a save keeps a frozen soldier frozen")
+	check(by_type.knight.goo_t > 4.0 and by_type.knight.wet > 0.5 and by_type.knight.shows("goo"), "and a sticky, wet one sticky and wet")
+	check(by_type.viking.stun_t > 0.0 and by_type.viking.burning > 0.0, "and a zapped one on fire zapped and burning")
+
+
+## Explosions crack the platforms you built and break them; the world's own
+## forts and the walls of a tub stay.
+func _breaking_platforms() -> void:
+	await fresh()
+	w.battle_on = false
+	var breaks := [0]
+	var count := func(n: String, _a: Dictionary) -> void:
+		if n == "plat_break":
+			breaks[0] += 1
+	w.fx.connect(count)
+	w.apply_command(0, {"cmd": "platform", "x0": -260, "y0": 100, "x1": -60, "y1": 120, "style": "wood"})
+	w.apply_command(0, {"cmd": "platform", "x0": 60, "y0": 100, "x1": 260, "y1": 120, "style": "concrete"})
+	var n0 := w.platforms.size()
+	var standing := w.spawn_fighter("soldier", Vector2(-160, 40), "red", "peaceful")
+	await frames(60)
+	var hp0 := standing.hp
+	ToyLogic.boom(w, Vector2(-160, 140), 230.0, 1500.0, false, 65.0)
+	await frames(2)
+	ToyLogic.boom(w, Vector2(-160, 140), 230.0, 1500.0, false, 65.0)
+	await frames(10)
+	check(w.platforms.size() == n0 - 1 and breaks[0] == 1, "two booms right under a wooden platform you built break it to bits")
+	check(standing.center().y > 60.0 or standing.hp < hp0, "and whoever stood on it falls (or got blown off)")
+	ToyLogic.boom(w, Vector2(160, 140), 230.0, 1500.0, false, 65.0)
+	await frames(5)
+	var slab: Dictionary = w.platforms.filter(func(pl): return pl.style == "concrete")[0]
+	check(float(slab.hp) < float(slab.max) and slab.node.cracks > 0, "a concrete one takes a boom and cracks (%.0f of %.0f left)" % [float(slab.hp), float(slab.max)])
+	var hp_was := float(slab.hp)
+	var cracks_was: int = slab.node.cracks
+	var saved := w.serialize()
+	w.restore(saved)
+	await frames(3)
+	var slab2: Dictionary = w.platforms.filter(func(pl): return pl.style == "concrete")[0]
+	check(absf(float(slab2.hp) - hp_was) < 1.0 and slab2.node.cracks == cracks_was, "and a save keeps the cracks")
+	w.fx.disconnect(count)
+	w.load_world("battle", false)
+	var forts := w.platforms.size()
+	w.apply_command(0, {"cmd": "spawn", "id": "lava_tub", "x": 0, "y": 200})
+	var with_tub := w.platforms.size()
+	for p in [Vector2(-900, 150), Vector2(900, 150), Vector2(-1120, 0), Vector2(0, 150)]:
+		ToyLogic.boom(w, p, 560.0, 2600.0, true)
+		ToyLogic.boom(w, p, 560.0, 2600.0, true)
+	await frames(5)
+	check(w.platforms.size() == with_tub and with_tub > forts, "Mega Booms leave Battle Valley's forts and a lava pit's walls standing")
+	w.load_world("canvas", false)
+
+
+## Knocked-out fighters lying still (and frozen ones) aren't drawn all over
+## again every frame; their KO stars keep spinning on their own layer.
+func _still_pictures() -> void:
+	await fresh()
+	w.battle_on = false
+	var heap: Array = []
+	for i in 5:
+		heap.append(w.spawn_fighter("soldier", Vector2(-200 + i * 90, 150), "red", "peaceful"))
+	var ice := w.spawn_fighter("knight", Vector2(400, 150), "red", "peaceful")
+	await frames(30)
+	for f in heap:
+		f.hurt(9999.0)
+	ice.set_frozen(4.0)
+	var still: bool = await wait_for(func(): return heap.all(func(f): return f.is_resting()), 10.0)
+	var draws := [0, 0]
+	for f in heap:
+		f.draw.connect(func() -> void: draws[0] += 1)
+	ice.draw.connect(func() -> void: draws[0] += 1)
+	w.ko_stars.draw.connect(func() -> void: draws[1] += 1)
+	for i in 30:
+		await get_tree().process_frame
+	check(still and draws[0] <= 2, "a heap lying still and a frozen knight aren't redrawn every frame (%d redraws in 30 frames)" % draws[0])
+	check(draws[1] >= 20, "but their KO stars keep spinning (%d)" % draws[1])
+	heap[0].wake()
+	draws[0] = 0
+	for i in 5:
+		await get_tree().process_frame
+	check(draws[0] >= 3, "and one that's woken up is drawn moving again")
 

@@ -79,11 +79,20 @@ var _hrng: RandomNumberGenerator = null
 var skin_col := Color(0, 0, 0, 0)  # a fighter's skin: merged pieces get it (and the team colour) per mesh (B3Mats.rig_mat)
 var _crown_box := AABB()      # the head's size before merging (add_crown)
 var _crown_ok := false
+## Zoomed far out a fighter is a few pixels tall: its pose is worked out
+## every `anim_every` frames (B3World sets it), each model on its own frame
+## (_slot) so the work spreads out, catching up the time in between.
+static var anim_every := 1
+static var _next_slot := 0
+var _slot := 0
+var _anim_dt := 0.0
 
 
 func build(unit_kind: String, team_id: String, rng: RandomNumberGenerator) -> void:
 	kind = unit_kind
 	team = team_id
+	_slot = _next_slot
+	_next_slot = (_next_slot + 1) % 6
 	_hrng = rng
 	var def := B3Defs.unit_def(kind)
 	body = String(def.body)
@@ -270,14 +279,15 @@ static func clear_cache() -> void:
 
 
 ## Merges the model's plain painted pieces: every node's pieces become one
-## mesh (two when only some of them cast a shadow: one to see, one that only
-## casts the shadow). Pieces that move or hide by themselves are already on
-## their own node (pivots, hands, eyes, wheels), so animation, ragdolls,
-## wrecks, first person ("fp_keep" pieces stay apart) and hit flashes work
-## as before. Single pieces, see-through or glowing ones and anything with
-## meta "no_merge" stay as they are. Pieces in the team colour (or a shade
-## of it) and in the skin colour get those colours per mesh (_paint_code), so
-## every team and skin shares the same meshes.
+## mesh (when only some of them cast a shadow, its material leaves the
+## others out of the shadow, so nothing grows one). Pieces that move or hide
+## by themselves are already on their own node (pivots, hands, eyes,
+## wheels), so animation, ragdolls, wrecks, first person ("fp_keep" pieces
+## stay apart) and hit flashes work as before. Single pieces, see-through or
+## glowing ones and anything with meta "no_merge" stay as they are. Pieces
+## in the team colour (or a shade of it) and in the skin colour get those
+## colours per mesh (_paint_code), so every team and skin shares the same
+## meshes.
 func _merge() -> void:
 	pieces = meshes.size()
 	var groups := {}
@@ -360,7 +370,6 @@ func _paint_code(c: Color) -> Vector3:
 ## Replaces `list` (pieces of `par`) with merged meshes and returns them.
 func _merge_group(par: Node3D, list: Array[MeshInstance3D], fp: bool) -> Array[MeshInstance3D]:
 	var sig := []
-	var geo := ["shadow"]      # the shadow casters' shapes (a shadow has no colour)
 	var paints: Array[Vector3] = []
 	var casts := 0
 	var skin := false
@@ -376,36 +385,25 @@ func _merge_group(par: Node3D, list: Array[MeshInstance3D], fp: bool) -> Array[M
 		team = team or pt.x == 2.0
 		var k: Variant = mi.mesh.get_meta("k")
 		sig.append_array([k, mi.transform, pt if pt.x > 0.0 else Vector3(c.r, c.g, c.b), pt.x, mt.roughness, mt.metallic, cast])
-		if cast:
-			geo.append_array([k, mi.transform])
+	# only some pieces cast a shadow: the others are left out of it by the
+	# material (B3Mats.rig_mat `mixed`), so nothing grows a shadow it didn't have
+	var mixed := casts > 0 and casts < list.size()
 	var mesh := _cached(sig)
 	if mesh == null:
-		mesh = _merged_mesh(list, paints, false)
+		mesh = _merged_mesh(list, paints, mixed)
 		_cache(sig, mesh)
-	var shadow: ArrayMesh = null
-	if casts > 0 and casts < list.size():
-		shadow = _cached(geo)
-		if shadow == null:
-			shadow = _merged_mesh(list, paints, true)
-			_cache(geo, shadow)
 	var made: Array[MeshInstance3D] = []
 	var all := MeshInstance3D.new()
 	all.mesh = mesh
-	all.material_override = B3Mats.rig_mat("", skin or team)
+	all.material_override = B3Mats.rig_mat("", skin or team, mixed)
 	# (as Vector4s: Colors would be turned into linear colour on the way)
 	if skin:
 		all.set_instance_shader_parameter("skin", Vector4(skin_col.r, skin_col.g, skin_col.b, 1.0))
 	if team:
 		all.set_instance_shader_parameter("team", Vector4(team_col.r, team_col.g, team_col.b, 1.0))
-	if casts < list.size():
+	if casts == 0:
 		all.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	made.append(all)
-	if shadow != null:
-		var sh := MeshInstance3D.new()
-		sh.mesh = shadow
-		sh.material_override = B3Mats.rig_mat()
-		sh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
-		made.append(sh)
 	for mi in list:
 		mi.free()
 	for m in made:
@@ -431,12 +429,26 @@ static func _cache(sig: Array, mesh: ArrayMesh) -> void:
 	(_merged[h] as Array).append([sig, mesh])
 
 
+## A small merged mesh laid out like every model's (B3Fx._prewarm compiles
+## the shaders with it).
+static func sample_mesh() -> ArrayMesh:
+	var mi := MeshInstance3D.new()
+	mi.mesh = B3Mats.sphere(0.1, 8)
+	mi.material_override = B3Mats.mat(Color.WHITE)
+	var list: Array[MeshInstance3D] = [mi]
+	var paints: Array[Vector3] = [Vector3.ZERO]
+	var m := _merged_mesh(list, paints, false)
+	mi.free()
+	return m
+
+
 ## One mesh of `list`'s pieces (where they sit on their node). Each vertex
 ## carries its piece's colour, roughness and metalness for B3Mats.rig_mat:
 ## COLOR is the colour (alpha 1), or alpha 0 for the skin and 0.5 for a team
 ## colour (team * UV2.x + UV2.y, see `paints`); UV is roughness, metalness.
-## shadow: only the shapes of the pieces that cast a shadow.
-static func _merged_mesh(list: Array[MeshInstance3D], paints: Array[Vector3], shadow: bool) -> ArrayMesh:
+## mixed: the pieces that cast no shadow get roughness + 2 (for the shadow
+## to leave them out: B3Mats.rig_mat).
+static func _merged_mesh(list: Array[MeshInstance3D], paints: Array[Vector3], mixed: bool) -> ArrayMesh:
 	var v := PackedVector3Array()
 	var n := PackedVector3Array()
 	var col := PackedColorArray()
@@ -445,8 +457,6 @@ static func _merged_mesh(list: Array[MeshInstance3D], paints: Array[Vector3], sh
 	var ix := PackedInt32Array()
 	for j in list.size():
 		var mi := list[j]
-		if shadow and mi.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_ON:
-			continue
 		var a := _prim_arrays(mi.mesh)
 		var pv: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
 		var pn: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
@@ -456,26 +466,26 @@ static func _merged_mesh(list: Array[MeshInstance3D], paints: Array[Vector3], sh
 		v.append_array(xf * pv)
 		# normals like the renderer turns them (it handles squashed pieces this way too)
 		n.append_array(Transform3D(xf.basis.inverse().transposed(), Vector3.ZERO) * pn)
-		if not shadow:
-			var mt := mi.material_override as StandardMaterial3D
-			var c := mt.albedo_color
-			var pt := paints[j]
-			# vertex colours are stored as bytes, cut down rather than rounded: round them first
-			var q := Color((roundf(c.r * 255.0) + 0.5) / 255.0, (roundf(c.g * 255.0) + 0.5) / 255.0, (roundf(c.b * 255.0) + 0.5) / 255.0, 1.0)
-			if pt.x == 1.0:
-				q = Color(1, 1, 1, 0)
-			elif pt.x == 2.0:
-				q = Color(1, 1, 1, 0.5)
-			var cc := PackedColorArray()
-			cc.resize(pv.size())
-			cc.fill(q)
-			col.append_array(cc)
-			var uu := PackedVector2Array()
-			uu.resize(pv.size())
-			uu.fill(Vector2(mt.roughness, mt.metallic))
-			uv.append_array(uu)
-			uu.fill(Vector2(pt.y, pt.z) if pt.x == 2.0 else Vector2.ZERO)
-			uv2.append_array(uu)
+		var mt := mi.material_override as StandardMaterial3D
+		var c := mt.albedo_color
+		var pt := paints[j]
+		# vertex colours are stored as bytes, cut down rather than rounded: round them first
+		var q := Color((roundf(c.r * 255.0) + 0.5) / 255.0, (roundf(c.g * 255.0) + 0.5) / 255.0, (roundf(c.b * 255.0) + 0.5) / 255.0, 1.0)
+		if pt.x == 1.0:
+			q = Color(1, 1, 1, 0)
+		elif pt.x == 2.0:
+			q = Color(1, 1, 1, 0.5)
+		var cc := PackedColorArray()
+		cc.resize(pv.size())
+		cc.fill(q)
+		col.append_array(cc)
+		var uu := PackedVector2Array()
+		uu.resize(pv.size())
+		var no_shadow := mixed and mi.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		uu.fill(Vector2(mt.roughness + (2.0 if no_shadow else 0.0), mt.metallic))
+		uv.append_array(uu)
+		uu.fill(Vector2(pt.y, pt.z) if pt.x == 2.0 else Vector2.ZERO)
+		uv2.append_array(uu)
 		if xf.basis.determinant() < 0.0:
 			# a mirrored piece: turn its triangles round so the right faces show
 			var t := 0
@@ -491,10 +501,9 @@ static func _merged_mesh(list: Array[MeshInstance3D], paints: Array[Vector3], sh
 	arr.resize(Mesh.ARRAY_MAX)
 	arr[Mesh.ARRAY_VERTEX] = v
 	arr[Mesh.ARRAY_NORMAL] = n
-	if not shadow:
-		arr[Mesh.ARRAY_COLOR] = col
-		arr[Mesh.ARRAY_TEX_UV] = uv
-		arr[Mesh.ARRAY_TEX_UV2] = uv2
+	arr[Mesh.ARRAY_COLOR] = col
+	arr[Mesh.ARRAY_TEX_UV] = uv
+	arr[Mesh.ARRAY_TEX_UV2] = uv2
 	arr[Mesh.ARRAY_INDEX] = ix
 	var m := ArrayMesh.new()
 	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
@@ -505,7 +514,9 @@ static func _prim_arrays(mesh: Mesh) -> Array:
 	var key := String(mesh.get_meta("k"))
 	var a: Array = _arrays.get(key, [])
 	if a.is_empty():
-		a = mesh.surface_get_arrays(0)
+		a = B3Mats.prim_arrays(mesh)      # (made here: asking the mesh reads them back from the graphics card)
+		if a.is_empty():
+			a = mesh.surface_get_arrays(0)
 		if a[Mesh.ARRAY_INDEX] == null:
 			var pi := PackedInt32Array()
 			for i in (a[Mesh.ARRAY_VERTEX] as PackedVector3Array).size():
@@ -1806,6 +1817,12 @@ func animate(dt: float, spd: float, act: String, k: float, aiming: bool, mood: S
 			_flash_rest = 0.22     # a short gap, so things hit nonstop don't stay white
 	elif _flash_rest > 0.0:
 		_flash_rest -= dt
+	if anim_every > 1 or _anim_dt > 0.0:
+		_anim_dt += dt
+		if anim_every > 1 and (Engine.get_process_frames() + _slot) % anim_every != 0 and get_parent() != B3Player.unit:
+			return
+		dt = _anim_dt
+		_anim_dt = 0.0
 	match body:
 		"human", "robot":
 			_anim_human(dt, spd, act, k, aiming, mood)

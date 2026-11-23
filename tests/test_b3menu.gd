@@ -1,7 +1,9 @@
 extends Node
 ## Headless checks for the 📜 pop-up's 🎯 Ready-made tab, the 🏆 scoreboard
 ## under the winner banner (and the copy a friend gets), and the 3D Battle
-## 📒 stickers, plus the title screen's Sticker Book.
+## 📒 stickers, plus the title screen's Sticker Book. Also the 3D HUD: pop-ups
+## on a dimmed backdrop, ❓ Help, 🔧 Settings, 🔍 Toy Box search, "are you
+## sure?" before clearing, team letters, and nothing overlapping at 720p.
 ## godot --headless --path . -- --test=b3menu
 
 const SPEED := 4.0
@@ -90,6 +92,10 @@ func _ready() -> void:
 	await _stickers_playing()
 	await _stickers_battles()
 	await _stickers_history()
+	await _score_fixes()
+	await _sticker_fixes()
+	await _ui_popups()
+	await _ui_layout()
 	B3Player.stop()
 	if b and is_instance_valid(b):
 		b.queue_free()
@@ -212,7 +218,7 @@ func _ready_fight() -> void:
 	b.toggle_play()
 	await sim(7.0)
 	check(b.fighting and b.kos > 10, "it falls once Fight! is pressed (%d knocked out)" % b.kos)
-	check(Settings.stickers.has("nuke"), "📒 and that earns Big Bada Boom")
+	check(not Settings.stickers.has("nuke"), "📒 a nuke the battle drops by itself doesn't earn Big Bada Boom (you didn't drop it)")
 	var k1: int = b.kos
 	b.reset_battle()
 	await sim(0.5)
@@ -223,9 +229,11 @@ func _ready_fight() -> void:
 	b.run_ready("c4")
 	await sim(1.0)
 	check(b.c4_count() == 5, "📟 C4 Surprise: 5 C4 waiting")
+	var booms0 := int(Settings.counters.get("booms", 0))
 	b.toggle_play()
 	await sim(3.5)
 	check(b.c4_count() == 0 and b.kos > 0, "they go off after Fight! (%d knocked out)" % b.kos)
+	check(int(Settings.counters.get("booms", 0)) == booms0, "📒 and count for no stickers either")
 	b.clear_units()
 	check(b.ready_id == "", "🧹 clearing the fighters forgets the ready-made battle")
 	# --scenario= still starts by itself
@@ -547,6 +555,314 @@ func _stickers_history() -> void:
 	check(Settings.stickers.has("historybuff"), "the third different one: 📜 History Buff!")
 
 
+# ------------------------------------------- 🏆 who gets the knock-outs
+func gone(u) -> bool:
+	return not is_instance_valid(u) or u.dead
+
+
+## Knocking out a teammate (🤝 Blasts hurt teammates) or yourself scores
+## nothing; finishing off an enemy lying on the ground does.
+func _score_fixes() -> void:
+	print("🏆 who gets the knock-outs")
+	await fresh()
+	B3Rules.set_value("friendly", "on")
+	b.apply_rules()
+	var gr: B3Unit = b.spawn_unit("grenadier", "red", at(-10, 0), "peaceful")
+	var mate: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful")
+	var f1: B3Unit = b.spawn_unit("soldier", "blue", at(0, 1.2), "peaceful")
+	var f2: B3Unit = b.spawn_unit("soldier", "blue", at(12, 0), "peaceful")
+	var f3: B3Unit = b.spawn_unit("soldier", "blue", at(12, 4), "peaceful")
+	b.spawn_unit("soldier", "blue", at(30, 30), "peaceful")
+	await sim(0.3)
+	b.set_fighting(true)
+	mate.hp = 1.0
+	f1.hp = 1.0
+	b.explode(at(0, 0.6) + Vector3(0, 0.5, 0), 3.0, 8.0, 50.0, {"by": gr})
+	await sim(0.1)
+	check(gone(mate) and gone(f1), "(the grenade knocks out a teammate and an enemy)")
+	check(gr.kills == 1 and int(b.team_kos.get("red", 0)) == 1, "only the enemy counts for the grenadier and red (%d, %d)" % [gr.kills, int(b.team_kos.get("red", 0))])
+	ko(f2, f2)
+	check(int(b.team_kos.get("blue", 0)) == 0 and f2.kills == 0, "knocking yourself out doesn't count for blue either")
+	# finishing off an enemy lying on the ground
+	f3.knock_down(Vector3(0, 2, 0))
+	await sim(0.3)
+	f3.hp = 3.0
+	var top0 := gr.kills
+	b.explode(f3.center(), 2.5, 4.0, 40.0, {"by": gr})
+	await sim(0.1)
+	check(gone(f3) and gr.kills == top0 + 1 and int(b.team_kos.get("red", 0)) == 2, "finishing off an enemy lying down counts (%d knock-outs)" % gr.kills)
+	var tops: Array = []
+	for ln: String in b.scoreboard():
+		if ln.begins_with("f|"):
+			tops.append(ln)
+	check(tops == ["f|red|grenadier|2"], "and the 🏆 scoreboard says 2 for the grenadier (%s)" % str(tops))
+	var mate2: B3Unit = b.spawn_unit("knight", "red", at(-14, 0), "peaceful")
+	await sim(0.2)
+	mate2.hp = 1.0
+	b.explode(mate2.center(), 2.0, 4.0, 40.0, {"by": gr})
+	await sim(0.1)
+	check(gone(mate2) and gr.kills == 2 and String(b.mvp.get("kind", "")) == "grenadier" and int(b.mvp.get("kills", 0)) == 2, "another teammate later doesn't make it an ⭐ MVP with 3 (%d)" % int(b.mvp.get("kills", 0)))
+	B3Rules.reset()
+	b.apply_rules()
+
+
+## 🦸 Hero on horseback, the sticker rules friends share (B3Net asks
+## B3Battle.ko_stickers_for about the fighter a friend plays and sends the
+## answer on) and the ⭐ Change history message.
+func _sticker_fixes() -> void:
+	print("📒 more stickers")
+	Settings.counters.erase("b3_hero_kos")
+	Settings.stickers.erase("hero")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("horseknight", "red", at(-6, 0), "peaceful")
+	var foes: Array = []
+	for i in 5:
+		foes.append(b.spawn_unit("stick", "blue", at(6, -6 + i * 3.0), "peaceful"))
+	await sim(0.3)
+	b.tools.play_as(me)
+	await sim(0.2)
+	for f in foes:
+		ko(f, me)
+	check(Settings.stickers.has("hero"), "🏇 five knock-outs on horseback: 🦸 Hero! (a rider's a person too)")
+	b.tools.stop_playing()
+	var pl: B3Unit = b.spawn_unit("plane", "red", at(-10, 0), "peaceful")
+	var cav: B3Unit = b.spawn_unit("cavalry", "red", at(-14, 4), "peaceful")
+	var mate: B3Unit = b.spawn_unit("soldier", "red", at(-14, 8), "peaceful")
+	var foe: B3Unit = b.spawn_unit("soldier", "blue", at(10, 0), "peaceful")
+	var tk: B3Unit = b.spawn_unit("tank", "blue", at(10, 20), "peaceful")
+	await sim(0.3)
+	var got := func(by: B3Unit, u: B3Unit, mine: bool) -> String:
+		return ",".join(B3Battle.ko_stickers_for(by, u, mine))
+	check(got.call(pl, foe, true) == "ace" and got.call(cav, foe, true) == "hero" and got.call(pl, tk, true) == "ace,tankbuster",
+		"👥 the rules a friend's knock-outs go by: ✈️ from a plane, 🦸 on horseback, 🧨 a tank")
+	check(got.call(cav, mate, true) == "" and got.call(cav, foe, false) == "" and got.call(cav, tk, false) == "" and got.call(null, tk, false) == "tankbuster",
+		"nothing for knocking out a teammate or someone else's knock-out, but a tank wrecked by a boom counts")
+	# the ⭐ Change history star names the side that lost long ago
+	var keep: Variant = Settings.b3_hist_stars.duplicate(true)
+	Settings.b3_hist_stars.erase("thermopylae")
+	for c in b.ui.toasts.get_children():
+		c.free()
+	B3History.earn_stars(b, "thermopylae", String(B3History.info("thermopylae").get("lost", "")))
+	await sim(2.5)
+	var said := texts(b.ui.toasts)
+	check(said.contains("Change history") and said.contains(B3History.loser_name("thermopylae")), "⭐ Change history says who won this time (%s)" % said.strip_edges())
+	Settings.b3_hist_stars = keep
+
+
+# ------------------------------------------------------------ 3D HUD bits
+func _click(c: Control, at := Vector2(5, 5)) -> void:
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = true
+	ev.position = at
+	c.gui_input.emit(ev)
+
+
+func _ui_popups() -> void:
+	print("3D pop-ups, help, settings and the Toy Box search")
+	await fresh("grassland")
+	var ui = b.ui
+	ui._show_rules()
+	await frames()
+	var shade: Control = ui.popup.get_parent()
+	var vp: Rect2 = get_viewport().get_visible_rect()
+	check(shade is ColorRect and shade.mouse_filter == Control.MOUSE_FILTER_STOP and shade.get_global_rect().encloses(vp) and (shade as ColorRect).color.a >= 0.4,
+		"a pop-up sits on a dimmed backdrop that covers the screen and stops clicks")
+	check(shade.get_index() == ui.root.get_child_count() - 1, "...on top of the bars")
+	_click(shade)
+	await frames()
+	check(ui.popup == null and not is_instance_valid(shade), "clicking the backdrop closes it")
+	# keys and a gamepad work in pop-ups, but the bars never take focus (Space is Fight!)
+	check((ui.play_btn as Control).get_focus_mode_with_override() == Control.FOCUS_NONE
+		and (ui.tool_btns.place as Control).get_focus_mode_with_override() == Control.FOCUS_NONE, "the bars' buttons never take keyboard focus")
+	ui._show_map_menu()
+	await frames()
+	var first := UI.first_focus(ui.popup)
+	check(first != null and first.get_focus_mode_with_override() == Control.FOCUS_ALL and not first.has_meta("no_first"), "a pop-up's buttons can take focus (arrows, Tab, a gamepad)")
+	var down := InputEventAction.new()
+	down.action = "ui_down"
+	down.pressed = true
+	ui._input(down)
+	await frames()
+	check(get_viewport().gui_get_focus_owner() == first, "an arrow key wakes up the ring on its first button")
+	ui.close_top()
+	await frames()
+	# ❓ Help: short sections, with what's new
+	ui.toggle_help()
+	await frames()
+	var ht := texts(ui.help)
+	check(ui.help.get_parent().get_parent() is ColorRect, "❓ Help sits on the backdrop too")
+	var has_all := true
+	for w in ["Puzzle", "Wave Defense", "Right-click", "Tab", "Undo", "drag a box", "King of the Hill", "🔍", "chop", "cover", "burn",
+			"crush", "parachute", "treads", "keep"]:
+		if not ht.contains(w):
+			has_all = false
+			print("    (help is missing '%s')" % w)
+	check(has_all, "❓ Help tells about puzzles, waves and the keep, right-click powers, Tab, Undo, box-select and what fighters, fire, tanks and planes do")
+	ui.toggle_help()
+	await frames()
+	check(ui.help == null or not is_instance_valid(ui.help), "and closes again")
+	# 🔧 Settings: the shared pop-up, with 3D's smooth edges, from the ⚙️ pop-up
+	ui._show_rules()
+	await frames()
+	var sb: Button = ui.popup.find_child("Settings", true, false)
+	check(sb != null, "⚙️ Battle Rules has a 🔧 Settings button")
+	if sb:
+		sb.pressed.emit()
+	else:
+		ui.show_settings()
+	await frames()
+	var sp: Node = null
+	for c in ui.popup.find_children("*", "HBoxContainer", true, false):
+		if c is SettingsPanel:
+			sp = c
+	check(sp != null and sp.find_child("Smooth3D", true, false) != null and sp.find_child("Slider_volume", true, false) != null
+		and sp.find_child("NameEdit", true, false) != null, "🔧 Settings in 3D: sound, music, name and color, smooth edges")
+	var sm: Button = sp.find_child("Smooth3D", true, false) if sp else null
+	var was: bool = Settings.smooth_3d
+	if sm:
+		sm.pressed.emit()
+		check(Settings.smooth_3d == not was and sm.text.begins_with("✅" if not was else "⬜"), "the ✨ Smooth edges switch changes Settings.smooth_3d")
+		sm.pressed.emit()
+		check(Settings.smooth_3d == was, "and back")
+	ui.close_top()
+	# team letters
+	check((ui.team_btns.red as Button).text == "R" and (ui.team_btns.wild as Button).text == "🐾" and (ui.insp_team.blue as Button).text == "B",
+		"team colours have a letter on them (R, B, G, Y, 🐾)")
+	# 🔍 search in the Toy Box
+	ui.search.text = "rex"
+	ui.search.text_changed.emit("rex")
+	await frames()
+	check(ui.item_btns.has("trex") and ui.item_btns.size() <= 3, "🔍 'rex' finds the T-Rex from any tab (%s)" % ", ".join(ui.item_btns.keys()))
+	check(ui.team_box.visible, "with the team and mood pickers for it")
+	ui.search.text = "tank"
+	ui.search.text_changed.emit("tank")
+	await frames()
+	check(ui.item_btns.has("tank") and not ui.cat_btns.vehicles.get_theme_stylebox("normal").bg_color.is_equal_approx(UI.ACCENT), "'tank' finds the tank, and no tab is lit while searching")
+	ui.set_cat("booms")
+	await frames()
+	check(ui.search.text == "" and ui.item_btns.has("nuke") and ui.item_btns.size() == B3Defs.BOOM_ORDER.size(), "picking a tab stops searching")
+	ui.set_cat("people")
+	# "are you sure?" before clearing or a new map with an army on the field
+	b.spawn_unit("soldier", "red", at(0, 0))
+	await frames()
+	ui._show_clear_menu()
+	await frames()
+	var every: Button = null
+	for c in ui.popup.find_children("*", "Button", true, false):
+		if (c as Button).text.contains("Everything"):
+			every = c
+	every.pressed.emit()
+	await frames()
+	check(ui.popup != null and ui.popup.has_meta("confirm") and b.units.size() == 1, "🧹 Everything asks first when there's an army")
+	(ui.popup.find_child("No", true, false) as Button).pressed.emit()
+	await frames()
+	check(ui.popup == null and b.units.size() == 1, "✋ No keeps it")
+	ui._show_map_menu()
+	await frames()
+	var snow: Button = null
+	for c in ui.popup.find_children("*", "Button", true, false):
+		if (c as Button).text.contains("Snow"):
+			snow = c
+	snow.pressed.emit()
+	await frames()
+	check(ui.popup != null and ui.popup.has_meta("confirm") and b.map_id == "grassland", "🗺️ a new map asks first too")
+	(ui.popup.find_child("Yes", true, false) as Button).pressed.emit()
+	await frames()
+	check(b.map_id == "snow" and b.units.is_empty(), "and Yes changes it")
+	ui._show_map_menu()
+	await frames()
+	for c in ui.popup.find_children("*", "Button", true, false):
+		if (c as Button).text.contains("Desert"):
+			(c as Button).pressed.emit()
+	await frames()
+	check(b.map_id == "desert" and (ui.popup == null or not ui.popup.has_meta("confirm")), "with nothing on the field it doesn't ask")
+	# the dock goes back to the middle when the Toy Box is hidden
+	var vw: float = get_viewport().get_visible_rect().size.x
+	ui.toggle_palette()
+	await frames()
+	var dr: Rect2 = ui.dock_holder.get_global_rect()
+	check(not ui.palette.visible and absf(dr.get_center().x - vw * 0.5) < 2.0, "hiding the Toy Box puts the tool dock back in the middle (%.0f)" % dr.get_center().x)
+	ui.toggle_palette()
+	await frames()
+	dr = ui.dock_holder.get_global_rect()
+	check(ui.palette.visible and dr.position.x > ui.palette.get_global_rect().end.x, "and with it out, the dock is clear of it")
+
+
+## At 720p (and with ⚙️ Huge buttons) the panels that share the screen
+## don't land on each other.
+func _ui_layout() -> void:
+	print("the 3D HUD at 720p")
+	await fresh("grassland", {"scenario": "waves"})
+	var ui = b.ui
+	# a 1280 x 720 screen, one pixel per pixel
+	var root_win := get_tree().root
+	var keep_size := root_win.size
+	var keep_css := root_win.content_scale_size
+	root_win.size = Vector2i(1280, 720)
+	root_win.content_scale_size = Vector2i(1280, 720)
+	await frames(4)
+	var vp: Rect2 = get_viewport().get_visible_rect()
+	check(vp.size.is_equal_approx(Vector2(1280, 720)), "(the screen is 1280 x 720 now: %s)" % vp.size)
+	# 5 teams, points and friends: the top bar still fits
+	var x := -20.0
+	for t in B3Defs.TEAM_ORDER:
+		b.spawn_unit("soldier", String(t), at(x, 30))
+		x += 3.0
+	ui.counts_dirty = true
+	b.budget_changed.emit()
+	await sim(0.6)
+	check(ui.top_bar.get_combined_minimum_size().x <= vp.size.x - 20.0 + 1.0, "the top bar fits across (%.0f of %.0f)" % [ui.top_bar.get_combined_minimum_size().x, vp.size.x])
+	var me: B3Unit = null
+	for u: B3Unit in b.units:
+		if u.team == "red" and not u.dead and String(u.def.body) == "human":
+			me = u
+	b.tools.select(me)
+	await sim(0.4)
+	var mh: Rect2 = ui.mode_hud.get_global_rect()
+	var ir: Rect2 = ui.inspect.get_global_rect()
+	var dk: Rect2 = ui.dock_holder.get_global_rect()
+	check(ui.mode_hud.mouse_filter == Control.MOUSE_FILTER_STOP, "🌊 the wave panel stops clicks (nothing is placed under it)")
+	check(ui.mode_hud.visible and ui.inspect.visible and not ir.intersects(mh) and ir.end.y <= dk.position.y and vp.encloses(ir),
+		"the Inspector is clear of the wave panel and the tool dock (%s, %s, %s)" % [ir, mh, dk])
+	var st: Control = ui.sticker_box
+	check(absf(st.offset_top - (ui.mode_hud.offset_top + ui.mode_hud.get_combined_minimum_size().y + 8.0)) < 1.0, "📒 sticker messages go right under the panel as it is now")
+	b.tools.play_as(me)
+	await sim(0.5)
+	var pp: Rect2 = ui.power_pill.get_global_rect()
+	check(not ui.power_pill.visible or not pp.intersects(ui.mode_hud.get_global_rect()), "the power pill is clear of the wave panel")
+	b.tools.stop_playing()
+	# the winner banner: old messages go, new ones go under the scoreboard
+	ui.toast("🌊 Wave 2: Stick figures and soldiers!")
+	ui.toast("The attackers are at the keep!")
+	await frames()
+	ui.banner("💥 The keep fell on wave 2!", Color.ORANGE, b.scoreboard())
+	await frames(3)
+	check(ui.toasts.get_child_count() == 0, "the winner banner clears the old messages behind it")
+	ui.toast("⭐ Your best: wave 1")
+	await frames(3)
+	await get_tree().process_frame
+	var br: Rect2 = ui.banner_lbl.get_global_rect()
+	var tr: Rect2 = ui.toasts.get_global_rect()
+	var ar: Rect2 = ui.again_btn.get_global_rect()
+	check(tr.position.y >= ar.end.y and tr.position.y >= br.end.y, "new messages go under the banner and ⏮ Play it again (%.0f, banner ends %.0f)" % [tr.position.y, br.end.y])
+	if ui.score_card.visible:
+		var cr: Rect2 = ui.score_card.get_global_rect()
+		check(cr.end.y <= ui.dock_holder.get_global_rect().position.y + 1.0 and cr.position.y >= ar.end.y, "the 🏆 scoreboard fits between ⏮ and the dock (%s)" % cr)
+	check(ui.banner_lbl.size.x <= vp.size.x, "the banner fits across the screen")
+	ui.hide_banner()
+	# ⚙️ Huge buttons on that screen: the top bar squeezes up and still fits
+	root_win.content_scale_size = Vector2i(1440, 880)
+	Settings.set_ui_scale(1.3)
+	await sim(0.6)
+	vp = get_viewport().get_visible_rect()
+	check(ui.top_bar.get_combined_minimum_size().x <= vp.size.x - 20.0 + 1.0, "with 🔍 Huge buttons too (%.0f of %.0f)" % [ui.top_bar.get_combined_minimum_size().x, vp.size.x])
+	Settings.set_ui_scale(1.0)
+	root_win.size = keep_size
+	root_win.content_scale_size = keep_css
+	await frames(3)
+
+
 # ------------------------------------------------------- 📒 the title screen's book
 func _sticker_book() -> void:
 	print("the title screen's 📒 Sticker Book")
@@ -566,5 +882,23 @@ func _sticker_book() -> void:
 	check(r.position.y >= 0.0 and r.end.y <= vh, "the book fits on the screen (%.0f to %.0f of %.0f)" % [r.position.y, r.end.y, vh])
 	check(sc != null and grid.get_combined_minimum_size().y > sc.size.y, "and the stickers scroll")
 	check(texts(shade).contains("(3 / %d)" % Catalog.STICKERS.size()), "the title counts the ones you have")
+	m.queue_free()
+	await frames()
+	# stickers that count something show how far you've got
+	Settings.counters["booms"] = 3
+	Settings.counters["worlds"] = {"meadow": true, "candy": true}
+	m = load("res://ui/menu.gd").new()
+	add_child(m)
+	await frames()
+	m._stickers()
+	await frames(2)
+	var boom: Node = m.modal.find_child("Sticker_boom", true, false)
+	var exp: Node = m.modal.find_child("Sticker_explorer", true, false)
+	var ace: Node = m.modal.find_child("Sticker_ace", true, false)
+	var hello: Node = m.modal.find_child("Sticker_hello", true, false)
+	check(boom and texts(boom).contains("3 / 10") and exp and texts(exp).contains("2 / %d" % Catalog.WORLDS.size()),
+		"locked stickers that count show how far you've got (3 / 10, 2 / %d)" % Catalog.WORLDS.size())
+	check(ace and not texts(ace).contains("/") and hello and hello.find_child("Progress", true, false) == null,
+		"(not on ones you have, or ones that don't count)")
 	m.queue_free()
 	await frames()

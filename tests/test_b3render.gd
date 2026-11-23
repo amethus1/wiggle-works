@@ -37,7 +37,9 @@ extends Node
 ## fp (playing a fighter in first person), ko (knocked-out ragdolls with X
 ## eyes), wreck (a tank and a jeep blown apart), poses (raised shields, a kick,
 ## hit flashes, a fighter that changed team), rain, snow, farm_fp, hangar,
-## farm_near / farm_edge / farm_far (farmland overhead at zoom 60, 100, 150)
+## farm_near / farm_edge / farm_far (farmland overhead at zoom 60, 100, 150),
+## koflash (animals, dinosaurs, a rider and a King hit just before going down),
+## wade (fighters splashing through the beach's shallows)
 
 const ALL := ["big", "army400", "vehicles", "airshow", "farmland", "farm_far", "farm_fp", "rain", "snow", "fp"]
 
@@ -228,7 +230,8 @@ func _avg(a: Array[float]) -> float:
 
 # ------------------------------------------------------------- screenshots
 const SHOTS := ["closeup", "lineup", "garage", "showcase", "vehicles", "monsters", "big", "king", "fp",
-	"ko", "wreck", "poses", "rain", "snow", "farm_fp", "hangar", "farm_near", "farm_edge", "farm_far"]
+	"ko", "wreck", "poses", "rain", "snow", "farm_fp", "hangar", "farm_near", "farm_edge", "farm_far",
+	"koflash", "wade"]
 
 
 func _shots(dir: String, only: Array) -> void:
@@ -256,6 +259,8 @@ func _shot(id: String, path: String) -> void:
 			map = B3Scenarios.map_for("vehicles")
 		"farm_fp", "farm_near", "farm_edge", "farm_far":
 			map = "farmland"
+		"wade":
+			map = "beach"
 	var b = load("res://battle3d/battle3d.gd").new()
 	add_child(b)
 	b.begin({"seed": 7, "map": map})
@@ -301,6 +306,40 @@ func _shot(id: String, path: String) -> void:
 				u._ko(Vector3(0.0, 2.0, 1.5), null)
 			b.cam.fit(Vector3(0, 0, 0), 14.0)
 			frames = 240
+		"wade":
+			# red knights knee-deep in the sea, blue ones up the beach: they wade out
+			var zs: Array[float] = []
+			for i in 6:
+				var x := -7.5 + i * 3.0
+				var z := 30.0
+				while z < 140.0 and b.world.water_depth(x, z) < 0.4:
+					z += 0.5
+				zs.append(z)
+				b.spawn_unit("knight", "red", Vector3(x, b.world.height_at(x, z), z), "attack", PI)
+				b.spawn_unit("knight", "blue", Vector3(x, b.world.height_at(x, z - 14.0), z - 14.0), "attack", 0.0)
+			b.cam.fit(Vector3(0, 0, zs[2] - 4.0), 16.0)
+			b.set_fighting(true)
+			frames = 70
+		"koflash":
+			# hit (flashing white) just before being knocked out, or knocked over (the bear)
+			var kinds := ["wolf", "trex", "horseknight", "knight", "bear", "trike", "elephant", "raptor"]
+			var us: Array = []
+			for i in kinds.size():
+				var p := Vector3(-8.0 + i * 2.3, 0, (i % 2) * 2.5 - 1.0)
+				p.y = b.world.height_at(p.x, p.z)
+				us.append(b.spawn_unit(String(kinds[i]), "red" if i % 2 == 0 else "blue", p, "peaceful", 0.4))
+			us[3].make_king()
+			for i in 30:
+				await get_tree().process_frame
+			for u in us:
+				u.rig.flash()
+			for u in us:
+				if u.kind == "bear":
+					u.knock_down(Vector3(0.0, 2.0, 1.5))
+				else:
+					u._ko(Vector3(0.0, 2.0, 1.5), null)
+			b.cam.fit(Vector3(0, 0, 0), 14.0)
+			frames = 90
 		"wreck":
 			var tk = b.spawn_unit("tank", "blue", Vector3(-3, b.world.height_at(-3, 0), 0), "peaceful", 0.6)
 			var jp = b.spawn_unit("jeep", "red", Vector3(4, b.world.height_at(4, 2), 2), "peaceful", 2.0)
@@ -342,9 +381,7 @@ func _shot(id: String, path: String) -> void:
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	var img := get_viewport().get_texture().get_image()
-	if ProjectSettings.get_setting("rendering/viewport/hdr_2d", false):
-		img.convert(Image.FORMAT_RGBA8)
-		img.linear_to_srgb()
+	img = UI.srgb_image(img)      # (HDR viewports hand back linear half-floats)
 	img.save_png(path)
 	print("saved ", path)
 	if b.tools:

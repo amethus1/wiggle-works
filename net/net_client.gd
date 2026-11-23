@@ -12,6 +12,7 @@ var players: Array = []
 var _cur_t := 0.0
 var _hello_t := 0.0
 var _gave_up := false
+var _rx := NetDelta.Receiver.new(NetCommon.TABLES)   # rebuilds whole snapshots from the host's changes
 
 
 func connect_to(ip: String) -> void:
@@ -112,8 +113,15 @@ func _on_packet(_id: int, pkt: PackedByteArray) -> void:
 				game.hud.toast("You joined! Everyone shares this playground. 🎉")
 				game.hud.refresh()
 		"snap":
-			players = d.get("players", [])
-			NetCommon.apply_snapshot(game, d)
+			if not _rx.take(d):
+				if _rx.need_full:
+					_send({"m": "ak", "n": -1}, false)     # one we can't use: ask for all of it
+				return
+			_send({"m": "ak", "n": _rx.last}, false)
+			var s := NetCommon.from_delta(_rx)
+			var pl: Variant = s.get("players")
+			players = pl if pl is Array else []
+			NetCommon.apply_snapshot(game, s)
 		"fx":
 			for e in d.get("list", []):
 				game.effects.handle(String(e[0]), e[1])

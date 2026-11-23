@@ -28,8 +28,10 @@ static func shoot(w: World, shooter, from: Vector2, ang: float, rng: float, dmg:
 	var exclude: Array = bodies_of(shooter)
 	var space := w.get_world_2d().direct_space_state
 	var end := to
-	for i in 4:
-		var q := PhysicsRayQueryParameters2D.create(from, to, MASK_ALL, exclude)
+	var start := from
+	var bounced := false
+	for i in 6:
+		var q := PhysicsRayQueryParameters2D.create(start, to, MASK_ALL, exclude)
 		var hit := space.intersect_ray(q)
 		if hit.is_empty():
 			break
@@ -37,6 +39,17 @@ static func shoot(w: World, shooter, from: Vector2, ang: float, rng: float, dmg:
 		end = hit.position
 		if col is FighterPart and col.fighter != null and shooter is Fighter and not shooter.enemy_of(col.fighter) and col.fighter != shooter:
 			exclude.append(col.get_rid())   # don't shoot your own team
+			continue
+		if col is FighterPart and col.fighter and not bounced and col.fighter.deflects(start):
+			# PING! a laser sword bats it back the way it came (it can hit the shooter)
+			w.fx_event("tracer", {"a": start, "b": end, "laser": laser})
+			w.fx_event("deflect", {"p": end})
+			bounced = true
+			dir = (-dir).rotated(randf_range(-0.3, 0.3))
+			start = end
+			to = start + dir * rng * 0.7
+			exclude = bodies_of(col.fighter)
+			end = to
 			continue
 		if col is FighterPart and col.fighter:
 			col.fighter.hurt(dmg, dir * knock, shooter)
@@ -57,7 +70,7 @@ static func shoot(w: World, shooter, from: Vector2, ang: float, rng: float, dmg:
 		else:
 			w.fx_event("bullet_hit", {"p": end, "ground": true})
 		break
-	w.fx_event("tracer", {"a": from, "b": end, "laser": laser})
+	w.fx_event("tracer", {"a": start, "b": end, "laser": laser})
 
 
 ## Fires a projectile: rocket, arrow or grenade.
@@ -106,6 +119,7 @@ static func flame(w: World, shooter, from: Vector2, ang: float, rng: float, dmg:
 ## An explosion: throws and hurts everything nearby.
 static func blast(w: World, p: Vector2, rad: float, power: float, dmg: float) -> void:
 	w.push_away(p, rad, power)
+	w.damage_platforms(p, rad, dmg)   # (platforms you built crack, and break)
 	for f in w.fighters():
 		var d: Vector2 = f.center() - p
 		var dist := d.length()
@@ -168,7 +182,7 @@ static func hazards(w: World, dt: float) -> void:
 		z.t -= dt
 		for f in w.fighters():
 			if f.alive() and f.burning < 1.0 and f.center().distance_to(z.p) < z.r:
-				f.ignite(1.5)
+				f.ignite(1.5, dt * 0.7)   # (a wet one steams for a second or so, drying off, then catches)
 		if randf() < dt * 10.0:
 			w.fx_event("burn", {"p": z.p + Vector2(randf_range(-z.r, z.r), randf_range(-12, 8))})
 	w.fires = w.fires.filter(func(z): return z.t > 0.0)
@@ -193,6 +207,7 @@ static func battle_check(w: World) -> void:
 		total[f.team] = int(total.get(f.team, 0)) + 1
 		if f.alive():
 			teams[f.team] = true
+	w.teams_up = teams.size()
 	if total.size() >= 2 and teams.size() == 1:
 		var winner: String = teams.keys()[0]
 		if w.last_winner != winner:

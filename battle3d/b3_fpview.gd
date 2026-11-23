@@ -4,7 +4,7 @@ extends Node3D
 ## weapon (gun, sword, bow, staff...) in the lower right of the view. It bobs
 ## while you walk, kicks back when you shoot and swings when you hit.
 ## Shield carriers also get their shield, which comes up on the left while
-## you hold right-click (B3Player "shield"). Looking through a sniper's scope
+## you hold right-click (B3Player "shield"; it drops while you swing). Looking through a sniper's scope
 ## hides the rifle. Animals, dinosaurs and vehicles don't get one.
 
 var unit: B3Unit = null
@@ -144,11 +144,12 @@ func _process(dt: float) -> void:
 
 
 ## The shield comes up on the left while right-click is held (or a friend's
-## copy says it's up), and drops back out of view when let go.
+## copy says it's up), and drops back out of view when let go, or while you
+## swing (B3Player.guard_wanted: block or swing, not both).
 func _shield_tick(dt: float, xf: Transform3D, bob: Vector3) -> void:
 	if shield == null:
 		return
-	var up := unit.shield_up or (B3Player.unit == unit and B3Player.me.fire2)
+	var up := unit.shield_up or (B3Player.unit == unit and B3Player.guard_wanted(unit, B3Player.me))
 	_guard = move_toward(_guard, 1.0 if up else 0.0, dt * 7.0)
 	shield.visible = _guard > 0.02
 	if not shield.visible:

@@ -1,8 +1,9 @@
 class_name B3ModeHud
 extends PanelContainer
 ## The 🏁 battle goal's little panel, top right under the top bar (B3UI adds
-## it): the 👑 Kings' health, the 🚩 hill's score bars, or the 🌊 wave, how
-## many attackers are left, the countdown to the next one and ▶ Next wave.
+## it): the 👑 Kings' health, the 🚩 hill's score bars, or the 🌊 wave, the
+## 🚩 Fort Keep's health, how many attackers are left, the countdown to the
+## next wave, 👀 what's coming in it, and ▶ Next wave.
 ## It reads B3Modes, so friends (👥) see the host's numbers. Hidden for
 ## ⚔️ Last team standing and while the winner banner is up; the 📒 sticker
 ## messages move down below it.
@@ -15,6 +16,9 @@ var title: Label
 var rows: VBoxContainer
 var info: Label
 var next_btn: Button
+var preview: PanelContainer    # 🌊 👀 the next wave: what's coming and how many
+var prev_title: Label
+var prev_line: Label
 var _shape := ""               # what the rows were built for (rebuilt when it changes)
 var _bars := {}                # team -> ProgressBar
 var _nums := {}                # team -> Label
@@ -29,7 +33,8 @@ func _ready() -> void:
 	offset_left = -10
 	offset_top = 76
 	custom_minimum_size = Vector2(W, 0)
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# clicks on the panel stop here (they don't place a fighter or drop a boom underneath it)
+	mouse_filter = Control.MOUSE_FILTER_STOP
 	add_theme_stylebox_override("panel", UI.box(Color(0.1, 0.09, 0.22, 0.86), 16, 2, UI.LINE, 12))
 	box = VBoxContainer.new()
 	box.add_theme_constant_override("separation", 6)
@@ -41,6 +46,23 @@ func _ready() -> void:
 	rows.add_theme_constant_override("separation", 5)
 	rows.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	box.add_child(rows)
+	preview = PanelContainer.new()
+	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	preview.add_theme_stylebox_override("panel", UI.box(Color(0.27, 0.2, 0.08, 0.92), 12, 2, Color("ffd84a"), 8))
+	var pv := VBoxContainer.new()
+	pv.add_theme_constant_override("separation", 2)
+	pv.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	preview.add_child(pv)
+	prev_title = UI.label("", 15, Color("ffe9a8"))
+	prev_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	prev_title.custom_minimum_size.x = W - 44.0
+	pv.add_child(prev_title)
+	prev_line = UI.label("", 20)
+	prev_line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	prev_line.custom_minimum_size.x = W - 44.0
+	pv.add_child(prev_line)
+	preview.visible = false
+	box.add_child(preview)
 	info = UI.label("", 15, UI.MUTED)
 	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	info.custom_minimum_size.x = W - 24.0
@@ -93,21 +115,22 @@ func refresh() -> void:
 	var k: String = m.kind if m else ""
 	var show: bool = k != "" and not (ui.banner_lbl and ui.banner_lbl.visible)
 	visible = show
+	if show:
+		preview.visible = false
+		match k:
+			"king":
+				_kings(m)
+			"hill":
+				_hill(m)
+			"waves":
+				_waves(m)
+		reset_size()
 	if ui.sticker_box:
-		# 📒 new-sticker messages go under this panel, not on top of it
-		var top: float = offset_top + size.y + 8.0 if show else 80.0
+		# 📒 new-sticker messages go under this panel, not on top of it: measured
+		# after it's been filled in (its height right now, not last time's)
+		var top: float = offset_top + get_combined_minimum_size().y + 8.0 if show else 80.0
 		if ui.sticker_box.offset_top != top:
 			ui.sticker_box.offset_top = top
-	if not show:
-		return
-	match k:
-		"king":
-			_kings(m)
-		"hill":
-			_hill(m)
-		"waves":
-			_waves(m)
-	reset_size()
 
 
 func _kings(m) -> void:
@@ -166,7 +189,15 @@ func _hill(m) -> void:
 
 
 func _waves(m) -> void:
-	_build_bars("waves", [])
+	var has_keep: bool = m.keep_node != null
+	_build_bars("waves:keep" if has_keep else "waves", ["red"] if has_keep else [])
+	if has_keep:
+		# 🚩 the keep's health
+		var f: float = clampf(float(m.keep_hp) / maxf(1.0, float(m.keep_max)), 0.0, 1.0)
+		var up: bool = m.keep_up
+		(_names["red"] as Label).text = "🚩 Keep"
+		(_bars["red"] as ProgressBar).value = f * 100.0 if up else 0.0
+		(_nums["red"] as Label).text = "%d%%" % ceili(f * 100.0) if up else "💥"
 	var ph: String = m.phase
 	var w: int = m.wave
 	var best: int = m.shown_best()
@@ -175,9 +206,10 @@ func _waves(m) -> void:
 	match ph:
 		"build", "":
 			title.text = "🌊 Wave Defense"
-			info.text = "Spend your 🪙 points in the glowing fort, then start wave %d!%s" % [w + 1, best_s]
+			info.text = "Spend your 🪙 points in the glowing fort, then start wave %d! Keep the 🚩 keep standing.%s" % [w + 1, best_s]
 			next_btn.text = "▶ Start wave %d" % (w + 1)
 			next_btn.visible = true
+			_preview(w + 1)
 		"wave":
 			title.text = "🌊 Wave %d" % w
 			var n: int = m.left
@@ -188,10 +220,27 @@ func _waves(m) -> void:
 			info.text = "⏱️ %d…  Buy more with your 🪙 points!%s" % [ceili(float(m.break_t)), best_s]
 			next_btn.text = "▶ Next wave"
 			next_btn.visible = true
+			_preview(w + 1)
 		"lost":
-			title.text = "💥 The fort fell!"
+			title.text = "💥 The keep fell!"
 			info.text = "You held out until wave %d.%s" % [w, best_s]
 			next_btn.visible = false
+
+
+## 👀 What's coming in wave `n`: its name, then each kind's icon and how many
+## (and the boss), e.g. "🧍×6  🪖×3".
+func _preview(n: int) -> void:
+	var d := B3Modes.wave_def(n)
+	var parts: PackedStringArray = []
+	var boss := ""
+	for e: Array in B3Modes.wave_preview(n):
+		if e[1] is String:
+			boss = "👹 %s HUGE %s!" % [String(e[0]), String(e[1])]
+		else:
+			parts.append("%s×%d" % [String(e[0]), int(e[1])])
+	prev_title.text = "👀 Next: %s" % String(d.name)
+	prev_line.text = "  ".join(parts) + ("\n" + boss if boss != "" else "")
+	preview.visible = true
 
 
 ## A row per team: its name, a bar in its colour and a number.

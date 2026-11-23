@@ -413,10 +413,7 @@ static func _status(f) -> void:
 	if canvas == null:
 		_overlays(f, ci, c, st, tm)
 	if st == "dead":
-		for i in 3:
-			var a := tm * 3.0 + TAU * i / 3.0
-			_ko_star(ci, top + Vector2(cos(a) * 14.0, sin(a) * 4.0))
-		return
+		return   # (its KO stars spin on their own layer: see KoStars)
 	if hp_ratio < 0.999:
 		var w := 34.0
 		ci.draw_rect(Rect2(top + Vector2(-w * 0.5, 0), Vector2(w, 5)), Color(0, 0, 0, 0.5))
@@ -430,6 +427,33 @@ static func _status(f) -> void:
 			ci.draw_colored_polygon(PackedVector2Array([fp + Vector2(-5, 4), fp + Vector2(0, -12), fp + Vector2(5, 4)]), Color(2.2, 1.0, 0.25))
 	if f.player_id >= 0:
 		Art._star(ci, top + Vector2(0, -22), 6.0, Color(2.0, 1.8, 0.5))
+
+
+## The spinning KO stars over every knocked-out fighter, all on one layer above
+## the fighters. A knocked-out fighter lying still isn't redrawn every frame
+## (see Fighter._same_picture), but its stars keep going round.
+class KoStars extends Node2D:
+	var world: Node = null
+	var _any := false
+
+	func _process(_d: float) -> void:
+		if _any or Engine.get_process_frames() % 6 == 0:
+			queue_redraw()
+
+	func _draw() -> void:
+		_any = false
+		if world == null:
+			return
+		for f in world.fighters():
+			var st: String = String(f.net.get("st", "stand")) if f.puppet else f.state
+			if st != "dead":
+				continue
+			_any = true
+			var top: Vector2 = f.center() + Vector2(0, -f.half_size().y - 14.0)
+			var tm: float = f.t
+			for i in 3:
+				var a := tm * 3.0 + TAU * i / 3.0
+				FighterArt._ko_star(self, top + Vector2(cos(a) * 14.0, sin(a) * 4.0))
 
 
 ## A spinning KO star: Art._star(ci, c, 5.0, Color(2.0, 1.8, 0.6)), with its

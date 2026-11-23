@@ -91,10 +91,7 @@ func _shoot(path: String, delay: float) -> void:
 	await get_tree().create_timer(delay, true, false, true).timeout
 	await RenderingServer.frame_post_draw
 	var img := get_viewport().get_texture().get_image()
-	if ProjectSettings.get_setting("rendering/viewport/hdr_2d", false):
-		# HDR viewports hand back linear, half-float colors
-		img.convert(Image.FORMAT_RGBA8)
-		img.linear_to_srgb()
+	img = UI.srgb_image(img)      # (HDR viewports hand back linear half-floats)
 	img.save_png(path)
 	print("saved screenshot ", path)
 	get_tree().quit()

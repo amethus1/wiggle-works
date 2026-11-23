@@ -1,7 +1,9 @@
 extends Node
 ## Headless checks for the extra 3D Battle features: Battle Rules, playing as
 ## a fighter (overhead and first person), the follow camera, screen shake,
-## save slots, ⏮ Reset, Surprise Battle, the MVP and the HUD's layout.
+## save slots, ⏮ Reset, Surprise Battle, the MVP and the HUD's layout. Also
+## 🔍 box-select (the Inspector changing everyone picked), ↶ Undo / ↷ Redo
+## (and its 🪙 points), Shift-drag blocks lining up with the camera.
 ## godot --headless --path . -- --test=b3more
 
 const SPEED := 4.0
@@ -66,6 +68,8 @@ func _ready() -> void:
 	await _play_fixes()
 	await _fp_body()
 	await _hit_marker()
+	await _fp_fixes()
+	await _fp_gauges()
 	await _blast_rules()
 	await _shake()
 	await _saves()
@@ -76,6 +80,9 @@ func _ready() -> void:
 	await _surprise()
 	await _surprise_room()
 	await _hud()
+	await _box_select()
+	await _undo()
+	await _undo_points()
 	B3Rules.reset()
 	B3Saves.delete_all_test_saves()
 	if b and is_instance_valid(b):
@@ -781,6 +788,124 @@ func _hit_marker() -> void:
 	b.tools.stop_playing()
 
 
+## First person: a crown you get while looking out (it'd sit inside the
+## camera), the winner screen (the mouse was kept), dodges (a hit marker for
+## a ninja who wasn't hit) and finishing off someone lying down.
+func _fp_fixes() -> void:
+	print("first person: the crown, the winner screen and hit markers")
+	await fresh()
+	var me: B3Unit = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	var foe: B3Unit = b.spawn_unit("stick", "blue", at(0, 20), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me, true)
+	await get_tree().process_frame
+	check(own_body_hidden(me), "(your body is hidden)")
+	me.make_king(2.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var crown: Node = me.rig.find_child("Crown", true, false) if me.rig else null
+	check(crown != null and own_body_hidden(me), "👑 crowned King while you look out of its eyes: the crown is hidden from you too")
+	b.ui.mouse_freed = false
+	b.set_fighting(true)
+	await sim(0.3)
+	foe.hurt(99999.0, Vector3.UP, 1.0, me, "blast")
+	var won: bool = await wait_for(func(): return b.winner != "", 3.0)
+	check(won and b.ui.mouse_freed and b.ui.again_btn.visible, "🏆 winning in first person lets the mouse go, to click ⏮ Play it again")
+	b.tools.stop_playing()
+	# 🥷 a ninja dodging your shot isn't a hit
+	await fresh()
+	me = b.spawn_unit("soldier", "red", at(0, 0), "peaceful", 0.0)
+	var nj: B3Unit = b.spawn_unit("ninja", "blue", at(0, 6), "peaceful")
+	await sim(0.3)
+	b.tools.play_as(me, true)
+	await get_tree().process_frame
+	var ch = b.ui.crosshair
+	var false_marks := 0
+	var real_marks := 0
+	var dodges := 0
+	for i in 80:
+		ch.hit_t = 0.0
+		var hp0: float = nj.hp
+		b.shot_hit({"collider": nj, "position": nj.center()}, B3Defs.weapon("pistol"), Vector3(0, 0, 1), me)
+		if nj.hp < hp0:
+			real_marks += 1 if ch.hit_t > 0.0 else 0
+		else:
+			dodges += 1
+			false_marks += 1 if ch.hit_t > 0.0 else 0
+		nj.hp = nj.max_hp
+	check(dodges > 0 and false_marks == 0, "🥷 a ninja dodging your shot shows no hit marker (%d dodges, %d markers)" % [dodges, false_marks])
+	check(real_marks == 80 - dodges, "but every shot that lands does (%d)" % real_marks)
+	ch.hit_t = 0.0
+	b.explode(nj.center(), 2.0, 2.0, 5.0, {"by": me})
+	check(ch.hit_t > 0.0, "(and a blast can't be dodged)")
+	# finishing off an enemy lying on the ground
+	var lying: B3Unit = b.spawn_unit("soldier", "blue", at(6, 3), "peaceful")
+	await sim(0.3)
+	lying.knock_down(Vector3(0, 2, 0))
+	await sim(0.4)
+	lying.hp = 4.0
+	ch.hit_t = 0.0
+	var k0: int = me.kills
+	b.explode(lying.center(), 2.5, 4.0, 40.0, {"by": me})
+	check(lying.dead and ch.hit_t > 0.0 and me.kills == k0 + 1, "💥 your blast finishing off an enemy lying down: a hit marker, and the knock-out is yours (%d)" % (me.kills - k0))
+	b.tools.stop_playing()
+
+
+## The first-person gauges in vehicles: the throttle, height and bomb in a
+## fighter plane (and the marker where the bomb would land), the height in a
+## helicopter, the reload bar for a tank's gun.
+func _fp_gauges() -> void:
+	print("first person: the gauges in aircraft and tanks")
+	await fresh()
+	var pl: B3Unit = b.spawn_unit("plane", "red", at(0, -30), "auto", 0.0)
+	b.spawn_unit("soldier", "blue", at(0, 120), "peaceful")
+	await sim(1.0)
+	b.tools.play_as(pl, true)
+	await sim(0.3)
+	await get_tree().process_frame
+	var ch = b.ui.crosshair
+	check(ch.air_shown and B3Player.altitude_of(pl) > 4.0 and B3Player.bomb_ready(pl), "✈️ flying a plane: the gauges show (%.0f m up, the bomb loaded)" % B3Player.altitude_of(pl))
+	var t0: float = B3Player.throttle_of(pl)
+	key(KEY_W, true)
+	await sim(1.0)
+	key(KEY_W, false)
+	check(B3Player.throttle_of(pl) > t0 + 0.3, "W opens the throttle on its gauge (%.2f → %.2f)" % [t0, B3Player.throttle_of(pl)])
+	var mark: Node3D = b.cam._bomb_mark
+	check(mark != null and mark.visible, "and a marker on the ground shows where a bomb would land")
+	B3Player.me.fire2 = true
+	await sim(0.1)
+	B3Player.me.fire2 = false
+	await get_tree().process_frame
+	check(not B3Player.bomb_ready(pl) and b.cam._bomb_mat.albedo_color.a < 0.6, "drop it: the gauge and the marker show the next one loading")
+	b.tools.set_first_person(false)
+	await get_tree().process_frame
+	check(mark.visible, "the marker shows overhead too")
+	b.tools.stop_playing()
+	await get_tree().process_frame
+	check(not mark.visible, "and goes away when you stop flying")
+	var he: B3Unit = b.spawn_unit("heli", "red", at(10, -30), "auto", 0.0)
+	await sim(1.0)
+	b.tools.play_as(he, true)
+	await sim(0.3)
+	await get_tree().process_frame
+	check(ch.air_shown and not mark.visible, "🚁 a helicopter gets its height gauge (no bomb marker)")
+	b.tools.stop_playing()
+	var tk: B3Unit = b.spawn_unit("tank", "red", at(-10, 10), "peaceful", 0.0)
+	b.spawn_unit("soldier", "blue", at(-10, 30), "peaceful")
+	await sim(0.5)
+	b.tools.play_as(tk, true)
+	B3Player.me.look_yaw = 0.0
+	B3Player.me.look_pitch = -0.05
+	await sim(0.3)
+	B3Player.me.fire = true
+	var fired: bool = await wait_for(func(): return tk.cd > 1.0, 1.5)
+	B3Player.me.fire = false
+	await get_tree().process_frame
+	await get_tree().process_frame
+	check(fired and not ch.air_shown and ch.reload_k < 0.5, "🪖 a tank's shell: the reload bar under the crosshair (%.2f)" % ch.reload_k)
+	b.tools.stop_playing()
+
+
 # ------------------------------------------------------------ blast rules
 func _blast_rules() -> void:
 	print("blasts and the Battle Rules")
@@ -1010,3 +1135,235 @@ func _player_gravity() -> void:
 		b.tools.stop_playing()
 	rule("gravity", "normal")
 
+
+
+# ----------------------------------------------------- 🔍 box-select and blocks
+func _box_select() -> void:
+	print("🔍 box-select and Shift-drag blocks")
+	await fresh()
+	var t = b.tools
+	var reds: Array[B3Unit] = []
+	for i in 4:
+		reds.append(b.spawn_unit("soldier", "red", at(-4.0 + i * 2.0, 0), "peaceful"))
+	var far: B3Unit = b.spawn_unit("knight", "blue", at(30, 30), "peaceful")
+	await sim(0.4)
+	# a box round the four on the screen
+	var r := Rect2(b.cam.screen_pos(reds[0].center()), Vector2.ZERO)
+	for u in reds:
+		r = r.expand(b.cam.screen_pos(u.center()))
+	r = r.grow(20.0)
+	t.set_tool("select")
+	t._end_box(r.position, r.end, false)
+	check(t.group.size() == 4 and not t.group.has(far) and reds.has(t.selected), "dragging a box picks everyone in it (%d)" % t.group.size())
+	await get_tree().process_frame
+	check(b.ui.inspect.visible and String(b.ui.insp_title.text).contains("4 fighters"), "the Inspector says how many (%s)" % b.ui.insp_title.text)
+	(b.ui.insp_team.green as Button).pressed.emit()
+	var all_green := true
+	for u in reds:
+		all_green = all_green and u.team == "green"
+	check(all_green and far.team == "blue", "one click on a team colour changes them all")
+	(b.ui.insp_pers.defend as Button).pressed.emit()
+	var all_def := true
+	for u in reds:
+		all_def = all_def and u.pers_choice == "defend"
+	check(all_def, "and a mood too")
+	# Shift-click adds one more, or takes it out
+	t.toggle_select(far)
+	check(t.group.size() == 5 and t.group.has(far), "Shift-click adds one")
+	t.toggle_select(far)
+	check(t.group.size() == 4 and not t.group.has(far), "and takes it out again")
+	# a click on empty ground lets go
+	t._end_box(Vector2(5, 5), Vector2(6, 6), false)
+	check(t.group.is_empty() and t.selected == null and not b.ui.inspect.visible, "a click on empty ground lets go of them")
+	# 🗑️ on a group erases them all (and one ↶ brings them all back)
+	t.select_many(reds.slice(0, 2))
+	(b.ui.insp_acts.erase as Button).pressed.emit()
+	await get_tree().process_frame
+	check(not is_instance_valid(reds[0]) or reds[0].dead, "🗑️ erases everyone picked")
+	check(t.undo.undo() and b.units.size() == 5, "↶ brings them both back (%d fighters)" % b.units.size())
+	# 🧩 puzzle armies are hands off, even inside a box
+	await fresh()
+	t = b.tools
+	B3Puzzles.start(b, "sticks")
+	await sim(0.3)
+	var blue: Array[B3Unit] = []
+	for u: B3Unit in b.units:
+		if u.team == "blue":
+			blue.append(u)
+	var mine: B3Unit = b.spawn_unit("stick", "red", blue[0].position + Vector3(2, 0, 0), "peaceful")
+	b.buy(mine, "stick")
+	t.select_many([blue[0], blue[1], mine])
+	(b.ui.insp_pers.peaceful as Button).pressed.emit()
+	check(blue[0].pers_choice != "peaceful" and mine.pers_choice == "peaceful", "🧩 the puzzle's fighters in the box stay as they are; yours change")
+	(b.ui.insp_acts.erase as Button).pressed.emit()
+	await get_tree().process_frame
+	check(is_instance_valid(blue[0]) and not blue[0].dead and (not is_instance_valid(mine) or mine.dead), "🗑️ only erases your own")
+	if b.puzzle:
+		b.puzzle.stop()
+	# Shift-drag blocks line up with the camera, however it's turned
+	await fresh()
+	t = b.tools
+	t.place_id = "soldier"
+	b.cam.yaw = 45.0
+	b.cam.yaw_target = 45.0
+	t.struct_yaw = 0.0
+	var a := at(0, 0)
+	var spots: Array = t._line_spots(a, a + Vector3(8, 0, 3), true, true)
+	var across: Vector3 = b.cam.basis_now().x
+	across.y = 0.0
+	across = across.normalized()
+	# the first column runs straight up the screen, so each step is square to "across"
+	var c0: Vector3 = spots[0]
+	var c1: Vector3 = spots[1]
+	var step := c1 - c0
+	step.y = 0.0
+	var dotk := absf(step.normalized().dot(across))
+	check(spots.size() >= 4 and (dotk < 0.02 or dotk > 0.98), "a Shift-drag block lines up with the camera's turn, not the map (%d spots, %.2f)" % [spots.size(), dotk])
+	check(t._line.multimesh.instance_count >= 144, "the preview can show a whole 12 x 12 block (%d dots)" % t._line.multimesh.instance_count)
+
+
+# ------------------------------------------------------------- ↶ undo / ↷ redo
+func _undo() -> void:
+	print("↶ undo and ↷ redo")
+	await fresh()
+	var t = b.tools
+	var un: B3Undo = t.undo
+	check(not un.can_undo(), "nothing to undo at the start")
+	# placing a line of soldiers
+	t.choose("soldier")
+	t._place(at(-6, 0), at(6, 0), true, false)
+	var n: int = b.units.size()
+	check(n > 2 and un.can_undo(), "placing a line can be undone (%d soldiers)" % n)
+	un.undo()
+	await get_tree().process_frame
+	check(b.units.size() == 0 and un.can_redo(), "↶ takes the whole line away")
+	un.redo()
+	await get_tree().process_frame
+	check(b.units.size() == n, "↷ puts it back (%d)" % b.units.size())
+	# erasing
+	var u: B3Unit = b.units[0]
+	var where := u.position
+	t._erase_at(b.cam.screen_pos(u.center()))
+	await get_tree().process_frame
+	check(b.units.size() == n - 1, "the Eraser takes one")
+	un.undo()
+	await get_tree().process_frame
+	var back: B3Unit = null
+	for o: B3Unit in b.units:
+		if o.position.distance_to(where) < 1.5:
+			back = o
+	check(b.units.size() == n and back != null and back.team == "red", "↶ brings it back where it was")
+	# a building and a pool
+	t.choose("wall")
+	t._place(at(0, 8), at(6, 8), true, false)
+	t.choose("lava")
+	t._place(at(0, -10), at(0, -10), false, false)
+	check(b.structs.size() == 1 and b.hazards.size() == 1, "(a wall and a lava pool)")
+	un.undo()
+	un.undo()
+	await get_tree().process_frame
+	check(b.structs.is_empty() and b.hazards.is_empty(), "↶ takes back buildings and pools too")
+	un.redo()
+	await get_tree().process_frame
+	check(b.structs.size() == 1 and b.hazards.is_empty(), "↷ one at a time")
+	# team and mood
+	var f: B3Unit = b.units[0]
+	t.select(f)
+	(b.ui.insp_team.yellow as Button).pressed.emit()
+	(b.ui.insp_pers.coward as Button).pressed.emit()
+	check(f.team == "yellow" and f.pers_choice == "coward", "(made yellow and a coward)")
+	un.undo()
+	check(f.pers_choice != "coward" and f.team == "yellow", "↶ the mood goes back first")
+	un.undo()
+	check(f.team == "red", "then the team")
+	un.redo()
+	check(f.team == "yellow", "↷ and again")
+	# moving with ✋ Grab
+	var g: B3Unit = b.units[1]
+	var from := g.position
+	t.set_tool("grab")
+	check(t._grab_start(b.cam.screen_pos(g.center())), "(grabbed one)")
+	t._mouse = b.cam.screen_pos(at(10, 12))
+	await sim(0.5)
+	t._grab_end(false)
+	await sim(1.5)
+	check(g.center().distance_to(from) > 3.0, "(moved it %.1f m)" % g.center().distance_to(from))
+	un.undo()
+	await sim(2.5)
+	var gp: Vector3 = g.position if not g.down else g.center()
+	check(Vector2(gp.x - from.x, gp.z - from.z).length() < 1.5, "↶ puts a grabbed fighter back (%.1f m away)" % Vector2(gp.x - from.x, gp.z - from.z).length())
+	# Ctrl+Z / Ctrl+Y
+	var ev := InputEventKey.new()
+	ev.keycode = KEY_Z
+	ev.ctrl_pressed = true
+	ev.pressed = true
+	var before: int = b.units.size()
+	t.choose("knight")
+	t._place(at(14, 0), at(14, 0), false, false)
+	t._key(ev)
+	check(b.units.size() == before, "Ctrl+Z undoes")
+	ev.keycode = KEY_Y
+	t._key(ev)
+	check(b.units.size() == before + 1, "Ctrl+Y redoes")
+	# a friend's battle: only the host undoes
+	b.puppet = true
+	check(not un.undo() and b.units.size() == before + 1, "👥 in a friend's battle ↶ is the host's (nothing happens)")
+	b.puppet = false
+	# a cleared field starts afresh
+	b.clear_units()
+	check(not un.can_undo() and not un.can_redo(), "clearing starts afresh (nothing to undo)")
+	# a friend's placing isn't ours to undo
+	t.place_for({"id": "soldier", "team": "blue", "pers": "auto", "size": 1.0, "a": at(0, 0), "b": at(0, 0), "yaw": 0.0, "dragged": false, "box": false})
+	check(b.units.size() == 1 and not un.can_undo(), "a friend's placing (👥) isn't in your undo")
+
+
+## 🪙 Undoing a buy gives back exactly what it cost, like erasing; bringing it
+## back costs it again; things you can't touch are never undone.
+func _undo_points() -> void:
+	print("↶ undo and 🪙 points")
+	await fresh()
+	var t = b.tools
+	var un: B3Undo = t.undo
+	B3Puzzles.start(b, "sticks")
+	await sim(0.3)
+	var budget: int = b.budget
+	var z: Rect2 = b.build_zone
+	var c := z.get_center()
+	t.choose("knight")
+	t._place(at(c.x, c.y), at(c.x, c.y), false, false)
+	var cost: int = B3Defs.cost("knight")
+	check(b.points_left() == budget - cost, "(a knight bought for 🪙 %d)" % cost)
+	un.undo()
+	await get_tree().process_frame
+	check(b.points_left() == budget, "↶ gives back exactly what it cost (%d of %d)" % [b.points_left(), budget])
+	un.redo()
+	await get_tree().process_frame
+	check(b.points_left() == budget - cost, "↷ pays for it again")
+	# erase it, and undo the erase
+	var k: B3Unit = null
+	for o: B3Unit in b.units:
+		if o.team == "red":
+			k = o
+	t._erase_at(b.cam.screen_pos(k.center()))
+	await get_tree().process_frame
+	check(b.points_left() == budget, "(erased: points back)")
+	un.undo()
+	await get_tree().process_frame
+	check(b.points_left() == budget - cost, "↶ the erase pays again")
+	# not enough points: it stays undone
+	un.undo()      # (take the knight away again: points back)
+	await get_tree().process_frame
+	b.spent = b.budget - 1
+	b.budget_changed.emit()
+	check(not un.redo() and b.points_left() == 1, "can't pay for it: ↷ says so and nothing changes")
+	b.spent = 0
+	b.budget_changed.emit()
+	# the puzzle's army is never undone, even after a team change of yours slipped in
+	var foe: B3Unit = null
+	for o: B3Unit in b.units:
+		if o.team == "blue":
+			foe = o
+	un.did("mood", [[foe, "attack"]], "peaceful")
+	foe.set_personality("defend")
+	un.undo()
+	check(foe.pers_choice == "defend", "🧩 the puzzle's fighters are never changed by ↶")

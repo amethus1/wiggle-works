@@ -263,6 +263,7 @@ func _fire_burst(p: Vector3) -> void:
 	var gy: float = battle.world.height_at(p.x, p.z)
 	if fires < 10 and p.y - gy < 1.5:
 		battle.spawn_hazard("fire", p, 1.6, 4.0)
+	B3Fire.of(battle).ignite_near(p, radius * 0.8)      # 🔥 a wooden tower or a tree it hit catches fire
 	battle.snd("flame", p, 0.8)
 
 

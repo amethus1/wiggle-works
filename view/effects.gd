@@ -7,13 +7,25 @@ extends CanvasLayer
 const MAX_P := 2600
 # Particle kinds (what _draw_part draws).
 const KINDS := {"soft": 0, "dot": 1, "spark": 2, "streak": 3, "confetti": 4, "shard": 5, "star": 6, "bubble": 7,
-	"note": 8, "heart": 9, "line": 10, "plus": 11, "plane": 12, "bolt": 13}
+	"note": 8, "heart": 9, "line": 10, "plus": 11, "plane": 12, "bolt": 13, "chunk": 14}
 const _BUF := MAX_P * 2
 
 var world: Node = null
 var view_rect := Rect2(-800, -500, 1600, 1000)
 var shake := 0.0
 var flash := Color(1, 1, 1, 0)
+# Directional shake: a jolt of the camera (toward a blast, along a big hit)
+# that springs back. Cam adds `kick` to its position.
+var kick := Vector2.ZERO
+var _kick_v := Vector2.ZERO
+# Hitstop: the game stops dead for a few hundredths of a second when a big
+# blow lands, so it feels like it hit hard. Only where the world is run (not
+# a friend's copy) and only in the real game (Game sets this): the tests and
+# bench2d run exactly as before.
+var hitstop_ok := false
+var _stop_until := 0
+var _stop_last := -100000
+var slashes: Array = []      # sword swooshes: {p, f (facing), r, life, max, col, glow}
 # The particles, oldest first, one array per property (no dictionary per
 # particle). They live in slots _head.._tail-1; a particle that dies leaves a
 # hole (_dead) until the slots are packed together again, and when there are
@@ -92,6 +104,7 @@ func clear() -> void:
 	_head = 0
 	_tail = 0
 	rings.clear()
+	slashes.clear()
 	pops.clear()
 	weather.clear()
 	trails.clear()
@@ -215,6 +228,32 @@ func add_shake(v: float) -> void:
 	shake = maxf(shake, v)
 
 
+## Jolts the camera `by` pixels (it springs back): toward a blast, along a blow.
+func add_kick(by: Vector2) -> void:
+	if by.is_finite():
+		_kick_v += by.limit_length(40.0) * 18.0
+
+
+## Stops the game dead for `sec` seconds (real time): see hitstop_ok. A
+## "THWACK!" goes with it (from `at`, a world position, if given).
+func hitstop(sec: float, at: Variant = null) -> void:
+	if not hitstop_ok or world == null or world.puppet or world.paused:
+		return
+	var now := Time.get_ticks_msec()
+	if now - _stop_last < 450:
+		return   # (not one after another in a big battle)
+	_stop_last = now
+	_stop_until = now + int(sec * 1000.0)
+	Engine.time_scale = 0.03
+	Sfx.play("thwack", at, 0.8)
+
+
+func _exit_tree() -> void:
+	if _stop_until > 0:
+		_stop_until = 0
+		Engine.time_scale = world.time_scale if world else 1.0
+
+
 func do_flash(c: Color, a: float) -> void:
 	flash = Color(c.r, c.g, c.b, maxf(flash.a, a))
 
@@ -298,6 +337,69 @@ func handle(name: String, a: Dictionary) -> void:
 		"thaw":
 			burst(p, 6, Vector2(20, 60), Vector2(0.3, 0.6), Vector2(2, 4), Color(0.7, 0.9, 1.0), "dot", 1.0)
 			Sfx.play("thaw", p, 0.6)
+		"ice_smash":
+			# a monster truck bursts a frozen fighter's ice block: chunks everywhere
+			var ir := clampf(float(a.get("r", 40.0)), 20.0, 140.0)
+			var dir: Vector2 = a.get("dir", Vector2.RIGHT) if a.get("dir", Vector2.RIGHT) is Vector2 else Vector2.RIGHT
+			for i in int(12 + ir * 0.2):
+				var v := Vector2(dir.x * randf_range(80, 420), randf_range(-480, -120)) + Vector2(randf_range(-160, 160), 0)
+				_p(p + Vector2(randf_range(-ir, ir) * 0.5, randf_range(-ir, ir) * 0.6), v, randf_range(0.8, 1.4), randf_range(6, 13), Color(0.82, 0.96, 1.0, 0.95), "chunk", 1.0, false, 0.6)
+			burst(p, 18, Vector2(80, 300), Vector2(0.3, 0.6), Vector2(2, 4), Color(1.6, 1.9, 2.2), "star", 0.4, true)
+			ring(p, ir * 1.5, Color(0.85, 0.97, 1.0, 0.9), 0.35, 6.0)
+			pop(p + Vector2(0, -ir - 36), "SMASH!", Color("8fe8ff"), 34)
+			add_kick(dir * 8.0)
+			Sfx.play("ice_crunch", p, 1.0)
+		"zap_pool":
+			# Zappy's zap runs through a whole pond: sparks all along the water
+			var x0 := float(a.get("x0", p.x - 100.0))
+			var x1 := float(a.get("x1", p.x + 100.0))
+			var wy := float(a.get("y", p.y))
+			var n := clampi(int((x1 - x0) / 40.0), 3, 40)
+			for i in n:
+				var q := Vector2(lerpf(x0, x1, (float(i) + randf()) / n), wy + randf_range(0.0, 30.0))
+				burst(q, 2, Vector2(60, 200), Vector2(0.15, 0.35), Vector2(1.5, 3), Color(1.6, 2.0, 2.6), "spark", 0.3, true)
+				if i % 3 == 0 and i + 3 < n:
+					_bolt(q, Vector2(lerpf(x0, x1, (float(i) + 3.0) / n), wy + randf_range(0.0, 30.0)))
+			light(Vector2((x0 + x1) * 0.5, wy), Color(0.6, 0.9, 1.0), 2.5, 3.5, 0.4)
+			pop(Vector2((x0 + x1) * 0.5, wy - 50.0), "BZZZT!", Color("74d7ff"), 30)
+			Sfx.play("zap_buzz", p, 0.9, 0.85)
+		"zap_metal":
+			# ...and along metal: beams and machines touching it
+			for pr in a.get("pairs", []):
+				if pr is Array and pr.size() == 2 and pr[0] is Vector2 and pr[1] is Vector2:
+					_bolt(pr[0], pr[1])
+			burst(p, 6, Vector2(60, 220), Vector2(0.1, 0.3), Vector2(1.5, 3), Color(1.6, 2.0, 2.6), "spark", 0.4, true)
+			Sfx.play("zap_buzz", p, 0.5, 1.25)
+		"deflect":
+			# a laser sword bats a bullet away
+			burst(p, 10, Vector2(100, 320), Vector2(0.1, 0.3), Vector2(1.5, 3), Color(1.4, 2.0, 2.6), "spark", 0.3, true)
+			ring(p, 26.0, Color(1.2, 1.8, 2.4, 0.9), 0.18, 3.0)
+			pop(p + Vector2(0, -34), "PING!", Color("74d7ff"), 24)
+			Sfx.play("laser_ping", p, 0.7)
+		"plat_break":
+			# a platform someone built is blown to bits
+			var pc: Color = a.get("c", Color(0.6, 0.55, 0.5)) if a.get("c", null) is Color else Color(0.6, 0.55, 0.5)
+			var hw := clampf(float(a.get("w", 80.0)) * 0.5, 10.0, 600.0)
+			var hh := clampf(float(a.get("h", 20.0)) * 0.5, 6.0, 400.0)
+			for i in clampi(int(hw * hh / 120.0), 10, 60):
+				_p(p + Vector2(randf_range(-hw, hw), randf_range(-hh, hh)), Vector2(randf_range(-260, 260), randf_range(-420, -60)), randf_range(0.7, 1.3), randf_range(5, 12), pc, "chunk", 1.0, false, 0.5)
+			burst(p, 16, Vector2(40, 200), Vector2(0.5, 1.0), Vector2(10, 22), Color(0.75, 0.7, 0.62, 0.5), "soft", -0.1)
+			pop(p + Vector2(0, -hh - 30), "CRASH!", Color("ffb142"), 34)
+			add_shake(8.0)
+			Sfx.play("plat_crash", p, 1.1)
+		"plat_crack":
+			burst(p, 6, Vector2(40, 160), Vector2(0.3, 0.6), Vector2(3, 6), a.get("c", Color(0.6, 0.55, 0.5)) if a.get("c", null) is Color else Color(0.6, 0.55, 0.5), "shard", 1.0)
+		"snatch":
+			# a pterodactyl grabs someone and flies off with them
+			burst(p, 8, Vector2(40, 160), Vector2(0.3, 0.7), Vector2(3, 6), Color(1.0, 0.75, 0.45, 0.9), "confetti", 0.3)
+			pop(p + Vector2(0, -50), "SNATCH!", Color("ff9f43"), 30)
+			Sfx.play("swoop", p, 0.8)
+		"angry":
+			# a gentle giant loses its temper
+			for i in 2:
+				_p(p + Vector2(-20 + i * 40, -10), Vector2(-40 + i * 80, -90), 0.8, 14.0, Color(1, 1, 1, 0.6), "soft", -0.2)
+			pop(p + Vector2(0, -70), "GRRR!", Color("ff6b6b"), 34)
+			Sfx.play("grumble", p, 0.85)
 		"ice_pop":
 			# a frozen fighter breaks out of its ice block
 			var ir := clampf(float(a.get("r", 40.0)), 20.0, 140.0)
@@ -452,11 +554,29 @@ func handle(name: String, a: Dictionary) -> void:
 					burst(p, 3, Vector2(20, 80), Vector2(0.3, 0.6), Vector2(4, 8), Color(0.7, 0.65, 0.55, 0.5), "soft", -0.1)
 		"swing":
 			Sfx.play("punch" if a.get("fists", false) else ("growl" if a.get("beast", false) and randf() < 0.15 else "swing"), p, 0.45)
+			# a swoosh of the blade (or claws, or fist) through the air in front
+			var sc: Variant = a.get("c", null)
+			var sw_col: Color = sc if sc is Color else (Color(1, 1, 1, 0.85) if not a.get("beast", false) else Color(1.0, 0.95, 0.85, 0.7))
+			var sw_r := clampf(float(a.get("r", 50.0)), 16.0, 260.0)
+			if a.get("fists", false):
+				sw_r *= 0.6
+			slashes.append({"p": p, "f": signf(float(a.get("f", 1.0))) if float(a.get("f", 1.0)) != 0.0 else 1.0, "r": sw_r,
+				"life": 0.2, "max": 0.2, "col": sw_col, "glow": bool(a.get("glow", false)), "big": a.get("beast", false)})
+			if slashes.size() > 60:
+				slashes.pop_front()
 		"hit":
 			burst(p, 7, Vector2(60, 220), Vector2(0.15, 0.35), Vector2(2.5, 4.5), Color(2.2, 2.0, 0.9), "star", 0.3, true)
 			Sfx.play(String(a.get("s", "punch")), p, 0.8)
 			if randf() < 0.35:
 				pop(p + Vector2(0, -30), ["POW!", "BAM!", "WHACK!", "BONK!"][randi() % 4], Color("ffd43b"), 26)
+			if a.get("big", false) or a.get("pl", false):
+				# a heavy blow (or one you dealt or took): the screen jolts along it
+				var hf := float(a.get("f", 0.0))
+				add_kick(Vector2(hf * (9.0 if a.get("big", false) else 5.0), 3.0))
+				if a.get("big", false) and a.get("pl", false):
+					hitstop(0.075, p)   # you landed (or took) a big one
+				elif a.get("ko", false) and view_rect.has_point(p) and world and world.fighters().size() <= 30:
+					hitstop(0.05, p)    # a knock-out blow you can see (not in a huge battle: it would never stop stopping)
 		"oof":
 			Sfx.play("oof%d" % (1 + randi() % 3), p, 0.6, randf_range(0.9, 1.2))
 		"ko":
@@ -576,6 +696,7 @@ func handle(name: String, a: Dictionary) -> void:
 		"voice":
 			Sfx.play(String(a.get("v", "wee")), p, 0.7, 1.1 / maxf(0.5, float(a.get("s", 1.0))))
 		"undo":
+			weather.clear()   # (undoing a Rain Shower or Big Wind stops it falling and blowing)
 			Sfx.play("undo", null, 0.6)
 		"nope":
 			Sfx.play("nope", null, 0.6)
@@ -604,6 +725,10 @@ func _bolt(a: Vector2, b: Vector2) -> void:
 
 func _explode(p: Vector2, r: float, mega: bool) -> void:
 	var k := 2.0 if mega else 1.0
+	# the screen jolts toward the blast (more for a big one close by)
+	var to := p - view_rect.get_center()
+	var near := clampf(1.0 - to.length() / maxf(400.0, view_rect.size.length()), 0.2, 1.0)
+	add_kick((to.normalized() if to.length() > 1.0 else Vector2.DOWN) * (16.0 if mega else 9.0) * near)
 	ring(p, r, Color(2.0, 1.6, 1.0, 0.9), 0.45, 10.0 * k)
 	ring(p, r * 0.6, Color(1, 1, 1, 0.8), 0.3, 6.0 * k)
 	burst(p, int(36 * k), Vector2(80, 520 * k), Vector2(0.25, 0.6), Vector2(10, 22) * k, Color(2.4, 1.2, 0.35), "soft", -0.2, true)
@@ -647,6 +772,18 @@ func _magic(id: String, dir: float) -> void:
 
 # ----------------------------------------------------------------- update
 func _process(dt: float) -> void:
+	if _stop_until > 0 and Time.get_ticks_msec() >= _stop_until:
+		_stop_until = 0
+		Engine.time_scale = world.time_scale if world else 1.0
+	# (real seconds: the jolt and the swooshes keep going through a hitstop)
+	var rdt := dt / maxf(0.01, Engine.time_scale) if Engine.time_scale < 0.999 else dt
+	_kick_v += (-kick * 520.0 - _kick_v * 26.0) * minf(rdt, 0.05)
+	kick += _kick_v * minf(rdt, 0.05)
+	if kick.length() > 60.0:
+		kick = kick.limit_length(60.0)
+	slashes = slashes.filter(func(sl):
+		sl.life -= rdt
+		return sl.life > 0.0)
 	shake = maxf(0.0, shake - dt * 28.0)
 	if weather.has("wobble"):
 		shake = maxf(shake, 7.0)
@@ -733,6 +870,9 @@ func _draw_norm() -> void:
 	for i in range(_head, _tail):
 		if _dead[i] == 0 and _glows[i] == 0:
 			_draw_part(_norm, i)
+	for sl in slashes:
+		if not sl.glow:
+			_draw_slash(_norm, sl)
 	for r in rings:
 		var k: float = 1.0 - r.life / r.max
 		var rad: float = r.r * (1.0 - pow(1.0 - k, 3.0))
@@ -755,6 +895,40 @@ func _draw_glow() -> void:
 	for i in range(_head, _tail):
 		if _dead[i] == 0 and _glows[i] != 0:
 			_draw_part(_glow, i)
+	for sl in slashes:
+		if sl.glow:
+			_draw_slash(_glow, sl)
+
+
+## A swoosh in front of a fighter: a crescent that sweeps from overhead down to
+## the front as the blow comes round, thinning and fading as it goes.
+func _draw_slash(ci: CanvasItem, sl: Dictionary) -> void:
+	var k: float = 1.0 - float(sl.life) / float(sl.max)   # 0 → 1
+	var f: float = sl.f
+	var r: float = sl.r
+	var c: Vector2 = sl.p + Vector2(f * r * 0.15, -8.0)
+	var a0 := -2.1 + 2.6 * maxf(0.0, k - 0.35)   # the tail catches up with the head
+	var a1 := -2.1 + 2.9 * minf(1.0, k * 1.6)
+	if a1 - a0 < 0.05:
+		return
+	var col: Color = sl.col
+	col.a *= 1.0 - k * 0.8
+	var outer := PackedVector2Array()
+	var inner := PackedVector2Array()
+	var n := 12
+	for i in n + 1:
+		var t := float(i) / n
+		var a := lerpf(a0, a1, t)
+		var d := Vector2(cos(a) * f, sin(a))
+		var thick := r * (0.08 + 0.22 * t) * (1.4 if sl.big else 1.0)   # thick at the leading edge
+		outer.append(c + d * r)
+		inner.append(c + d * (r - thick))
+	inner.reverse()
+	var poly := outer + inner
+	if Geometry2D.triangulate_polygon(poly).is_empty():
+		return
+	ci.draw_colored_polygon(poly, col)
+	ci.draw_polyline(outer, Color(1, 1, 1, col.a * 0.9), 1.5, true)
 
 
 func _draw_part(ci: CanvasItem, i: int) -> void:
@@ -812,6 +986,12 @@ func _draw_part(ci: CanvasItem, i: int) -> void:
 			ci.draw_colored_polygon(PackedVector2Array([Vector2(-10, 0), Vector2(20, 0), Vector2(-20, 34)]), Color("636e72"))
 			ci.draw_colored_polygon(PackedVector2Array([Vector2(-60, -8), Vector2(-44, -8), Vector2(-58, -30)]), Color("636e72"))
 			ci.draw_circle(Vector2(40, -3), 6.0, Color("a5f3ff"))
+			ci.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		14:   # chunk (of ice, or of a broken platform): a tumbling block with a shine
+			ci.draw_set_transform(p, _rot[i], Vector2.ONE)
+			ci.draw_rect(Rect2(-r * 0.5, -r * 0.5, r, r), col)
+			ci.draw_rect(Rect2(-r * 0.4, -r * 0.4, r * 0.45, r * 0.25), Color(1, 1, 1, col.a * 0.6))
+			ci.draw_rect(Rect2(-r * 0.5, -r * 0.5, r, r), Color(col.r * 0.6, col.g * 0.6, col.b * 0.65, col.a), false, 1.5)
 			ci.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 		13:   # bolt
 			var to: Vector2 = _to[i] if _has_to[i] != 0 else p

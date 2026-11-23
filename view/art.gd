@@ -6,7 +6,10 @@ static var font: Font = preload("res://fonts/Nunito.ttf")
 static var _light_tex: Texture2D
 static var _dot_tex: Texture2D
 
-const ANIMATED := ["fan", "propeller", "motor", "rocket", "conveyor", "timer", "saucer", "lamp", "battery"]
+# Drawn moving every frame while they run (spinning blades, a flickering flame,
+# a rolling belt, the magnet's pulses). A lamp, motor or battery looks the same
+# from one frame to the next: it's redrawn only when it's switched on or off.
+const ANIMATED := ["fan", "propeller", "rocket", "conveyor", "magnet"]
 
 
 static func now() -> float:
@@ -48,7 +51,27 @@ static func dot_texture() -> Texture2D:
 
 
 static func animates(t) -> bool:
-	return (t.id in ANIMATED and t.is_on()) or t.fuse >= 0.0 or t.electric > 0.05 or t.bubble_t > 0.0
+	return (t.id in ANIMATED and t.is_on()) or t.fuse >= 0.0 or t.electric > 0.05 or t.bubble_t > 0.0 \
+		or (t.id == "bell" and t.cooldown > 0.0)   # (a dinged bell wobbles)
+
+
+## Toys whose picture changes now and then all by itself: a blinking light (C4,
+## landmine, the saucer's rim), the Blinky Timer's ticking hand, a bell that's
+## done wobbling. Toy._process redraws them when this changes, a few times a
+## second instead of every frame.
+static func blink_key(t) -> int:
+	match t.id:
+		"c4":
+			return int(now() * 3.0) % 2
+		"landmine":
+			return int(now() * 2.0) % 2
+		"saucer":
+			return int(now() * 6.0) % 2
+		"timer":
+			return int(float(t.extra.get("tt", 0.0)) * 8.0)
+		"bell":
+			return int(t.cooldown > 0.0)
+	return 0
 
 
 # ------------------------------------------------------------ primitives
@@ -407,7 +430,7 @@ static func draw_toy(ci: CanvasItem, t, origin := Vector2.ZERO, zoom := 1.0) -> 
 			for i in 6:
 				ci.draw_line(Vector2(-w * 0.4 + i * w * 0.16, -h * 0.5), Vector2(-w * 0.4 + i * w * 0.16, h * 0.5), col.lightened(0.15), 2.0)
 		"saucer":
-			var lit: bool = t.on
+			var lit: bool = t.is_on()   # (Use, a wire or a zap)
 			if lit:
 				var beam := PackedVector2Array([Vector2(-w * 0.2, h * 0.3), Vector2(w * 0.2, h * 0.3), Vector2(w * 0.9, h * 14.0), Vector2(-w * 0.9, h * 14.0)])
 				ci.draw_polygon(beam, PackedColorArray([Color(0.6, 1.6, 1.2, 0.45), Color(0.6, 1.6, 1.2, 0.45), Color(0.6, 1.6, 1.2, 0.0), Color(0.6, 1.6, 1.2, 0.0)]))
@@ -702,6 +725,12 @@ static func draw_wiggly(ci: CanvasItem, w) -> void:
 	# a ring that's been pulled can collapse into a weird shape; outward-push the
 	# smoothed curve a touch so the jelly reads as one blob
 	var outline := smooth(w.pts, 4)
+	var shake := _tremble(w)
+	if shake > 0.0:
+		# pulled nearly to popping: it trembles all over
+		var tq := now()
+		for i in outline.size():
+			outline[i] += Vector2(sin(tq * 97.0 + i * 1.9), cos(tq * 83.0 + i * 2.7)) * shake
 	var grown := PackedVector2Array()
 	for p in outline:
 		grown.append(c + (p - c) * 1.12)
@@ -767,6 +796,12 @@ static func draw_wiggly(ci: CanvasItem, w) -> void:
 	ci.draw_colored_polygon(ellipse(c + Vector2(-R * 0.38, -R * 0.45), R * 0.26, R * 0.15, 18, -0.6), Color(1, 1, 1, 0.55))
 	ci.draw_circle(c + Vector2(-R * 0.12, -R * 0.62), R * 0.06, Color(1, 1, 1, 0.7), true, -1.0, true)
 	_face(ci, w, c, R, tm)
+	if shake > 1.5:
+		# sweat flying off
+		for i in 2:
+			var ph := fposmod(now() * 2.2 + i * 0.5, 1.0)
+			var sp := c + Vector2((i * 2 - 1) * R * (0.9 + ph * 0.5), -R * (0.6 + ph * 0.4))
+			ci.draw_colored_polygon(PackedVector2Array([sp + Vector2(-3, 0), sp + Vector2(0, -7), sp + Vector2(3, 0), sp + Vector2(0, 3)]), Color(0.6, 0.85, 1.0, 1.0 - ph))
 	# states
 	if w.frozen_t > 0.0:
 		var ice := rr(Rect2(c - Vector2(R, R) * 1.25, Vector2(R, R) * 2.5), R * 0.4)
@@ -784,6 +819,17 @@ static func draw_wiggly(ci: CanvasItem, w) -> void:
 			ci.draw_line(p0, p0 + Vector2(randf_range(-14, 14), randf_range(-14, 14)), Color(1.5, 1.9, 2.4), 2.0, true)
 	if w.kind == "gummy" and w.special_t > 0.0:
 		ci.draw_arc(c, R * 1.25, 0, TAU, 40, Color(1.0, 1.6, 0.6, 0.6), 3.0, true)
+
+
+## How hard a Wiggly being pulled apart trembles (px): more the closer it is to
+## popping in two. A friend's copy only knows it's straining.
+static func _tremble(w) -> float:
+	if String(w.mood) != "strain":
+		return 0.0
+	if w.puppet:
+		return 2.0 * float(w.size)
+	var k := clampf((float(w.stretch) - 1.5) / (World.SPLIT_STRETCH - 1.5), 0.0, 1.0)
+	return (0.8 + 3.2 * k) * float(w.size)
 
 
 static func _face(ci: CanvasItem, w, c: Vector2, R: float, tm: float) -> void:

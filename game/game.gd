@@ -64,6 +64,7 @@ func begin(opts: Dictionary) -> void:
 	add_child(world)
 	effects = Effects.new()
 	effects.world = world
+	effects.hitstop_ok = mode != "client"   # (a friend can't stop the host's game)
 	add_child(effects)
 	world.fx.connect(_on_fx)
 	cam = Cam.new()
@@ -95,6 +96,9 @@ func begin(opts: Dictionary) -> void:
 	var sc := String(opts.get("scenario", ""))
 	if sc != "":
 		Scenarios.run(self, sc)
+	if int(opts.get("load", 0)) > 0 and mode != "client" and Saves.load_slot(world, int(opts.load)):
+		if hud:
+			hud.toast("📂 Here's your playground!")
 	if hud:
 		hud.refresh()
 		var open_what := String(opts.get("open", "")).split(":")
@@ -111,6 +115,19 @@ func begin(opts: Dictionary) -> void:
 				hud.show_together()
 			"settings":
 				hud.show_settings()
+			"saves":
+				hud.show_saves()
+
+
+## The music for right now (Sfx.mood_now): the battle tune while a 2D fight is
+## on (⚔️ on, two teams still standing, nobody's won yet), the calm sandbox
+## tune the rest of the time.
+func music_mood() -> String:
+	if world == null or not world.battle_on or world.last_winner != "":
+		return "sandbox"
+	# (a friend's copy doesn't run the battle itself: count the teams up from the fighters)
+	var teams: int = Combat.teams_standing(world) if world.puppet else world.teams_up
+	return "battle" if teams >= 2 else "sandbox"
 
 
 func start_hosting() -> bool:

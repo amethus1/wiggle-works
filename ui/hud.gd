@@ -1,8 +1,10 @@
 class_name HUD
 extends CanvasLayer
-## Everything on screen during play: top bar, tool dock, toy box, worlds,
-## magic, the selected-thing bar, stickers, play-together, settings, help,
-## toasts and sticker celebrations.
+## Everything on screen during play: top bar, tool dock, toy box (picture
+## tabs, Wigglies first, 🔍 search), worlds, magic, the selected-thing bar,
+## 💾 save slots, stickers, play-together, settings, help, toasts and sticker
+## celebrations (one at a time). The bars never take keyboard focus (Space
+## is pause); pop-ups do, so arrows, Tab and a gamepad work in them.
 
 var game: Game = null
 var pad_move := 0.0
@@ -23,6 +25,11 @@ var top_buttons := {}
 var cat := "Recent"
 var cat_buttons := {}
 var grid: GridContainer
+var trap_head: PanelContainer   # "🔌 Battle Traps" over the Builds tab's traps
+var trap_grid: GridContainer    # ...and their cards
+## The Builds that are 🔌 Battle Traps (ready-wired, with a pressure plate):
+## they get their own heading in the Builds tab and a 🔌 badge everywhere.
+const TRAPS := ["build:trap_minefield", "build:disarm_gate", "build:ufo_abductor"]
 var modal: Control = null
 var together: Together = null
 var styles: HBoxContainer
@@ -30,7 +37,15 @@ var team_row: HBoxContainer
 var pers_row: HFlowContainer
 var team_buttons := {}
 var pers_buttons := {}
+var pers_name: Label            # the mood picked, next to the team swatches
+var cat_label: Label            # the tab's name (or what the 🔍 search found)
+var search: LineEdit            # 🔍 find a toy by name, in every tab
 var _sel_sig := ""
+var _sticker_queue: Array = []  # 📒 stickers waiting for the one on screen to finish (show_sticker)
+var _sticker_on := false
+## The Toy Box tabs, Wigglies first.
+const TABS := ["Wigglies", "Recent", "People", "Animals", "Dinos", "Weapons", "Armor", "Booms", "Hazards", "Platforms",
+	"Balls", "Blocks", "Machines", "Rides", "Builds"]
 
 
 func _ready() -> void:
@@ -38,6 +53,7 @@ func _ready() -> void:
 	root = Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	UI.no_focus(root)      # Space and Enter are game keys here (pop-ups turn focus back on)
 	add_child(root)
 	_build_top()
 	_build_dock()
@@ -109,9 +125,10 @@ func _build_top() -> void:
 	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	top.add_child(sp)
 	var g3 := _pill()
+	_tb(g3, "saves", "💾", "Save or load your playground (6 slots)", show_saves, 52)
 	_tb(g3, "stickers", "📒", "Sticker book", show_stickers, 52)
 	_tb(g3, "together", "👥 Play Together", "Play with friends on the same Wi-Fi", show_together)
-	_tb(g3, "settings", "⚙️", "Your name, color and sound", show_settings, 52)
+	_tb(g3, "settings", "⚙️", "Settings: your name and color, sound, the screen", show_settings, 52)
 	_tb(g3, "help", "❓", "How to play [H]", toggle_help, 52)
 	_tb(g3, "menu", "🏠", "Back to the title screen", func(): game.leave(), 52)
 
@@ -197,7 +214,10 @@ func refresh_tools() -> void:
 		var on: bool = id == game.tool and game.placing == ""
 		UI.set_on(tool_buttons[id], on)
 		var nm: Label = tool_buttons[id].get_child(0).get_node("Name")
-		nm.add_theme_color_override("font_color", Color("1d1b3a") if on else UI.TEXT)
+		UI.ink(nm, on)
+	if grid:
+		for c in grid.get_children() + trap_grid.get_children():
+			(c as CanvasItem).queue_redraw()      # the card you're placing lights up (Card)
 	palette.get_parent().visible = game.tool == "paint"
 	styles.get_parent().visible = game.tool == "platform"
 	for b in styles.get_children():
@@ -362,27 +382,66 @@ func toggle_drawer(id: String, force = null) -> void:
 
 func _build_toybox() -> void:
 	var v := _drawer("toybox", true, 384.0)
-	v.add_child(UI.title("🧸 Toy Box"))
-	var tabs := HFlowContainer.new()
+	# 🧸 Toy Box  [🔍 Find...]
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 8)
+	v.add_child(head)
+	head.add_child(UI.title("🧸 Toy Box"))
+	search = LineEdit.new()
+	search.name = "Search"
+	search.placeholder_text = "🔍 Find..."
+	search.tooltip_text = "Type a name to find it in every tab"
+	search.clear_button_enabled = true
+	search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	search.add_theme_font_size_override("font_size", 16)
+	UI.focus_on(search)      # (the rest of the bar never takes focus)
+	search.text_changed.connect(func(_t: String): _fill_grid())
+	search.text_submitted.connect(func(_t: String): search.release_focus())
+	head.add_child(search)
+	# the tabs: one picture each (hover for the name), the Wigglies first
+	var tabs := GridContainer.new()
+	tabs.name = "Tabs"
+	tabs.columns = 8
 	tabs.add_theme_constant_override("h_separation", 4)
 	tabs.add_theme_constant_override("v_separation", 4)
 	v.add_child(tabs)
-	for c in ["Recent"] + Catalog.CATEGORY_ORDER:
-		var b := UI.button("%s %s" % [Catalog.CATEGORY_EMOJI.get(c, ""), c], UI.PANEL2, 16)
+	for c in TABS:
+		var b := UI.button(String(Catalog.CATEGORY_EMOJI.get(c, "")), UI.PANEL2, 20)
+		b.custom_minimum_size = Vector2(41, 40)
+		b.tooltip_text = c
+		b.name = "Tab_" + c
 		b.pressed.connect(func():
 			cat = c
+			if search.text != "":
+				search.text = ""      # (picking a tab stops searching)
 			_fill_grid())
 		tabs.add_child(b)
 		cat_buttons[c] = b
+	# the tab's name, and Keep placing
+	var nr := HBoxContainer.new()
+	nr.add_theme_constant_override("separation", 6)
+	v.add_child(nr)
+	cat_label = UI.label("", 17, UI.ACCENT)
+	cat_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nr.add_child(cat_label)
+	var keep := CheckBox.new()
+	keep.text = "Keep placing"
+	keep.tooltip_text = "Keep placing the same thing (or hold Shift)"
+	keep.add_theme_font_size_override("font_size", 14)
+	keep.add_theme_color_override("font_color", UI.MUTED)
+	keep.toggled.connect(func(on): game.keep_placing = on)
+	nr.add_child(keep)
+	# fighters: team (with a letter on each colour) and mood, one picture each
 	team_row = HBoxContainer.new()
 	team_row.add_theme_constant_override("separation", 4)
-	team_row.add_child(UI.label("Team:", 14, UI.MUTED))
+	var tl := UI.label("Team", 14, UI.MUTED)
+	tl.custom_minimum_size.x = 42
+	team_row.add_child(tl)
 	for tid in Catalog.TEAM_ORDER:
 		var tb := Button.new()
-		tb.custom_minimum_size = Vector2(38, 32)
-		tb.focus_mode = Control.FOCUS_NONE
-		tb.tooltip_text = Catalog.TEAMS[tid].name
-		tb.text = "🐾" if tid == "wild" else ""
+		tb.custom_minimum_size = Vector2(40, 34)
+		tb.tooltip_text = "%s team%s" % [Catalog.TEAMS[tid].name, " (fights everyone!)" if tid == "wild" else ""]
+		UI.mark_swatch(tb, tid, 16)
 		var col: Color = Catalog.TEAMS[tid].color
 		tb.add_theme_stylebox_override("normal", UI.box(col, 12, 2, col.darkened(0.3), 0))
 		tb.add_theme_stylebox_override("hover", UI.box(col.lightened(0.15), 12, 2, Color.WHITE, 0))
@@ -391,20 +450,30 @@ func _build_toybox() -> void:
 			refresh_pickers())
 		team_row.add_child(tb)
 		team_buttons[tid] = tb
+	pers_name = UI.label("", 14, UI.ACCENT)
+	pers_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pers_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	team_row.add_child(pers_name)
 	v.add_child(team_row)
 	pers_row = HFlowContainer.new()
 	pers_row.add_theme_constant_override("h_separation", 4)
 	pers_row.add_theme_constant_override("v_separation", 4)
-	var auto_b := UI.button("✨ Usual", UI.PANEL2, 13)
-	auto_b.tooltip_text = "Each one uses its normal personality"
+	var ml := UI.label("Mood", 14, UI.MUTED)
+	ml.custom_minimum_size = Vector2(42, 34)
+	ml.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	pers_row.add_child(ml)
+	var auto_b := UI.button("✨", UI.PANEL2, 17, 40)
+	auto_b.custom_minimum_size.y = 34
+	auto_b.tooltip_text = "Usual: each one uses its normal personality"
 	auto_b.pressed.connect(func():
 		game.spawn_pers = ""
 		refresh_pickers())
 	pers_row.add_child(auto_b)
 	pers_buttons[""] = auto_b
 	for pd in Catalog.PERSONALITIES:
-		var pb := UI.button("%s %s" % [pd.emoji, pd.name], UI.PANEL2, 13)
-		pb.tooltip_text = pd.desc
+		var pb := UI.button(String(pd.emoji), UI.PANEL2, 17, 40)
+		pb.custom_minimum_size.y = 34
+		pb.tooltip_text = "%s: %s" % [pd.name, pd.desc]
 		var pid: String = pd.id
 		pb.pressed.connect(func():
 			game.spawn_pers = pid
@@ -412,21 +481,41 @@ func _build_toybox() -> void:
 		pers_row.add_child(pb)
 		pers_buttons[pid] = pb
 	v.add_child(pers_row)
-	var keep := CheckBox.new()
-	keep.text = "Keep placing (or hold Shift)"
-	keep.focus_mode = Control.FOCUS_NONE
-	keep.add_theme_color_override("font_color", UI.MUTED)
-	keep.toggled.connect(func(on): game.keep_placing = on)
-	v.add_child(keep)
 	var sc := ScrollContainer.new()
 	sc.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	v.add_child(sc)
+	var gb := VBoxContainer.new()
+	gb.name = "Cards"
+	gb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	gb.add_theme_constant_override("separation", 8)
+	sc.add_child(gb)
 	grid = GridContainer.new()
 	grid.columns = 3
 	grid.add_theme_constant_override("h_separation", 8)
 	grid.add_theme_constant_override("v_separation", 8)
-	sc.add_child(grid)
+	gb.add_child(grid)
+	# 🔌 Battle Traps get a heading of their own in the Builds tab
+	trap_head = PanelContainer.new()
+	trap_head.name = "TrapHead"
+	trap_head.add_theme_stylebox_override("panel", UI.box(Color("3a2f12"), 12, 2, UI.ACCENT, 8))
+	var th := VBoxContainer.new()
+	th.add_theme_constant_override("separation", 0)
+	trap_head.add_child(th)
+	th.add_child(UI.title("🔌 Battle Traps", 18))
+	var tt := UI.label("Ready-wired traps. Step on the plate and it goes off!", 13, UI.TEXT)
+	tt.autowrap_mode = TextServer.AUTOWRAP_WORD
+	tt.custom_minimum_size.x = 320
+	th.add_child(tt)
+	trap_head.visible = false
+	gb.add_child(trap_head)
+	trap_grid = GridContainer.new()
+	trap_grid.name = "Traps"
+	trap_grid.columns = 3
+	trap_grid.add_theme_constant_override("h_separation", 8)
+	trap_grid.add_theme_constant_override("v_separation", 8)
+	trap_grid.visible = false
+	gb.add_child(trap_grid)
 	var hint := UI.label("Click one, then click the world. Or drag it in!", 13, UI.MUTED)
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD
 	v.add_child(hint)
@@ -435,14 +524,40 @@ func _build_toybox() -> void:
 
 
 func refresh_toybox_recent() -> void:
-	if cat == "Recent" and drawers.toybox.visible:
+	if cat == "Recent" and drawers.toybox.visible and (search == null or search.text == ""):
 		_fill_grid()
+
+
+## What the 🔍 box is looking for ("" when it's empty).
+func _query() -> String:
+	return search.text.strip_edges().to_lower() if search else ""
+
+
+## The ids the grid shows: the tab's, or everything whose name (or words)
+## has what you typed, from every tab.
+func _grid_ids() -> Array:
+	var q := _query()
+	if q == "":
+		return Settings.recent.duplicate() if cat == "Recent" else Catalog.ids_in(cat)
+	var out: Array = []
+	for c in Catalog.CATEGORY_ORDER:
+		for id in Catalog.ids_in(c):
+			if out.has(id):
+				continue
+			if Catalog.spawn_name(String(id)).to_lower().contains(q) or (q.length() >= 3 and Catalog.spawn_desc(String(id)).to_lower().contains(q)):
+				out.append(id)
+	return out
 
 
 func refresh_pickers() -> void:
 	if game == null:
 		return
 	var show_f: bool = cat in Catalog.FIGHTER_CATS
+	if _query() != "":
+		show_f = false
+		for id in _grid_ids():
+			if String(id).begins_with("f:"):
+				show_f = true
 	team_row.visible = show_f
 	pers_row.visible = show_f
 	for tid in team_buttons:
@@ -451,20 +566,35 @@ func refresh_pickers() -> void:
 		team_buttons[tid].add_theme_stylebox_override("normal", UI.box(col, 12, 4 if on else 2, Color.WHITE if on else col.darkened(0.3), 0))
 	for pid in pers_buttons:
 		UI.set_on(pers_buttons[pid], pid == game.spawn_pers)
+	if pers_name:
+		if game.spawn_pers == "":
+			pers_name.text = "✨ Usual"
+		else:
+			var pd := Catalog.personality(game.spawn_pers)
+			pers_name.text = "%s %s" % [pd.emoji, pd.name]
 
 
 func _fill_grid() -> void:
 	refresh_pickers()
+	var q := _query()
 	for c in cat_buttons:
-		UI.set_on(cat_buttons[c], c == cat)
-	for c in grid.get_children():
+		UI.set_on(cat_buttons[c], c == cat and q == "")
+	for c in grid.get_children() + trap_grid.get_children():
 		c.queue_free()
-	var ids: Array = Settings.recent.duplicate() if cat == "Recent" else Catalog.ids_in(cat)
-	if ids.is_empty():
+	var ids := _grid_ids()
+	if q != "":
+		cat_label.text = "🔍 %d found" % ids.size() if not ids.is_empty() else "🔍 Nothing called that"
+	else:
+		cat_label.text = "%s %s" % [Catalog.CATEGORY_EMOJI.get(cat, ""), cat]
+	if ids.is_empty() and q == "":
 		var l := UI.label("Things you spawn show up here.", 14, UI.MUTED)
 		grid.add_child(l)
+	# the Builds tab: the 🔌 Battle Traps go under their own heading
+	var split := q == "" and cat == "Builds"
+	trap_head.visible = split
+	trap_grid.visible = split
 	for id in ids:
-		grid.add_child(_card(String(id)))
+		(trap_grid if split and TRAPS.has(id) else grid).add_child(_card(String(id)))
 
 
 func _card(id: String) -> Control:
@@ -473,6 +603,18 @@ func _card(id: String) -> Control:
 	card.hud = self
 	card.custom_minimum_size = Vector2(110, 108)
 	card.tooltip_text = "%s\n%s" % [Catalog.spawn_name(id), Catalog.spawn_desc(id)]
+	if TRAPS.has(id):
+		# a 🔌 badge in the corner: it's a Battle Trap (in Recent and searches too)
+		var bd := PanelContainer.new()
+		bd.name = "TrapBadge"
+		bd.add_theme_stylebox_override("panel", UI.box(UI.ACCENT, 12, 2, Color.WHITE, 4))
+		bd.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bd.position = Vector2(4, 4)
+		var bl := UI.label("🔌", 15)
+		bl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bd.add_child(bl)
+		card.add_child(bd)
+		card.tooltip_text = "🔌 Battle Trap: " + card.tooltip_text
 	return card
 
 
@@ -596,15 +738,24 @@ func toast(txt: String, secs := 2.6) -> void:
 	tw.tween_callback(p.queue_free)
 
 
+## 📒 A new sticker pops up in the middle of the screen. Two at once (a big
+## boom can earn a couple) wait their turn instead of landing on each other.
 func show_sticker(id: String) -> void:
+	if _sticker_on:
+		if not _sticker_queue.has(id):
+			_sticker_queue.append(id)
+		return
 	var s: Dictionary = {}
 	for x in Catalog.STICKERS:
 		if x.id == id:
 			s = x
 	if s.is_empty():
+		_next_sticker()
 		return
+	_sticker_on = true
 	Sfx.play("sticker", null, 1.0)
 	var p := UI.panel(24)
+	p.name = "StickerPop"
 	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	p.set_anchors_preset(Control.PRESET_CENTER)
 	var v := VBoxContainer.new()
@@ -628,11 +779,18 @@ func show_sticker(id: String) -> void:
 	p.scale = Vector2(0.3, 0.3)
 	var tw := create_tween()
 	tw.tween_property(p, "scale", Vector2.ONE, 0.35).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	tw.tween_interval(2.6)
+	tw.tween_interval(2.6 if _sticker_queue.is_empty() else 1.8)
 	tw.tween_property(p, "modulate:a", 0.0, 0.5)
 	tw.tween_callback(p.queue_free)
+	tw.tween_callback(_next_sticker)
 	if game:
 		game.effects.burst(game.cam.center() + Vector2(0, -60) / game.cam.zoom.x, 40, Vector2(100, 400), Vector2(0.6, 1.2), Vector2(3, 6), Color(1.8, 1.6, 0.6), "star", 0.2, true, 0.5)
+
+
+func _next_sticker() -> void:
+	_sticker_on = false
+	if not _sticker_queue.is_empty():
+		show_sticker(String(_sticker_queue.pop_front()))
 
 
 # ----------------------------------------------------------------- modals
@@ -657,6 +815,7 @@ func _open_modal(title_txt: String, width := 620.0) -> VBoxContainer:
 	shade.gui_input.connect(func(e):
 		if e is InputEventMouseButton and e.pressed:
 			close_top())
+	UI.focus_on(shade)      # arrows, Tab and a gamepad move between its buttons
 	root.add_child(shade)
 	modal = shade
 	var p := UI.panel(24)
@@ -674,145 +833,167 @@ func _open_modal(title_txt: String, width := 620.0) -> VBoxContainer:
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(sp)
 	var x := UI.button("✕", UI.PANEL2, 18, 44)
+	x.tooltip_text = "Close [Esc]"
+	x.set_meta("no_first", true)
 	x.pressed.connect(close_top)
 	head.add_child(x)
 	v.add_child(head)
 	return v
 
 
+## The 🔍 box lets go of the keys when you click anywhere else (or press Esc),
+## and with a pop-up open, arrows or a gamepad wake up the keyboard ring on
+## its buttons.
+func _input(e: InputEvent) -> void:
+	if search and search.has_focus():
+		var mb := e as InputEventMouseButton
+		if mb and mb.pressed and not search.get_global_rect().has_point(mb.position):
+			search.release_focus()
+		var k := e as InputEventKey
+		if k and k.pressed and k.keycode == KEY_ESCAPE:
+			if search.text != "":
+				search.text = ""
+				_fill_grid()
+			search.release_focus()
+			get_viewport().set_input_as_handled()
+		return
+	if modal and is_instance_valid(modal):
+		UI.wake_focus(e, modal)
+
+
+## ❓ How to play: short sections (it scrolls if the window is short).
+const HELP := [
+	["🫧 Wigglies and toys", [
+		["🧸 Toy Box", "Pick a Wiggly or a toy (Tab opens it, 🔍 finds things by name), then click the world. Or drag it straight in!"],
+		["✋ Grab", "Drag things and throw them. Pull a Wiggly hard and it pops in two! Drop it on its twin to make one big Wiggly."],
+		["⚡ Use", "Double-click a toy (or press F) to switch it on, fire it or light its fuse."],
+		["🎮 Play", "Select a Wiggly and press Play (C). A / D roll, W jumps, F does its special move."],
+		["🧴📍🪢🌀", "Glue, Hinge, Rope and Spring: drag from one thing to another to join them."],
+		["🔌 Wire", "Join a Battery, Switch, Button or Timer to lamps, fans, motors, rockets and booms."],
+	]],
+	["⚔️ Fighters", [
+		["🧍🐻🦖", "People, Animals and Dinos are in the Toy Box. Pick a team color and a mood first."],
+		["⚔️ Fight", "The ⚔️ button at the top starts the fighting (or stops it). The last team standing wins!"],
+		["🗡️ Arm them", "Drag a weapon or armor onto a person, or select it and press Give."],
+		["🎮 Be one", "Select a fighter and press Play (C): A / D walk, W jumps, aim with the mouse, click or F attacks. Big hits stop the game for a blink: BAM!"],
+		["💣 Booms", "Grenades, C4, mines and the ☢️ Nuke! 💣 at the top sets off every C4."],
+		["🏗️ Build", "The Platform tool (P): drag a box to build. Hit it hard and it cracks; big booms break it. Forts, towers and bridges are in the Toy Box."],
+		["🦖 Dinos", "A Pterodactyl swoops down and snatches people. Hurt a gentle Brachiosaurus and it stomps back, mad!"],
+		["🗡️ Laser", "The laser sword glows in the dark and can bat bullets away."],
+	]],
+	["🔌 Traps and combos", [
+		["🔌 Traps", "Builds has 🔌 Battle Traps: a Minefield, a Disarm Gate and a UFO Abductor. Step on the plate and it goes off!"],
+		["🔘 Plates", "A Big Button is a pressure plate: wire it to booms, and whoever steps on it sets them off."],
+		["⚡ Zap", "A zap runs right through a pond full of fighters, and along metal things that touch."],
+		["🔵 Bloop", "Fighters landing on a Bloop bounce right off: it's a living trampoline!"],
+		["🟣 Twinkle", "Twinkle's warp flings fighters up into the air."],
+		["🚚 Truck", "A monster truck smashes frozen fighters out of their ice."],
+	]],
+	["🌍 More to do", [
+		["🌍 ✨ 🌙", "Visit 12 worlds, cast ✨ Magic (rain, airstrikes, gravity...) and switch day and night."],
+		["💾 Save", "💾 keeps up to 6 playgrounds, each with a picture. Load them here or from the title screen."],
+		["📒 👥", "Collect stickers, and play together with friends on the same Wi-Fi."],
+		["⚔️ 3D Battle", "On the title screen: armies, tanks and dinosaurs on a big 3D battlefield!"],
+	]],
+	["⌨️ Keys", [
+		["🖱️ Camera", "Drag empty space or use WASD to move. Scroll to zoom. Right-click selects."],
+		["⌨️ Keys", "Space pause · G slow-mo · Q / E turn · R flip · N nail · Del delete · Esc close"],
+		["↶ Undo", "Ctrl+Z takes back almost anything: placing, moving, paint, resizing, switches, magic, a team or a mood."],
+	]],
+]
+
+
 func toggle_help() -> void:
 	if modal and is_instance_valid(modal) and modal.has_meta("help"):
 		close_top()
 		return
-	var v := _open_modal("❓ How to play", 700)
+	var v := _open_modal("❓ How to play", 760)
 	modal.set_meta("help", true)
-	var rows := [
-		["🧸 Toy Box", "Pick a Wiggly or a toy, then click the world to drop it (or drag it straight in)."],
-		["✋ Grab", "Drag things around and throw them. Pull a Wiggly hard and it pops into two!"],
-		["🫧 Combine", "Drop a Wiggly onto one of the same kind to make one big Wiggly."],
-		["⚡ Use", "Double-click a toy (or press F) to switch it on, fire it, or light its fuse."],
-		["🎮 Play", "Select a Wiggly and press Play (or C). A / D roll, W jumps, F does its special move."],
-		["🧴📍🪢🌀", "Glue, Hinge, Rope and Spring: drag from one thing to another to connect them."],
-		["🔌 Wire", "Connect a Battery, Switch, Button or Timer to lamps, fans, motors and rockets."],
-		["🖱️ Camera", "Drag empty space or use WASD to move. Scroll to zoom. Right-click selects."],
-		["⌨️ Keys", "Space pause · G slow-mo · Q/E rotate · R flip · N nail · Del delete · Ctrl+Z undo"],
-	]
-	var g := GridContainer.new()
-	g.columns = 2
-	g.add_theme_constant_override("h_separation", 14)
-	g.add_theme_constant_override("v_separation", 8)
-	for r in rows:
-		g.add_child(UI.label(r[0], 17, UI.ACCENT))
-		var d := UI.label(r[1], 16)
-		d.autowrap_mode = TextServer.AUTOWRAP_WORD
-		d.custom_minimum_size.x = 500
-		g.add_child(d)
-	v.add_child(g)
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sc.custom_minimum_size.y = clampf(get_viewport().get_visible_rect().size.y - 260.0, 240.0, 600.0)
+	v.add_child(sc)
+	var col := VBoxContainer.new()
+	col.name = "Help"
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 6)
+	sc.add_child(col)
+	for sec in HELP:
+		col.add_child(UI.title(String(sec[0]), 20))
+		var g := GridContainer.new()
+		g.columns = 2
+		g.add_theme_constant_override("h_separation", 14)
+		g.add_theme_constant_override("v_separation", 6)
+		for r in sec[1]:
+			var k := UI.label(String(r[0]), 16, UI.ACCENT)
+			k.custom_minimum_size.x = 130
+			g.add_child(k)
+			var d := UI.label(String(r[1]), 16)
+			d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			d.custom_minimum_size.x = 560
+			g.add_child(d)
+		col.add_child(g)
 	var go := UI.button("Let's play! 🎉", UI.GOOD.darkened(0.2), 20)
 	go.pressed.connect(close_top)
 	v.add_child(go)
 
 
 func show_stickers() -> void:
-	var v := _open_modal("📒 Sticker Book  (%d / %d)" % [Settings.stickers.size(), Catalog.STICKERS.size()], 760)
-	# all the stickers are taller than the window, so they scroll
-	var sc := ScrollContainer.new()
-	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	sc.custom_minimum_size.y = clampf(get_viewport().get_visible_rect().size.y - 220.0, 240.0, 640.0)
-	v.add_child(sc)
-	var g := GridContainer.new()
-	g.columns = 4
-	g.add_theme_constant_override("h_separation", 10)
-	g.add_theme_constant_override("v_separation", 10)
-	sc.add_child(g)
-	for s in Catalog.STICKERS:
-		var got: bool = Settings.stickers.has(s.id)
-		var p := PanelContainer.new()
-		p.add_theme_stylebox_override("panel", UI.box(UI.PANEL2 if got else UI.PANEL2.darkened(0.35), 16, 3, UI.ACCENT if got else UI.LINE, 10))
-		p.custom_minimum_size = Vector2(170, 130)
-		var c := VBoxContainer.new()
-		c.alignment = BoxContainer.ALIGNMENT_CENTER
-		p.add_child(c)
-		var e := UI.label(s.emoji if got else "❔", 40)
-		e.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		c.add_child(e)
-		var n := UI.label(s.name, 15, UI.TEXT if got else UI.MUTED)
-		n.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		c.add_child(n)
-		var d := UI.label(s.desc, 12, UI.MUTED)
-		d.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		d.autowrap_mode = TextServer.AUTOWRAP_WORD
-		d.custom_minimum_size.x = 150
-		c.add_child(d)
-		g.add_child(p)
+	var v := _open_modal(StickerBook.title(), 760)
+	modal.set_meta("stickers", true)
+	StickerBook.build(v, get_viewport().get_visible_rect().size.y)
 
 
+## ⚙️ Settings: the same pop-up as the title screen's and 3D Battle's (SettingsPanel).
 func show_settings() -> void:
-	var v := _open_modal("⚙️ Settings", 560)
-	v.add_child(UI.label("Your name (friends see it over Wi-Fi):", 16, UI.MUTED))
-	var name_edit := LineEdit.new()
-	name_edit.text = Settings.player_name
-	name_edit.max_length = 16
-	name_edit.add_theme_font_size_override("font_size", 20)
-	name_edit.text_changed.connect(func(t):
-		Settings.player_name = t.strip_edges() if t.strip_edges() != "" else Settings.player_name
-		Settings.save()
-		if game.net:
-			game.net.send_hello())
-	v.add_child(name_edit)
-	v.add_child(UI.label("Your color:", 16, UI.MUTED))
-	var row := HBoxContainer.new()
-	for c in Settings.COLORS:
-		var b := Button.new()
-		b.custom_minimum_size = Vector2(44, 44)
-		b.focus_mode = Control.FOCUS_NONE
-		var on: bool = c == Settings.player_color
-		b.add_theme_stylebox_override("normal", UI.box(c, 22, 4 if on else 2, Color.WHITE if on else c.darkened(0.3), 0))
-		b.add_theme_stylebox_override("hover", UI.box(c.lightened(0.15), 22, 3, Color.WHITE, 0))
-		b.pressed.connect(func():
-			Settings.player_color = c
-			Settings.save()
-			if game.net:
-				game.net.send_hello()
-			show_settings())
-		row.add_child(b)
-	v.add_child(row)
-	for pair in [["🔊 Sound", "volume"], ["🎵 Music", "music"]]:
-		var h := HBoxContainer.new()
-		h.add_child(UI.label(pair[0], 18))
-		var sl := HSlider.new()
-		sl.min_value = 0.0
-		sl.max_value = 1.0
-		sl.step = 0.05
-		sl.value = Settings.get(pair[1])
-		sl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		sl.custom_minimum_size.x = 300
-		var key: String = pair[1]
-		sl.value_changed.connect(func(val):
-			Settings.set(key, val)
-			Settings.save()
-			if key == "volume":
-				Sfx.set_volume(val)
-			else:
-				Sfx.set_music(val))
-		h.add_child(sl)
-		v.add_child(h)
-	var saves := HBoxContainer.new()
-	var sb := UI.button("💾 Save my playground", UI.PANEL2, 16)
-	sb.pressed.connect(func():
-		Saves.save_slot(game.world)
-		toast("Saved! Load it from here any time."))
-	saves.add_child(sb)
-	var lb := UI.button("📂 Load it back", UI.PANEL2, 16)
-	lb.disabled = not Saves.has_slot()
-	lb.pressed.connect(func():
+	var v := _open_modal("⚙️ Settings", 700)
+	modal.set_meta("settings", true)
+	var sp := SettingsPanel.new()
+	sp.on_name = func():
+		if game and game.net:
+			game.net.send_hello()
+	v.add_child(sp)
+	sp.build()
+
+
+## 💾 Six slots for playgrounds, each with a picture (SavesPanel).
+func show_saves() -> void:
+	var v := _open_modal("💾 Your playgrounds", 720)
+	modal.set_meta("saves", true)
+	var sp := SavesPanel.new()
+	sp.name = "SavesPanel"
+	sp.can_save = true
+	sp.on_save = func(slot: int): _save_to(slot, sp)
+	sp.on_load = func(slot: int):
 		if game.mode == "client":
 			toast("Only the host can load a playground.")
 			return
-		Saves.load_slot(game.world)
-		close_top())
-	saves.add_child(lb)
-	v.add_child(saves)
+		if Saves.load_slot(game.world, slot):
+			close_top()
+			toast("📂 Here's your playground!")
+	v.add_child(sp)
+	sp.build()
+
+
+## Saves the playground in `slot` with a little picture of it (taken with the
+## buttons and pop-ups out of the way), then shows it in the slot.
+func _save_to(slot: int, sp: SavesPanel) -> void:
+	var img: Image = null
+	if DisplayServer.get_name() != "headless":
+		visible = false
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		img = get_viewport().get_texture().get_image()
+		visible = true
+		if img and ProjectSettings.get_setting("rendering/viewport/hdr_2d", false):
+			img.convert(Image.FORMAT_RGBA8)      # (an HDR picture is in linear half-floats)
+			img.linear_to_srgb()
+	if Saves.save_slot(game.world, slot, "", img):
+		toast("💾 Saved in slot %d!" % slot)
+	else:
+		toast("😕 Couldn't save there.")
+	if is_instance_valid(sp):
+		sp.refresh()
 
 
 func show_together() -> void:

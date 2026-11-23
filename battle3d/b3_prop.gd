@@ -4,6 +4,8 @@ extends RigidBody3D
 ## landmines and sandbags. They fly around in blasts; the explosive ones go
 ## off when shot, blasted, stepped on (mines) or detonated (C4).
 
+const MINE_R := 0.85         # a landmine goes off this far from the edge of whatever is over it (steps_on)
+
 static var _pmat: PhysicsMaterial = null
 
 var battle = null
@@ -163,17 +165,26 @@ func _physics_process(dt: float) -> void:
 		_trig_t -= dt
 		if _trig_t <= 0.0 and age > 1.0:
 			_trig_t = 0.1
-			var at := global_position
-			for u: B3Unit in battle.units_near(at, 1.1):
-				if u.down or u.dead or u.flying:
-					continue
-				var dx := u.position.x - at.x
-				var dz := u.position.z - at.z
-				if dx * dx + dz * dz < 1.2 and absf(u.position.y - at.y) < 1.2:
-					trigger(0.25)
-					break
+			if steps_on(battle.units_near(global_position, MINE_R, 1.0)):
+				trigger(0.25)
 	if absf(global_position.x) > B3Defs.BOUNDS + 10.0 or absf(global_position.z) > B3Defs.BOUNDS + 10.0 or global_position.y < -20.0:
 		battle.remove_prop(self, false)
+
+
+## A landmine goes off when something walking or driving is over it: within
+## MINE_R of it plus that thing's own radius, so a tank's wide treads set it
+## off as well as a soldier's boots (not just the middle of the tank).
+func steps_on(near: Array[B3Unit]) -> bool:
+	var at := global_position
+	for u: B3Unit in near:
+		if u.down or u.dead or u.flying:
+			continue
+		var dx := u.position.x - at.x
+		var dz := u.position.z - at.z
+		var r := MINE_R + u.radius * 0.85
+		if dx * dx + dz * dz < r * r and absf(u.position.y - at.y) < 1.2:
+			return true
+	return false
 
 
 func _process(_dt: float) -> void:

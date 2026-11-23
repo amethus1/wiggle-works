@@ -38,6 +38,26 @@ if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
 	exit 1
 fi
 
+# sed -i works differently on a Mac (BSD) and on Linux (GNU)
+sedi() {
+	if sed --version >/dev/null 2>&1; then
+		sed -i "$@"
+	else
+		sed -i '' "$@"
+	fi
+}
+
+# true if version $1 is bigger than version $2 (1.10.0 > 1.9.0)
+bigger() {
+	local IFS=.
+	local -a a=($1) b=($2)
+	for i in 0 1 2; do
+		if (( ${a[i]:-0} > ${b[i]:-0} )); then return 0; fi
+		if (( ${a[i]:-0} < ${b[i]:-0} )); then return 1; fi
+	done
+	return 1
+}
+
 # GitHub: is gh there and logged in?
 command -v gh >/dev/null 2>&1 || { echo "This needs the GitHub command-line tool (gh): https://cli.github.com"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in to GitHub. Run: gh auth login"; exit 1; }
@@ -57,11 +77,27 @@ if [ -n "$other" ]; then
 fi
 
 old=$(git show HEAD:project.godot | sed -n 's/^config\/version="\(.*\)"/\1/p')
+if ! bigger "$ver" "$old"; then
+	echo "The new version ($ver) has to be bigger than this one ($old)."
+	exit 1
+fi
+# GitHub mustn't have it already, and this copy mustn't be behind GitHub
+git fetch -q origin || { echo "Couldn't reach GitHub (git fetch). Are you online?"; exit 1; }
+if [ -n "$(git ls-remote --tags origin "refs/tags/v$ver")" ]; then
+	echo "GitHub already has v$ver. Pick a bigger number."
+	exit 1
+fi
+branch=$(git rev-parse --abbrev-ref HEAD)
+if git rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null \
+		&& [ "$(git rev-list --count "HEAD..origin/$branch")" != "0" ]; then
+	echo "GitHub has changes this copy doesn't (git pull first)."
+	exit 1
+fi
 echo "Wiggle Works $old -> $ver"
 
 # the version number goes into the game and into the Windows/Mac file info
-sed -i '' -e "s/^config\/version=.*/config\/version=\"$ver\"/" project.godot
-sed -i '' \
+sedi -e "s/^config\/version=.*/config\/version=\"$ver\"/" project.godot
+sedi \
 	-e "s/^application\/file_version=.*/application\/file_version=\"$ver.0\"/" \
 	-e "s/^application\/product_version=.*/application\/product_version=\"$ver.0\"/" \
 	-e "s/^application\/short_version=.*/application\/short_version=\"$ver\"/" \

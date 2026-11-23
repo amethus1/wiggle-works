@@ -7,6 +7,9 @@ const LAYER_GROUND := 1
 const LAYER_TOYS := 2
 const LAYER_WIGGLIES := 4
 const LAYER_FIGHTERS := 16
+# px/s: nothing in the game moves this fast (a nuke throws things about
+# 5,000 px/s). See stop_wild_jump.
+const MAX_SPEED := 18000.0
 
 var uid := 0
 var world: Node = null
@@ -40,6 +43,7 @@ var puppet := false           # network client copy: no physics, just drawn
 var extra := {}
 var _prev_contacts := {}
 var _art_key := ""
+var _last := Vector2.INF   # where the physics (or our own code) last put us
 
 
 func setup(toy_id: String, d: Dictionary, pos: Vector2, rot := 0.0, scale_f := 1.0) -> void:
@@ -178,7 +182,43 @@ func make_puppet() -> void:
 	update_freeze()
 
 
+## Squeezed in a jumble (dropped weapons and limbs in a heap), the physics
+## engine now and then "pushes a body out" thousands of pixels in one step,
+## and the body, hurtling along, flings everything it hits: a whole heap went
+## flying out of the world at once. A body the physics just moved further than
+## anything really goes in one step (or to "not a number") is put straight
+## back where it was, standing still. `last`: where it was after the last step
+## (or where our own code put it since). Returns where it is now, for next time.
+static func stop_wild_jump(body: RigidBody2D, s: PhysicsDirectBodyState2D, last: Vector2) -> Vector2:
+	var at := s.transform.origin
+	if last == Vector2.INF:
+		return at
+	var most := MAX_SPEED * s.step
+	if at.distance_squared_to(last) > most * most or not at.is_finite():
+		var rot := s.transform.get_rotation()
+		var back := Transform2D(rot if is_finite(rot) else 0.0, last)
+		s.transform = back
+		# (the body's own copy too: if that's NaN, Godot copies it back over
+		# the physics state after this, as NaN never equals itself)
+		body.global_transform = back
+		s.linear_velocity = Vector2.ZERO
+		s.angular_velocity = 0.0
+		return last
+	if not s.linear_velocity.is_finite() or not is_finite(s.angular_velocity):
+		s.linear_velocity = Vector2.ZERO
+		s.angular_velocity = 0.0
+	return at
+
+
+func _notification(what: int) -> void:
+	# our own code moved it, not the physics (that doesn't send this)
+	if what == NOTIFICATION_TRANSFORM_CHANGED:
+		_last = global_position
+
+
 func _integrate_forces(s: PhysicsDirectBodyState2D) -> void:
+	if not puppet:
+		_last = stop_wild_jump(self, s, _last)
 	# On the first frame of a contact Godot still reports the velocities from
 	# before the bounce, so the closing speed along the normal is exact.
 	var n := s.get_contact_count()
@@ -206,6 +246,9 @@ func _process(_d: float) -> void:
 		key += "f%d" % int(fuse * 8.0)
 	if extra.has("art"):
 		key += String(extra.art)
+	var blink := Art.blink_key(self)
+	if blink != 0:
+		key += "b%d" % blink
 	if key != _art_key:
 		_art_key = key
 		queue_redraw()

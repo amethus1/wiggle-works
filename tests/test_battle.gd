@@ -91,6 +91,8 @@ func _ready() -> void:
 	await _fx_pool()
 	await _model_bits()
 	await _ui_smoke()
+	await _tactics()
+	await _wood_fire()
 	await _fighters_map()
 	await _performance()
 	if b and is_instance_valid(b):
@@ -1163,6 +1165,243 @@ func _model_bits() -> void:
 	check(B3Mats.HPBAR_SHADER.contains("length(MODEL_MATRIX[0].xyz)") and tk.bar.scale.x > 1.0, "health bars face the camera but keep their size (bigger for big fighters)")
 
 
+# ------------------------------------------------------------------ tactics
+func _wall_hp(w) -> float:
+	var t := 0.0
+	if is_instance_valid(w):
+		for pc in (w as B3Struct).pieces:
+			if is_instance_valid(pc):
+				t += pc.hp
+	return t
+
+
+func _tactics() -> void:
+	print("tactics")
+	# 🗼 an archer up on a tower, out of a sword's reach: knights go for
+	# someone on the ground first...
+	await fresh()
+	var tw: B3Struct = b.spawn_struct("tower", at(8, 0), 0.0)
+	await sim(0.3)
+	var top: float = b.surface_y(Vector3(8, 30, 0))
+	var up: B3Unit = b.spawn_unit("archer", "blue", Vector3(8, top, 0), "peaceful")
+	var low: B3Unit = b.spawn_unit("stick", "blue", at(22, 0), "peaceful")
+	low.speed = 0.0
+	var kn: Array[B3Unit] = []
+	for z: float in [-1.5, 0.0, 1.5]:
+		kn.append(b.spawn_unit("knight", "red", at(0, z), "attack"))
+	await sim(0.5)
+	b.set_fighting(true)
+	await sim(0.8)
+	var k0: B3Unit = kn[1]
+	check(k0._high_above(up, k0.position) and not k0._high_above(low, k0.position), "🗼 an archer on a tower is out of a knight's reach, a fighter on the ground isn't")
+	var on_low := 0
+	for k in kn:
+		if k.target == low:
+			on_low += 1
+	check(on_low == 3, "knights go after the fighter on the ground, not the archer they can't reach (%d of 3)" % on_low)
+	# ...and with nobody else left, they chop the tower's legs until it comes down
+	b.remove_unit(low, false)
+	var n0: int = tw.pieces.size()
+	var t := 0.0
+	var swung_air := 0
+	while t < 60.0 and is_instance_valid(up) and not up.down and up.position.y > top - 1.5:
+		await sim(0.5)
+		t += 0.5
+		for k in kn:
+			if is_instance_valid(k) and k.act == "attack" and k.act_t < k.act_len * 0.45 and not k._hacking and k.target == up \
+					and is_instance_valid(up) and k._high_above(up, k.position):
+				swung_air += 1
+	var n1: int = tw.pieces.size() if is_instance_valid(tw) else 0
+	check(n1 < n0, "🪓 with nobody else left, they chop at the tower's legs (%d → %d pieces in %.0f s)" % [n0, n1, t])
+	check(not is_instance_valid(up) or up.down or up.position.y < top - 1.5, "until the archer comes down (%.1f m up)" % (up.position.y - at(8, 0).y if is_instance_valid(up) else 0.0))
+	check(swung_air == 0, "and nobody swings at thin air under it (%d)" % swung_air)
+
+	# ⛰️ shooting down from up high reaches further and is steadier
+	await fresh()
+	var tw2: B3Struct = b.spawn_struct("tower", at(0, 0), 0.0)
+	await sim(0.3)
+	var top2: float = b.surface_y(Vector3(0, 30, 0))
+	var hi: B3Unit = b.spawn_unit("archer", "red", Vector3(0, top2, 0), "defend")
+	var lv: B3Unit = b.spawn_unit("archer", "red", at(0, 8), "defend")
+	var foe: B3Unit = b.spawn_unit("archer", "blue", at(18, 0), "defend")
+	await sim(0.5)
+	var bow := float(hi.wpn.range)
+	check(is_instance_valid(tw2) and hi.position.y - foe.position.y > 3.5 and hi._reach(hi.wpn, foe) > bow * 1.1 and is_equal_approx(lv._reach(lv.wpn, foe), bow),
+		"⛰️ an archer up a tower shoots further (%.1f m) than one on the ground (%.1f m)" % [hi._reach(hi.wpn, foe), lv._reach(lv.wpn, foe)])
+	check(hi._high_k(foe) > 0.5 and is_zero_approx(foe._high_k(hi)) and is_zero_approx(lv._high_k(foe)), "and steadier, but not shooting up at it")
+
+	# 🚀 a wall in the way: the rocketeer moves to get a clear shot instead of blasting the wall
+	await fresh()
+	var wl: B3Struct = b.spawn_struct("wall", at(8, 0), PI * 0.5, 8.0)
+	var rk: B3Unit = b.spawn_unit("rocketeer", "red", at(0, 0), "ranged")
+	var tgt: B3Unit = b.spawn_unit("knight", "blue", at(15, 0), "peaceful")
+	tgt.speed = 0.0
+	await sim(0.5)
+	var hp0 := _wall_hp(wl)
+	b.set_fighting(true)
+	await sim(0.3)
+	check(not rk.clear_shot(rk._muzzle_pos(), tgt, 3.2), "🚀 a wall between a rocketeer and its enemy: no clear shot")
+	var rockets := {}
+	var z0 := rk.position.z
+	t = 0.0
+	while t < 14.0 and is_instance_valid(tgt) and not tgt.down:
+		await sim(0.1)
+		t += 0.1
+		for pj in b.proj_root.get_children():
+			if pj is B3Proj and (pj as B3Proj).kind == "rocket":
+				rockets[pj.get_instance_id()] = true
+	var moved := absf(rk.position.z - z0)
+	check(rockets.size() > 0 and moved > 1.5, "it goes round the wall (%.1f m) and fires (%d rockets)" % [moved, rockets.size()])
+	check(_wall_hp(wl) >= hp0 - 0.5, "without blowing up the wall (%.0f → %.0f)" % [hp0, _wall_hp(wl)])
+
+	# 🧱 shot at, a soldier gets behind the sandbags nearby
+	await fresh()
+	var sb: B3Struct = b.spawn_struct("sandbags", at(4, 0), PI * 0.5)
+	var sol: B3Unit = b.spawn_unit("soldier", "red", at(0, 3), "ranged")
+	sol.max_hp = 5000.0
+	sol.hp = 5000.0
+	var gun: B3Unit = b.spawn_unit("gunner", "blue", at(15, 0), "defend")
+	gun.max_hp = 5000.0
+	gun.hp = 5000.0
+	await sim(0.5)
+	b.set_fighting(true)
+	await sim(5.0)
+	var behind: bool = sol.position.x > 2.0 and sol.position.x < 4.0 and absf(sol.position.z) < 2.8
+	check(is_instance_valid(sb) and sol._cover_on and behind, "🧱 a soldier being shot at gets behind the sandbags (at %.1f, %.1f)" % [sol.position.x, sol.position.z])
+	check(sol.cd < 5.0 and sol.target == gun, "and keeps shooting from there")
+
+	# 🛡️ a shield wall keeps a loose line; without it they bunch up
+	await fresh()
+	var aim: B3Unit = b.spawn_unit("stick", "blue", at(50, 0), "peaceful")
+	aim.speed = 0.0
+	var r := RandomNumberGenerator.new()
+	r.seed = 5
+	var line_g: Array[B3Unit] = []
+	var mob_g: Array[B3Unit] = []
+	for i in 9:
+		var dx := r.randf_range(-1.2, 1.2)
+		var dz := r.randf_range(-1.2, 1.2)
+		line_g.append(b.spawn_unit("legionary", "red", at(dx, -10 + dz), "attack"))
+		var m: B3Unit = b.spawn_unit("legionary", "red", at(dx, 10 + dz), "attack")
+		m._form = ""        # (the same soldiers, not keeping in line)
+		mob_g.append(m)
+	await sim(0.5)
+	b.set_fighting(true)
+	await sim(5.0)
+	var gl := _spread(line_g)
+	var gm := _spread(mob_g)
+	check(line_g[0]._form == "shield" and gl.x > gm.x + 0.2 and gl.x > 1.3, "🛡️ a shield wall keeps a loose line: %.1f m to the nearest mate (a crowd: %.1f m)" % [gl.x, gm.x])
+	check(gl.y < gm.y + 1.0 and gl.y < 4.0, "nobody running far ahead of it (%.1f m deep, a crowd %.1f m)" % [gl.y, gm.y])
+	var musket: B3Unit = b.spawn_unit("redcoat", "red", at(-20, 0), "auto")
+	var viking: B3Unit = b.spawn_unit("viking", "red", at(-20, 4), "auto")
+	check(musket._form == "line" and viking._form == "" and kn.size() == 3, "musket men keep a line too, wild vikings don't")
+	b.set_fighting(false)
+
+
+## [the average distance to the nearest mate, how deep the group is along x]
+func _spread(g: Array[B3Unit]) -> Vector2:
+	var nn := 0.0
+	var n := 0
+	var x0 := INF
+	var x1 := -INF
+	for u in g:
+		if not is_instance_valid(u) or u.down:
+			continue
+		var best := INF
+		for o in g:
+			if o != u and is_instance_valid(o) and not o.down:
+				best = minf(best, Vector2(o.position.x - u.position.x, o.position.z - u.position.z).length())
+		if best < INF:
+			nn += best
+			n += 1
+		x0 = minf(x0, u.position.x)
+		x1 = maxf(x1, u.position.x)
+	return Vector2(nn / maxf(1.0, n), x1 - x0)
+
+
+# --------------------------------------------------------------- 🔥 fire
+func _wood_fire() -> void:
+	print("burning wood")
+	await fresh()
+	var tw: B3Struct = b.spawn_struct("tower", at(0, 0), 0.0)
+	var stone: B3Struct = b.spawn_struct("wall", at(0, -6), 0.0, 6.0)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 3
+	B3History._tree(b, at(4.2, 3.0), rng)
+	B3History._tree(b, at(7.0, 6.0), rng)
+	var trees: Array[Node3D] = []
+	for n in b.world.scenery.get_children():
+		if n is StaticBody3D and n.has_meta("scenery") and not n.has_meta("sid"):
+			trees.append(n as Node3D)
+	await sim(0.3)
+	var top: float = b.surface_y(Vector3(0, 30, 0))
+	var arch: B3Unit = b.spawn_unit("archer", "red", Vector3(0.6, top, 0.6), "peaceful")
+	b.spawn_unit("stick", "blue", at(-40, 0), "peaceful")
+	await sim(0.4)
+	b.set_fighting(true)
+	var col0: Color = ((tw.pieces[0] as Node).get_child(1) as MeshInstance3D).material_override.albedo_color
+	b.spawn_hazard("fire", at(0, 0), 2.8, 25.0)      # napalm under it
+	await sim(1.2)
+	var f := B3Fire.of(b)
+	var lit := 0
+	for pc in tw.pieces:
+		if f.is_burning(pc):
+			lit += 1
+	check(lit >= 3, "🔥 napalm under a wooden tower sets its legs alight (%d pieces)" % lit)
+	var stone_lit := false
+	for pc in stone.pieces:
+		stone_lit = stone_lit or f.is_burning(pc)
+	check(not stone_lit, "a stone wall next to it doesn't burn")
+	var burnt_arch := false
+	var dark := false
+	var t := 0.0
+	var n0: int = tw.pieces.size()
+	while t < 26.0:
+		await sim(0.5)
+		t += 0.5
+		if is_instance_valid(arch) and (arch.burn_t > 0.0 or arch.down):
+			burnt_arch = true
+		if not dark and is_instance_valid(tw):
+			for pc in tw.pieces:
+				if is_instance_valid(pc) and f.is_burning(pc):
+					var mi := pc.get_child(1) as MeshInstance3D
+					if mi and (mi.material_override as StandardMaterial3D).albedo_color.get_luminance() < col0.get_luminance() * 0.75:
+						dark = true
+	check(dark, "the burning wood turns charcoal black")
+	var n1: int = tw.pieces.size() if is_instance_valid(tw) else 0
+	check(n1 < n0 - 3, "and the tower burns through and collapses (%d → %d pieces)" % [n0, n1])
+	check(burnt_arch, "the archer up on it catches fire")
+	var fell := 0
+	for tr in trees:
+		if not is_instance_valid(tr) or tr.has_meta("gone"):
+			fell += 1
+	check(fell >= 1, "🌳 the fire spreads to the trees, which burn and fall over (%d of %d)" % [fell, trees.size()])
+	var charred := false
+	for c in b.chunks:
+		if is_instance_valid(c) and c.get_child_count() > 0:
+			for m in c.get_children():
+				if m is MeshInstance3D and (m as MeshInstance3D).material_override is StandardMaterial3D \
+						and ((m as MeshInstance3D).material_override as StandardMaterial3D).albedo_color.get_luminance() < 0.2:
+					charred = true
+	check(charred, "falling black and charred")
+	check(f.burning.size() <= B3Fire.MAX_BURNING, "(never more than %d fires at once)" % B3Fire.MAX_BURNING)
+	# a fireball hitting a wooden tower sets it alight
+	await fresh()
+	var tw3: B3Struct = b.spawn_struct("tower", at(0, 0), 0.0)
+	b.spawn_unit("stick", "red", at(-30, 0), "peaceful")
+	b.spawn_unit("stick", "blue", at(-30, 6), "peaceful")
+	await sim(0.3)
+	b.set_fighting(true)
+	var post: B3Piece = tw3.pieces[0]
+	var from: Vector3 = post.global_position + Vector3(-6, 0.3, 0)
+	b.spawn_proj("fireball", from, (post.global_position - from).normalized() * 15.0, null, B3Defs.weapon("fireball"))
+	await sim(1.0)
+	check(B3Fire.of(b).is_burning(post), "🧙 a wizard's fireball sets a wooden tower alight")
+	b.set_fighting(false)
+	await sim(0.2)
+	check(B3Fire.of(b).burning.is_empty(), "and fires go out when the battle stops")
+
+
 # ------------------------------------------------- the fighters' map (speed)
 ## B3Battle's fighters' map only makes "who's near?" faster: every fighter
 ## still picks the same enemy, keeps away from the same neighbours and heals
@@ -1179,11 +1418,18 @@ func _fighters_map() -> void:
 	for i in 170:
 		b.spawn_unit(kinds[i % kinds.size()], teams[i % teams.size()], at(r.randf_range(-45, 45), r.randf_range(-45, 45)), moods[i % moods.size()])
 	b.spawn_unit("archer", "green", at(150, -120))      # one far away from everyone
+	for tz: float in [-20.0, 20.0]:
+		# archers up on towers (out of a sword's reach: _high_above)
+		b.spawn_struct("tower", at(10, tz), 0.0)
+		await get_tree().physics_frame
+		b.spawn_unit("archer", "blue" if tz < 0.0 else "green", Vector3(10, b.surface_y(Vector3(10, 30, tz)), tz), "defend")
 	b.set_fighting(true)
 	var looked := 0
 	var bad_t := 0
 	var bad_s := 0
 	var bad_a := 0
+	var air_looks := 0
+	var bad_air := 0
 	var hurt_some := false
 	for round_i in 8:
 		b.grid_min = 0 if round_i % 2 == 0 else 100000      # (with the map and without)
@@ -1203,18 +1449,27 @@ func _fighters_map() -> void:
 			# (helicopters and planes then pick their own way, the same as before)
 			if u._nearest_enemy(u.position) != want[0]:
 				bad_t += 1
+			var air := u is B3Aircraft
+			var want_air: B3Unit = _air_pick_the_long_way(u) if air else null
 			u._think()
 			looked += 1
-			if u.sep.distance_to(want[1]) > 1e-5:
-				bad_s += 1
-			if u.ally != want[2]:
-				bad_a += 1
+			if air:
+				# (one look at everyone, their own way; they don't keep apart from those below)
+				air_looks += 1
+				if u.target != want_air or u.sep != Vector3.ZERO or u.ally != null:
+					bad_air += 1
+			else:
+				if u.sep.distance_to(want[1]) > 1e-5:
+					bad_s += 1
+				if u.ally != want[2]:
+					bad_a += 1
 			u.target = old_target if is_instance_valid(old_target) else null
 			u.sep = old_sep
 			u.ally = old_ally if is_instance_valid(old_ally) else null
 			u.voice_t = old_voice
 	check(looked > 600 and bad_t == 0, "every fighter picks the same enemy as looking at everyone (%d looks, %d different)" % [looked, bad_t])
 	check(bad_s == 0 and bad_a == 0, "and keeps away from the same neighbours and heals the same friend (%d, %d different)" % [bad_s, bad_a])
+	check(air_looks > 20 and bad_air == 0, "helicopters and planes pick their enemy with one look at everyone, their own way (%d looks, %d different)" % [air_looks, bad_air])
 	# fighters exactly as far away: the first one in battle.units, as before
 	await fresh()
 	b.grid_min = 0       # (the map even for these few)
@@ -1252,6 +1507,38 @@ func _fighters_map() -> void:
 			if not u.down and Vector2(u.position.x - c.x, u.position.z - c.z).length() < rad and not near.has(u):
 				missed += 1
 	check(missed == 0, "looking near a spot finds every fighter within reach (%d missed)" % missed)
+	# clearing everyone away empties the map too (it held on to them until the next one)
+	b.grid_min = 0
+	await get_tree().physics_frame
+	b.grid_on()      # (made now, inside the physics step)
+	var had: bool = not b._grid.is_empty() and b.grid_r > 0.0
+	b.clear_units()
+	check(had and b._grid.is_empty() and b.grid_r == 0.0 and b._grid_step == -1 and b.units_near(Vector3.ZERO, 50.0).is_empty(), "clearing everyone away empties the fighters' map")
+
+
+## Who a helicopter or plane goes after (B3Aircraft._think): the nearest
+## enemy in the air for a plane, on the ground for a helicopter, the one it's
+## already after counting a bit closer.
+func _air_pick_the_long_way(me: B3Unit) -> B3Unit:
+	var a := me as B3Aircraft
+	var best: B3Unit = null
+	var bs := 1e18
+	for u: B3Unit in b.units:
+		if u == me or u.down or not me.is_enemy(u):
+			continue
+		if me.pers == "defend" and Vector2(u.position.x - me.home.x, u.position.z - me.home.z).length() > me.guard_radius():
+			continue
+		var s := me.position.distance_squared_to(u.position)
+		if a.plane and u.flying:
+			s *= 0.3
+		elif not a.plane and u is B3Aircraft and (u as B3Aircraft).plane:
+			s *= 3.0
+		if u == me.target:
+			s *= 0.55
+		if s < bs:
+			bs = s
+			best = u
+	return best
 
 
 ## What B3Unit._think worked out before the fighters' map: [enemy, push
@@ -1290,6 +1577,8 @@ func _think_the_long_way(me: B3Unit) -> Array:
 				score *= 0.55
 			if u.flying and melee_only and not me.flying:
 				score = score * 4.0 + 400.0
+			elif melee_only and not me.flying and me._high_above(u, my):
+				score = score * 4.0 + 400.0      # (up on a tower, out of reach)
 			if score < bd:
 				bd = score
 				best = u

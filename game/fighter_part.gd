@@ -9,9 +9,20 @@ var half := Vector2(6, 10)   # half size (box parts), or radius in x (round part
 var round_part := false
 var _prev := {}
 var on_moving := false   # touching a Wiggly (it could hop out from under us: see Fighter._rest_check)
+var _last := Vector2.INF   # where the physics (or our own code) last put us (see Toy.stop_wild_jump)
+
+
+func _notification(what: int) -> void:
+	# our own code moved us, not the physics (that doesn't send this)
+	if what == NOTIFICATION_TRANSFORM_CHANGED:
+		_last = global_position
 
 
 func _integrate_forces(s: PhysicsDirectBodyState2D) -> void:
+	var at := s.transform.origin
+	_last = Toy.stop_wild_jump(self, s, _last)
+	if _last != at and fighter != null and part != "body":
+		fighter.jolted = true   # (put back: the rest of the ragdoll stops too)
 	var n := s.get_contact_count()
 	on_moving = false
 	if n == 0:

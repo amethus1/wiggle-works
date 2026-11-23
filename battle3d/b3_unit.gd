@@ -11,6 +11,10 @@ static var _next_uid := 0
 const MASK := B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_PROP | B3Defs.L_SCENERY
 const LAUNCH := 6.5       # knock speed (after stability) that turns a unit into a ragdoll
 const MELEE_UP := 1.0     # melee hits and charges reach about this far over your head (or under your feet)
+const FORM_R := 4.5       # shield walls and musket lines keep in line with mates this close (_formation)
+const FORM_GAP := 1.7     # ...a loose line: about this far apart, not a huddle
+const COVER_R := 7.0      # a shooter under fire runs to cover no further than this (_seek_cover)
+const LOS_EVERY := 0.4    # looks for a clear shot (rockets, tank shells) at most this often (clear_shot)
 
 var battle = null
 var kind := ""
@@ -83,6 +87,7 @@ var power_t := 0.0               # a charge or swoop you started still going
 var power_at := Vector3.ZERO     # where a swoop dives to
 var power_alt := 6.0             # the height to climb back to after a swoop
 var king := false                # 👑 a team's King (B3Modes, Defend the King): wears a crown
+var routed := false              # 🏳️ its King fell: running off home, arms waving (B3Modes._rout)
 var grid_i := 0                  # its place in battle.units (B3Battle's fighters' map)
 var rng := RandomNumberGenerator.new()
 var _hz_t := 0.0
@@ -99,6 +104,19 @@ var _power_fx := 0.0
 var _block_t := 0.0
 var _steady := false
 var _world: B3World = null       # battle.world (typed, for speed)
+# tactics (see _tactics)
+var _form := ""                  # keeps a loose line with its mates: "shield" (shield wall), "line" (musket volleys) or ""
+var _form_v := Vector3.ZERO      # ...a push sideways, to keep that spacing
+var _form_k := 1.0               # ...and how fast to walk to stay in line (slower ahead of it, faster behind)
+var _los_t := -99.0              # (battle time) when it last looked for a clear shot (clear_shot)
+var _los_uid := -1               # ...at which enemy
+var _los_ok := true              # ...and whether it had one
+var _fire_t := 99.0              # seconds since it was last shot at or blasted (cover)
+var _cover := Vector3.ZERO       # the spot behind cover it's running to (or holding)
+var _cover_on := false
+var _cover_next := 0.0           # (battle time) when to look for cover again
+var _hack: B3Piece = null        # the post it's chopping to bring down the tower an enemy stands on (_chop)
+var _hacking := false            # this swing is at _hack
 
 
 static func unit_pmat() -> PhysicsMaterial:
@@ -178,6 +196,8 @@ func setup(b, k: String, t: String, p: String, seed_: int) -> void:
 	think_t = rng.randf() * 0.3
 	_alt = rng.randf_range(5.5, 7.5)
 	voice_t = rng.randf_range(0.0, 2.0)
+	if b is Node:
+		B3Fire.of(b)      # (🔥 the battle's fire keeper: wood and trees catch fire)
 
 
 func _make_rig() -> void:
@@ -215,6 +235,20 @@ func set_personality(p: String) -> void:
 	pers = String(def.pers) if p == "auto" or p == "" else p
 	fleeing = false
 	target = null
+	_form = _form_group()
+
+
+## Who keeps in a loose line with their mates instead of a crowd: people
+## with a shield and a hand weapon (a shield wall) and musket men (volley
+## ranks). Not when they're berserk, scared or peaceful.
+func _form_group() -> String:
+	if String(def.get("body", "")) != "human" or pers == "berserk" or pers == "coward" or pers == "peaceful":
+		return ""
+	if wpn.has("volley"):
+		return "line"
+	if def.get("shield", false) and String(wpn.get("type", "")) == "melee":
+		return "shield"
+	return ""
 
 
 func set_team(t: String) -> void:
@@ -267,6 +301,7 @@ func _physics_process(dt: float) -> void:
 		_down_tick(dt)
 		return
 	hurt_t += dt
+	_fire_t += dt
 	cd -= dt
 	voice_t -= dt
 	stun_t -= dt
@@ -354,6 +389,7 @@ func _feet_on_something(below: float) -> bool:
 func _think() -> void:
 	if not battle.grid_on():
 		_think_everyone()
+		_tactics()
 		return
 	var my := position
 	# keep a little apart from anyone standing right next to us
@@ -391,6 +427,7 @@ func _think() -> void:
 		if target and voice_t <= 0.0 and pers != "peaceful":
 			_voice()
 	ally = hurt_u
+	_tactics()
 
 
 ## The enemy to go after: the nearest one anywhere on the field (or, for a
@@ -445,8 +482,8 @@ func _nearest_enemy(my: Vector3) -> B3Unit:
 
 
 ## How much `u` is worth going after (lower is better: its distance squared,
-## less for the enemy we've got, more for one in the air we can't reach), or
-## -1 if it isn't an enemy we'd go after.
+## less for the enemy we've got, more for one we can't reach: in the air, or
+## up on a tower out of a sword's reach), or -1 if it isn't an enemy we'd go after.
 func _enemy_score(u: B3Unit, my: Vector3, guard: bool, guard_r: float, melee_only: bool) -> float:
 	if u == self or u.down or u.dead or not is_enemy(u):
 		return -1.0
@@ -462,7 +499,17 @@ func _enemy_score(u: B3Unit, my: Vector3, guard: bool, guard_r: float, melee_onl
 		score *= 0.55
 	if u.flying and melee_only and not flying:
 		score = score * 4.0 + 400.0
+	elif melee_only and not flying and u.position.y - my.y > tall + MELEE_UP + 0.5 and _high_above(u, my):
+		score = score * 4.0 + 400.0
 	return score
+
+
+## True if `u` stands up on a building (a tower) too high over a fighter at
+## `my` for its sword or claws to reach (see _height_gap), not just higher up
+## the same hill. Fighters that only hit up close go after someone else first,
+## and if there's nobody else they chop at the tower's legs (_chop).
+func _high_above(u: B3Unit, my: Vector3) -> bool:
+	return u.position.y - my.y > tall + MELEE_UP + 0.5 and u.position.y - _world.height_at(u.position.x, u.position.z) > 1.2
 
 
 ## _think when there's no fighters' map (a small battle): one look at every
@@ -501,6 +548,8 @@ func _think_everyone() -> void:
 				score *= 0.55
 			if u.flying and melee_only and not flying:
 				score = score * 4.0 + 400.0
+			elif melee_only and not flying and u.position.y - my.y > tall + MELEE_UP + 0.5 and _high_above(u, my):
+				score = score * 4.0 + 400.0
 			if score < bd:
 				bd = score
 				best = u
@@ -517,13 +566,22 @@ func _think_everyone() -> void:
 
 
 ## 🚩 King of the Hill (B3Modes): with no enemy close by (`dist` to the
-## target), walk to the glowing circle, or stand in it. Sets `want` (and
-## `look` for fighters who'd rather face the way they walk) and returns true;
-## false if it should just fight as usual. Guards (🛡️ Defend) stay at their posts.
+## target), walk (or drive) to the glowing circle, or stand in it. Sets `want`
+## (and `look` for fighters who'd rather face the way they walk) and returns
+## true; false if it should just fight as usual. Fighters you set to 🛡️
+## Defend (and a King's guards) stay at their posts; ones that guard by
+## nature (hoplites, elephants, stegosaurs...) guard the hill instead.
+## 🌊 In Wave Defense the attackers head for the 🚩 Fort Keep (_siege).
 func _hill_pull(dist: float, spd: float) -> bool:
 	var m = battle.modes
-	if m == null or not bool(m.hill_on) or pers == "defend" or pers == "peaceful" or flying:
+	if m == null:
 		return false
+	if bool(m.siege) and team == "blue":
+		return _siege(m, dist, spd)
+	if not bool(m.hill_on) or pers_choice == "defend" or pers == "peaceful" or flying:
+		return false
+	if pers == "defend":
+		home = m.hill_pos      # (its post is the hill now)
 	if dist < 10.0:
 		return false      # an enemy close by: fight it
 	var hp_: Vector3 = m.hill_pos
@@ -536,6 +594,33 @@ func _hill_pull(dist: float, spd: float) -> bool:
 			look = Vector3.ZERO
 	else:
 		want = Vector3.ZERO      # hold the hill
+	return true
+
+
+## 🌊 An attacker with no defender close by (`dist` to its target) heads for
+## the 🚩 Fort Keep and bashes it (B3Modes does the damage, _siege_tick).
+## Fliers circle over it. False if there's a defender to fight first.
+func _siege(m, dist: float, spd: float) -> bool:
+	if dist < B3Modes.SIEGE_NEAR:
+		return false
+	var kp: Vector3 = m.keep_pos
+	var to := _flat(kp - position)
+	var d := to.length()
+	var dir := to / maxf(d, 0.001)
+	var stand := B3Modes.KEEP_R + radius + (0.6 if not flying else 3.0)
+	if d > stand:
+		want = dir * spd
+		if String(wpn.type) == "melee" or dist == INF:
+			look = Vector3.ZERO
+		return true
+	if flying:
+		want = Vector3(-dir.z, 0, dir.x) * speed * 0.5      # round and round it
+		return true
+	want = Vector3.ZERO
+	look = dir
+	if cd <= 0.0 and act == "" and _facing_ok(dir) and String(def.body) != "vehicle":
+		_start_act("attack", clampf(float(melee.cd) * 0.6, 0.25, 0.75), melee)
+		cd = float(melee.cd)
 	return true
 
 
@@ -601,11 +686,11 @@ func _decide(dt: float) -> void:
 		return
 	if target == null or not is_instance_valid(target) or target.down or target.dead:
 		target = null
-		if pers == "defend":
-			_go_home()
-		elif _hill_pull(INF, speed):
+		if _hill_pull(INF, speed):
 			want = _safe(want + sep * speed * 0.9)
 			_unstick(dt)
+		elif pers == "defend":
+			_go_home()
 		elif battle.enemies_left(self):
 			_wander(dt, 0.25)
 		return
@@ -626,9 +711,12 @@ func _decide(dt: float) -> void:
 		# 🚩 off to the hill (or holding it), shooting anyone in range on the way
 		want = _safe(want + sep * speed * 0.9)
 		_unstick(dt)
-		if dist <= reach and cd <= 0.0 and act == "" and _facing_ok(dir) and _volley_ok(w):
+		if dist <= reach and cd <= 0.0 and act == "" and _facing_ok(dir) and _volley_ok(w) and _shot_clear(w):
+			_hacking = false
 			_attack(w)
 		return
+	if not ranged and _hack != null and _high_above(target, position) and _chop(dt, w, spd):
+		return      # 🪓 can't reach it up there: chop the tower's legs
 	if not ranged and dist < 7.0 and String(def.body) == "rider" and _bayonet_wall(target):
 		# horses shy away from a hedge of bayonets: ride round it instead
 		var round_dir := Vector3(-dir.z, 0, dir.x) * (1.0 if uid % 2 == 0 else -1.0)
@@ -640,15 +728,24 @@ func _decide(dt: float) -> void:
 		# charge in, shooting on the way
 		if dist > maxf(3.0, reach * 0.4):
 			want = dir * spd
+		if _los_blocked():
+			want = _flank(dir, spd)       # a wall in the way of the rocket: go round it
 	elif ranged:
 		var near := maxf(3.5, reach * 0.35)
-		if dist > reach * 0.9:
+		if _cover_on:
+			# 🧱 under fire: get behind the sandbags (or low wall) and shoot from there
+			var tc := _flat(_cover - position)
+			if tc.length() > 0.45:
+				want = tc.normalized() * spd
+		elif dist > reach * 0.9:
 			want = dir * spd
 		elif dist < near and pers != "defend":
 			want = -dir * spd * 0.75
 		else:
 			var side := Vector3(-dir.z, 0, dir.x)
 			want = side * sin(battle.time * 0.7 + uid) * 0.6
+		if _los_blocked():
+			want = _flank(dir, spd)
 	else:
 		if dist > reach * 0.8:
 			want = dir * spd
@@ -663,10 +760,15 @@ func _decide(dt: float) -> void:
 		if off.length() > guard_radius() + 1.5 and dist > reach:
 			_go_home()
 			return
+	if _form != "" and dist > 6.0:
+		# 🛡️ a shield wall or a musket line: keep in a loose line with the mates
+		want = want * _form_k + _form_v * speed * 0.7
 	want += sep * speed * 0.9
 	want = _safe(want)
 	_unstick(dt)
-	if dist <= reach and cd <= 0.0 and act == "" and _facing_ok(dir) and _volley_ok(w):
+	if dist <= reach and cd <= 0.0 and act == "" and _facing_ok(dir) and _volley_ok(w) and _shot_clear(w) \
+			and (ranged or not _high_above(target, position)):
+		_hacking = false
 		_attack(w)
 
 
@@ -693,6 +795,261 @@ func _volley_ok(w: Dictionary) -> bool:
 	return fposmod(battle.time + float(absi(team.hash()) % 97) * 0.31, period) < 0.8
 
 
+# ------------------------------------------------------------------ tactics
+## The thinking behind keeping in line, taking cover and chopping a tower
+## down (B3Unit._think, every quarter second or so). Each part is only for
+## the fighters that do it, and the searches are spread out in time.
+func _tactics() -> void:
+	if target == null or not is_instance_valid(target) or player:
+		_cover_on = false
+		_form_v = Vector3.ZERO
+		_form_k = 1.0
+		_hack = null
+		return
+	if _form != "":
+		_formation()
+	if _wants_cover():
+		_seek_cover()
+	elif _cover_on:
+		_cover_on = false
+	# 🪓 an enemy up on a tower that a sword can't reach: chop its legs
+	var melee_only := String(wpn.type) == "melee" or pers == "berserk"
+	if melee_only and not flying and not target.flying and String(def.body) != "vehicle" and _high_above(target, position) \
+			and _flat(target.position - position).length() < 9.0:
+		if _hack == null or not is_instance_valid(_hack) or _hack.is_queued_for_deletion():
+			_hack = _find_hack()
+	else:
+		_hack = null
+
+
+## 🛡️ Shield walls and musket lines (_form) keep a loose line while they
+## advance: no closer than FORM_GAP to a mate (_form_v pushes apart), and
+## nobody running far ahead or lagging behind the mates around it (_form_k).
+## In the thick of the fight (closer than 6 m) it's every one for themselves.
+func _formation() -> void:
+	_form_v = Vector3.ZERO
+	_form_k = 1.0
+	var my := position
+	var tx := target.position.x - my.x
+	var tz := target.position.z - my.z
+	var dist := sqrt(tx * tx + tz * tz)
+	if dist < 6.0:
+		return
+	tx /= dist
+	tz /= dist
+	var sx := 0.0
+	var sz := 0.0
+	var along := 0.0
+	var n := 0
+	for u: B3Unit in battle.units_near(my, FORM_R):
+		if u == self or u.down or u.dead or u.team != team or u._form != _form:
+			continue
+		var dx := u.position.x - my.x
+		var dz := u.position.z - my.z
+		var d2 := dx * dx + dz * dz
+		if d2 > FORM_R * FORM_R or d2 < 0.0001:
+			continue
+		n += 1
+		along += dx * tx + dz * tz
+		if d2 < FORM_GAP * FORM_GAP:
+			var d := sqrt(d2)
+			var push := (FORM_GAP - d) / FORM_GAP
+			sx -= dx / d * push
+			sz -= dz / d * push
+	if n == 0:
+		return
+	along /= n
+	if along < -1.0:
+		_form_k = 0.55          # ahead of the line: wait for the others
+	elif along > 1.5:
+		_form_k = 1.15          # behind it: catch up
+	_form_v = Vector3(sx, 0.0, sz).limit_length(1.0)
+
+
+## 🧱 Shooters (not the musket lines, which stand in their ranks) that are
+## being shot at look for cover.
+func _wants_cover() -> bool:
+	return _fire_t < 2.5 and not heals and (pers == "ranged" or pers == "defend") and String(def.body) == "human" \
+		and String(wpn.type) != "melee" and _form != "line" and not flying
+
+
+## 🧱 Under fire: the nearest spot behind sandbags, a crate or a low wall
+## (cover_points), on the far side from the enemy, that's no more than
+## COVER_R away and still in range of it. It looks again at most once a second.
+func _seek_cover() -> void:
+	var reach := _reach(wpn, target) * 0.95
+	if _cover_on and _flat(target.position - _cover).length() > reach:
+		_cover_on = false       # the enemy's moved out of range of it
+	var now: float = battle.time
+	if now < _cover_next:
+		return
+	_cover_next = now + 1.0
+	var pts := cover_points(battle)
+	var threat := target.position
+	var best := Vector3.ZERO
+	var bd := COVER_R
+	var found := false
+	var gr := guard_radius() + 1.0
+	for p in pts:
+		if absf(p.x - position.x) > COVER_R or absf(p.z - position.z) > COVER_R:
+			continue
+		var ax := p.x - threat.x
+		var az := p.z - threat.z
+		var al := sqrt(ax * ax + az * az)
+		if al < 1.0:
+			continue
+		var off := p.y + radius + 0.3
+		var spot := Vector3(p.x + ax / al * off, p.w, p.z + az / al * off)
+		var d := _flat(spot - position).length()
+		if d >= bd or _flat(threat - spot).length() > reach:
+			continue
+		if pers == "defend" and _flat(spot - home).length() > gr:
+			continue
+		bd = d
+		best = spot
+		found = true
+	_cover_on = found
+	if found:
+		_cover = best
+
+
+## Every bit of low cover on the field, worked out at most every 2 seconds
+## and shared by everyone: [x, half its thickness, z, ground height] for each
+## sandbag, crate and building piece from knee to shoulder high (sandbags,
+## low walls, earthworks, blocks). Posts, stakes, rails, ramps and tall walls
+## don't count.
+static func cover_points(b) -> PackedVector4Array:
+	var t: float = b.time
+	if b.has_meta("ai_cover") and absf(t - float(b.get_meta("ai_cover_t", -99.0))) < 2.0:
+		return b.get_meta("ai_cover")
+	var pts := PackedVector4Array()
+	var w: B3World = b.world
+	for s: B3Struct in b.structs:
+		if not is_instance_valid(s):
+			continue
+		for pc in s.pieces:
+			if not is_instance_valid(pc) or pc.wedge or maxf(pc.size.x, pc.size.z) < 0.5 or minf(pc.size.x, pc.size.z) < 0.3:
+				continue
+			var bx := pc.world_aabb()
+			var c := bx.get_center()
+			var gy := w.height_at(c.x, c.z)
+			var top := bx.end.y - gy
+			if bx.position.y > gy + 0.5 or top < 0.6 or top > 1.7:
+				continue
+			pts.append(Vector4(c.x, minf(bx.size.x, bx.size.z) * 0.5, c.z, gy))
+	for p: B3Prop in b.props:
+		if is_instance_valid(p) and (p.kind == "sandbag" or p.kind == "crate") and not p.is_queued_for_deletion():
+			var q := p.global_position
+			pts.append(Vector4(q.x, 0.4, q.z, w.height_at(q.x, q.z)))
+	b.set_meta("ai_cover", pts)
+	b.set_meta("ai_cover_t", t)
+	return pts
+
+
+## Rockets blow up on the first wall in the way: only fire one with a clear
+## shot (see clear_shot). Other weapons don't need to look.
+func _shot_clear(w: Dictionary) -> bool:
+	if String(w.get("proj", "")) != "rocket" or target == null or not is_instance_valid(target):
+		return true
+	return clear_shot(_muzzle_pos(), target, float(w.get("radius", 3.0)))
+
+
+## True if nothing solid (a wall, a building, a hill) is between `from` and
+## `u` for an exploding shot with blast radius `blast`: a wall right next to
+## `u` is fine, the blast still gets it. It looks along the shot at most every
+## LOS_EVERY seconds per enemy, and remembers the answer in between.
+func clear_shot(from: Vector3, u: B3Unit, blast: float) -> bool:
+	var now: float = battle.time
+	if u.uid == _los_uid and now - _los_t < LOS_EVERY and now >= _los_t:
+		return _los_ok
+	_los_uid = u.uid
+	_los_t = now
+	var aim := u.center()
+	var hit: Dictionary = battle.raycast(from, aim, B3Defs.L_TERRAIN | B3Defs.L_STRUCT)
+	_los_ok = hit.is_empty() or (hit.position as Vector3).distance_to(aim) < blast * 0.6
+	return _los_ok
+
+
+## It just found a wall between it and its enemy (clear_shot), so it moves to
+## get a clear shot instead of firing into the wall.
+func _los_blocked() -> bool:
+	return not _los_ok and target != null and is_instance_valid(target) and target.uid == _los_uid \
+		and battle.time - _los_t < 1.5 and battle.time >= _los_t
+
+
+## Round the side of whatever's in the way (and a little closer).
+func _flank(dir: Vector3, spd: float) -> Vector3:
+	var side := Vector3(-dir.z, 0, dir.x) * (1.0 if uid % 2 == 0 else -1.0)
+	return (side + dir * 0.4).normalized() * spd * 0.85
+
+
+## 🪓 The piece of the building its enemy stands on to chop at: the one
+## nearest to it that it can reach from the ground (a tower's leg).
+func _find_hack() -> B3Piece:
+	var tp := target.position
+	var hit: Dictionary = battle.raycast(tp + Vector3(0, 0.4, 0), tp - Vector3(0, 8.0, 0), B3Defs.L_STRUCT)
+	if hit.is_empty() or not (hit.collider is B3Piece):
+		return null
+	var st: Variant = (hit.collider as B3Piece).structure
+	if st == null or not is_instance_valid(st) or not (st is B3Struct):
+		return null
+	var best: B3Piece = null
+	var bd := INF
+	var foot := position.y
+	for pc in (st as B3Struct).pieces:
+		if not is_instance_valid(pc) or pc.is_queued_for_deletion():
+			continue
+		var bx := pc.world_aabb()
+		if bx.position.y > foot + 1.2 or bx.end.y < foot + 0.4:
+			continue      # (not something it can hit standing here)
+		var c := bx.get_center()
+		var d := Vector2(c.x - position.x, c.z - position.z).length()
+		if d < bd:
+			bd = d
+			best = pc
+	return best
+
+
+## 🪓 Walks up to the tower's leg and hacks at it (the swing lands in
+## _melee_hit). False if there's nothing to chop.
+func _chop(dt: float, w: Dictionary, spd: float) -> bool:
+	if not is_instance_valid(_hack) or _hack.is_queued_for_deletion():
+		_hack = null
+		return false
+	var c := _hack.world_aabb().get_center()
+	var to := _flat(c - position)
+	var d := to.length()
+	var dir := to / maxf(d, 0.001)
+	var half := maxf(_hack.size.x, _hack.size.z) * 0.5
+	look = dir
+	if d > radius + half + 0.5 + float(w.range) * size * 0.4:
+		want = _safe(dir * spd + sep * speed * 0.9)
+		_unstick(dt)
+		return true
+	want = sep * speed * 0.5
+	if cd <= 0.0 and act == "" and _facing_ok(dir):
+		_attack(melee)
+		_hacking = true
+	return true
+
+
+## A chop at building piece `pc`: chips of wood fly, and enough of them
+## bring it down (B3Battle.break_piece; anything left floating falls).
+func _hit_piece(pc: B3Piece, dmg: float) -> void:
+	pc.hp -= dmg
+	var at := pc.world_aabb().get_center()
+	at.y = minf(at.y, position.y + aim_y)
+	battle.fx.dust(at, 0.4)
+	battle.snd("chop", at, 0.6)
+	if pc.hp <= 0.0:
+		# it topples over in one piece (chopped through), and whatever it held up falls
+		var st: Variant = pc.structure
+		battle.break_piece(pc, (_flat(pc.global_position - position).normalized() + Vector3.UP * 0.3) * 3.0, true)
+		if st is B3Struct and is_instance_valid(st):
+			battle._settle_soon(st as B3Struct)
+		_hack = null
+
+
 func _flat(v: Vector3) -> Vector3:
 	return Vector3(v.x, 0.0, v.z)
 
@@ -709,7 +1066,14 @@ func _reach(w: Dictionary, u: B3Unit) -> float:
 	var r := float(w.range)
 	if String(w.type) == "melee":
 		return radius + u.radius + r * size * 0.6
-	return r
+	return r * (1.0 + 0.2 * _high_k(u))
+
+
+## ⛰️ Shooting down from up high (a tower, a hilltop): 0 on the level, up to 1
+## from 5 m or more above `u`. It shoots up to a fifth further (_reach) and
+## steadier (_fire_gun, _shoot_proj) from up there.
+func _high_k(u: B3Unit) -> float:
+	return clampf((position.y - u.position.y - 1.0) / 4.0, 0.0, 1.0)
 
 
 func _facing_ok(dir: Vector3) -> bool:
@@ -855,6 +1219,7 @@ func _start_act(a: String, length: float, w: Dictionary) -> void:
 func _attack(w: Dictionary) -> void:
 	var ty := String(w.type)
 	var bers := pers == "berserk"
+	_hacking = false      # (a chop at a tower's leg sets it again: _chop)
 	match ty:
 		"melee":
 			_start_act("attack", clampf(float(w.cd) * 0.6, 0.25, 0.75), w)
@@ -934,6 +1299,11 @@ func _melee_hit(w: Dictionary) -> void:
 	var dmg := float(w.dmg)
 	var knock := float(w.knock)
 	battle.snd(String(w.snd), position, 0.8 if size < 1.5 else 1.0)
+	if _hacking:
+		_hacking = false
+		if _hack != null and is_instance_valid(_hack) and not _hack.is_queued_for_deletion():
+			_hit_piece(_hack, dmg * (size if String(def.body) == "human" else 1.0))
+		return
 	if w.has("aoe"):
 		var fwd := forward()
 		var reach := float(w.range) * (size if String(def.body) == "human" else 1.0)
@@ -1051,6 +1421,7 @@ func _fire_gun(w: Dictionary) -> void:
 	var s := float(w.get("spread", 0.03))
 	if player and B3Player.steady(self, ctl):
 		s *= 0.1      # a sniper you're holding steady (right-click)
+	s *= 1.0 - 0.45 * _high_k(target)      # ⛰️ steadier shooting down from up high
 	dir = (dir + Vector3(rng.randf_range(-s, s), rng.randf_range(-s, s) * 0.6, rng.randf_range(-s, s))).normalized()
 	var to := from + dir * (float(w.range) * 1.4)
 	var hit := shot_ray(from, to)
@@ -1118,7 +1489,8 @@ func _shoot_proj(w: Dictionary) -> void:
 		var flat := _flat(aim - from)
 		var tt := maxf(flat.length() / sp, 0.15)
 		vel = B3Proj.lob(from, aim, tt, kind_s)
-		vel += Vector3(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.3, 0.3), rng.randf_range(-0.5, 0.5))
+		var wob := 1.0 - 0.45 * _high_k(target)      # ⛰️ steadier from up high
+		vel += Vector3(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.3, 0.3), rng.randf_range(-0.5, 0.5)) * wob
 	else:
 		# rockets and fireballs fly nearly straight: aim a little high for the
 		# sag on the way (fireballs don't sag)
@@ -1260,10 +1632,14 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 	dmg = maxf(dmg, 0.0) / battle.r_tough      # Battle Rules: toughness and knockback (a hit never heals)
 	knock *= battle.r_knock
 	if down:
-		hp -= dmg * (1.0 - armor)
+		var dd := dmg * (1.0 - armor)
+		hp -= dd
+		if dd > 0.0:
+			battle.player_hit(by, self)      # (finishing off a downed enemy shows the hit marker too)
 		if ragdoll and is_instance_valid(ragdoll):
 			ragdoll.push(dir * knock / stab * 0.6)
 		if hp <= 0.0:
+			_credit_ko(by)
 			_die(by)
 		return
 	if def.has("dodge") and how != "blast" and how != "fire" and rng.randf() < float(def.dodge):
@@ -1287,6 +1663,8 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 	hp -= d
 	battle.player_hit(by, self)      # first-person hit marker, if it was you
 	hurt_t = 0.0
+	if how == "shot" or how == "blast":
+		_fire_t = 0.0      # (under fire: shooters look for cover)
 	if rig:
 		rig.flash()
 	if d >= 1.0:
@@ -1299,8 +1677,7 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 		battle.snd("oof%d" % (rng.randi() % 3 + 1), position, 0.6)
 	var kv := knock / stab
 	if hp <= 0.0:
-		if by and is_instance_valid(by):
-			by.kills += 1
+		_credit_ko(by)
 		_ko(dir * maxf(kv, 3.0) + Vector3.UP * 2.0, by)
 		return
 	if kv > LAUNCH:
@@ -1312,6 +1689,15 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 		stun_t = maxf(stun_t, 0.1 + kv * 0.04)
 		if String(def.body) == "human" and d > 8.0 and rng.randf() < 0.25:
 			battle.snd("oof%d" % (rng.randi() % 3 + 1), position, 0.5)
+
+
+## `by` knocked this one out: a knock-out for it, if it's an enemy. Knocking
+## out a teammate (🤝 Blasts hurt teammates) or yourself (your own grenade)
+## doesn't count. B3Battle.on_unit_ko adds it to its team's and the 🏆
+## scoreboard's (by the same test).
+func _credit_ko(by: B3Unit) -> void:
+	if by != null and is_instance_valid(by) and by != self and by.is_enemy(self):
+		by.kills += 1
 
 
 func _ko(vel: Vector3, by: B3Unit) -> void:
@@ -1461,8 +1847,8 @@ func _process(dt: float) -> void:
 	var mood := ""
 	if cheer:
 		mood = "cheer"
-	elif burn_t > 0.0:
-		mood = "flail"
+	elif burn_t > 0.0 or (routed and _spd >= 0.6):
+		mood = "flail"      # (on fire, or running off with its arms waving: 🏳️ its King fell)
 	elif fleeing and _spd < 0.6 and battle.fighting:
 		mood = "cower"
 	var aiming: bool = battle.fighting and target != null and String(wpn.type) != "melee" and pers != "berserk" and not fleeing and not cheer

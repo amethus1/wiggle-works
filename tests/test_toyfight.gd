@@ -8,6 +8,7 @@ extends Node
 var fails := 0
 var w: World
 var events := {}
+var fxv: Effects
 
 
 func check(cond: bool, msg: String) -> void:
@@ -59,6 +60,7 @@ func _ready() -> void:
 	var fx := Effects.new()
 	fx.world = w
 	add_child(fx)
+	fxv = fx
 	w.fx.connect(fx.handle)
 	w.fx.connect(_count)
 	w.load_world("canvas", false)
@@ -75,6 +77,9 @@ func _ready() -> void:
 	await _heavy_things()
 	await _friends_screens()
 	await _lying_still()
+	await _review_fixes()
+	await _combos()
+	await _juice()
 	await _speed()
 
 	print("test_toyfight: %d failure(s)" % fails)
@@ -524,6 +529,7 @@ func _heavy_things() -> void:
 
 	await fresh()
 	w.battle_on = false
+	seed(3)   # (now and then a truck stalls on the pile it makes: the same run every time)
 	var row: Array[Fighter] = []
 	for i in 4:
 		row.append(w.spawn_fighter("soldier", Vector2(i * 70, 150), "red", "peaceful"))
@@ -593,7 +599,9 @@ func _lying_still() -> void:
 	await frames(120)
 	check(a.center().y < ya - 40.0, "the saucer's beam still lifts one lying still (%.0f px up)" % (ya - a.center().y))
 	saucer.on = false
-	var mag := w.spawn_toy("magnet", b.center() + Vector2(250, -10))
+	# (close enough to pull hard: 250 px away, a knight lying on its face
+	# barely slid in one try out of three, frozen or not)
+	var mag := w.spawn_toy("magnet", b.center() + Vector2(180, -10))
 	mag.on = true
 	mag.nailed = true
 	mag.update_freeze()
@@ -674,3 +682,262 @@ class _StepClock extends Node:
 		if _t0 >= 0:
 			steps.append((Time.get_ticks_usec() - _t0) / 1000.0)
 			_t0 = -1
+
+
+func _review_fixes() -> void:
+	print("🔧 fire on wet fighters, ice and trucks, toys on ragdolls, the saucer")
+	await fresh()
+	w.battle_on = false
+	var soaked := dummy("soldier", 0)
+	await frames(30)
+	soaked.wet = 1.0
+	w.fires.append({"p": soaked.center(), "r": 150.0, "t": 7.0})
+	await frames(2)
+	check(soaked.wet > 0.9 and soaked.burning <= 0.0, "a soaked soldier standing in a fire doesn't dry off in a couple of steps (wet %.2f)" % soaked.wet)
+	await frames(60)
+	check(soaked.burning <= 0.0 and int(events.get("steam", 0)) <= 3, "it steams a while, a few puffs, not one every step (%d puffs)" % int(events.get("steam", 0)))
+	var caught: bool = await wait_for(func(): return soaked.burning > 0.0, 3.0)
+	check(caught, "then dries off and catches fire")
+
+	await fresh()
+	w.battle_on = false
+	var ice := dummy("soldier", 250)
+	await frames(40)
+	ice.set_frozen(4.0)
+	var truck := Builders.ride(w, "monster_truck", Vector2(-250, 200))
+	await frames(30)
+	w.apply_command(0, {"cmd": "use", "uid": truck.uid})
+	var smashed: bool = await wait_for(func(): return ice.frozen_t <= 0.0, 3.5)
+	check(smashed and int(events.get("ice_smash", 0)) >= 1, "a driving monster truck smashes a frozen soldier's ice into chunks")
+	check(ice.alive() and ice.state != "stand", "and bowls them over the bonnet")
+	await fresh()
+	w.battle_on = false
+	var ice2 := dummy("chicken", 0, "wild")
+	var kart := Builders.ride(w, "go_kart", Vector2(-150, 240))
+	await frames(100)   # (the chicken lands first: frozen in mid-air, the kart would drive under it)
+	w.apply_command(0, {"cmd": "use", "uid": kart.uid})
+	ice2.set_frozen(4.0)
+	var cracked: bool = await wait_for(func(): return ice2.frozen_t <= 0.0, 3.8)   # (the ice would pop by itself at 4 s)
+	check(cracked, "even a go-kart's light wheels crack a frozen chicken out (they touch first)")
+
+	await fresh()
+	w.battle_on = false
+	var down := w.spawn_fighter("soldier", Vector2(0, 150), "red", "peaceful")
+	await frames(40)
+	down.ragdoll(Vector2.ZERO)
+	await frames(60)
+	var hp0 := down.hp
+	var steel := w.spawn_toy("steel_ball", down.center() + Vector2(-160, -160))
+	steel.set_size(2.0)
+	steel.gravity_scale = 0.0
+	steel.linear_velocity = Vector2(850, 850)
+	await frames(30)
+	check(hp0 - down.hp > 8.0 and hp0 - down.hp <= 40.0, "a heavy ball hitting someone already knocked down hurts like it would standing up (%.0f, not 4 at most)" % (hp0 - down.hp))
+
+	await fresh()
+	w.battle_on = false
+	var ufo := w.spawn_toy("saucer", Vector2(0, -60))
+	ufo.nailed = true
+	ufo.update_freeze()
+	var cell := w.spawn_toy("battery", Vector2(-300, 280))
+	await frames(5)
+	w.add_link("wire", cell, ufo, cell.global_position, ufo.global_position)
+	var rider := dummy("stick", 0, "red", 150.0)
+	await frames(40)
+	var ry := rider.center().y
+	await frames(120)
+	check(rider.center().y < ry - 100.0, "a nailed-down saucer wired to a battery beams people up (it used to need Use, and nailing broke it) (%.0f px up)" % (ry - rider.center().y))
+
+
+## A wide pool of water (floor, walls and water) from x0 to x1, its floor at y.
+func _pool(x0: float, x1: float, y: float, depth := 110.0) -> void:
+	w.apply_command(0, {"cmd": "platform", "x0": x0 - 20, "y0": y, "x1": x1 + 20, "y1": y + 20})
+	w.apply_command(0, {"cmd": "platform", "x0": x0 - 20, "y0": y - depth - 20, "x1": x0, "y1": y})
+	w.apply_command(0, {"cmd": "platform", "x0": x1, "y0": y - depth - 20, "x1": x1 + 20, "y1": y})
+	w.add_liquid(Rect2(x0, y - depth, x1 - x0, depth), "water", w.next_group)
+	w._cut_water()
+
+
+func _combos() -> void:
+	print("⚡ elemental combos: water and metal, trampolines, warps; 🦕 dinos; laser swords")
+	await fresh()
+	w.battle_on = false
+	_pool(-700.0, 700.0, 280.0)
+	var swimmers: Array[Fighter] = []
+	for x in [-550.0, 0.0, 550.0]:
+		swimmers.append(dummy("soldier", x, "red", 150.0))
+	var zappy := w.spawn_wiggly("zappy", Vector2(-660, 60))
+	zappy.player_id = 99
+	await frames(90)
+	zappy.use_special()
+	await frames(3)
+	check(swimmers.all(func(f): return f.stun_t > 0.0), "a Zappy zap at the edge of a pool runs through all the water: every soldier in it is zapped, even 1100 px away (%s)" % str(swimmers.map(func(f): return snappedf(f.stun_t, 0.1))))
+	check(int(events.get("zap_pool", 0)) >= 1, "with sparks all along the water")
+
+	await fresh()
+	w.battle_on = false
+	var beams: Array[Toy] = []
+	for i in 3:
+		var b := w.spawn_toy("metal_beam", Vector2(-80 + i * 160, 285))
+		b.nailed = true
+		b.update_freeze()
+		beams.append(b)
+	var walker := dummy("soldier", 240, "red", 150.0)
+	var bystander := dummy("soldier", 600, "red", 150.0)
+	var zap2 := w.spawn_wiggly("zappy", Vector2(-260, 200))
+	zap2.player_id = 99
+	await frames(90)
+	zap2.use_special()
+	await frames(3)
+	check(walker.stun_t > 0.0 and beams[2].electric > 0.0, "a zap runs along a row of touching metal beams into a soldier standing on the far end")
+	check(bystander.stun_t <= 0.0, "but not into someone standing on the ground nearby")
+
+	await fresh()
+	w.battle_on = false
+	var bloop := w.spawn_wiggly("bloop", Vector2(0, 230))
+	bloop.player_id = 99   # (keeps still)
+	await frames(90)
+	var jumper := dummy("soldier", bloop.com.x, "red", -250.0)
+	var touched := false
+	var top_after := INF
+	for i in 240:
+		await get_tree().physics_frame
+		if int(events.get("boing", 0)) > 0:
+			touched = true
+		if touched:
+			top_after = minf(top_after, jumper.center().y)
+	check(touched and top_after < bloop.com.y - 300.0, "a soldier dropping onto a Bloop bounces way back up: a living trampoline (up to %.0f px above it)" % (bloop.com.y - top_after))
+
+	await fresh()
+	w.battle_on = false
+	var tw := w.spawn_wiggly("twinkle", Vector2(0, 230))
+	tw.player_id = 99
+	var near := dummy("knight", 70, "blue", 150.0)
+	var far := dummy("knight", 700, "blue", 150.0)
+	await frames(90)
+	var y0 := near.center().y
+	var hp0 := near.hp
+	tw.use_special()
+	await frames(2)
+	check(near.center().y < y0 - 250.0 and far.center().y > y0 - 20.0, "Twinkle's warp sends a fighter right next to it high up into the air (%.0f px up), not one far away" % (y0 - near.center().y))
+	var up_again: bool = await wait_for(func(): return near.state == "stand" and near.grounded, 8.0)
+	check(up_again and near.hp > hp0 - 15.0, "who tumbles down and gets back up, hardly hurt (%.0f hp lost)" % (hp0 - near.hp))
+
+	await fresh()
+	w.battle_on = true
+	var ptero := w.spawn_fighter("ptero", Vector2(-500, -100), "wild", "attack")
+	var lunch := dummy("stick", 300, "red", 150.0)
+	var grabbed: bool = await wait_for(func(): return ptero.carrying == lunch, 12.0)
+	check(grabbed and int(events.get("snatch", 0)) >= 1, "a pterodactyl swoops down and snatches up a stick figure")
+	var high := INF
+	var y_grab := lunch.center().y
+	var dropped := false
+	for i in 120 * 4:
+		await get_tree().physics_frame
+		high = minf(high, lunch.center().y)
+		if ptero.carrying == null:
+			dropped = true
+			break
+	check(y_grab - high > 150.0, "and flies off up into the sky with it (%.0f px up)" % (y_grab - high))
+	check(dropped, "then lets go")
+	await fresh()
+	w.battle_on = true
+	var ptero2 := w.spawn_fighter("ptero", Vector2(-500, -100), "wild", "attack")
+	var rex := dummy("trex", 300, "red", 100.0)
+	var lifted_rex := false
+	for i in 120 * 6:
+		await get_tree().physics_frame
+		if ptero2.carrying != null:
+			lifted_rex = true
+	check(not lifted_rex and rex.state == "stand", "but a T-Rex is far too heavy to carry off")
+	w.battle_on = false
+
+	await fresh()
+	w.battle_on = true
+	var brachio := w.spawn_fighter("brachio", Vector2(0, 0), "wild", "")
+	var pest := w.spawn_fighter("soldier", Vector2(-450, 150), "red", "peaceful")
+	pest.max_hp = 99999.0
+	pest.hp = 99999.0
+	var calm_hp := pest.hp
+	await frames(120)
+	check(brachio.pers == "peaceful" and brachio.target == null and pest.hp == calm_hp, "a Brachiosaurus is gentle: it leaves a soldier alone")
+	pest.pers = "attack"
+	brachio.hurt(30.0, Vector2.ZERO, pest)
+	check(brachio.angry_t > 0.0 and brachio.target == pest and brachio.face() == "angry", "until somebody hurts it: then it gets angry")
+	var stomped: bool = await wait_for(func(): return pest.hp < calm_hp, 10.0)
+	check(stomped and int(events.get("angry", 0)) >= 1, "and stomps back at them")
+	pest.player_id = 0   # (holds its fire)
+	var calmed: bool = await wait_for(func(): return brachio.angry_t <= 0.0 and brachio.target == null, Fighter.ANGRY_FOR + 3.0)
+	pest.player_id = -1
+	check(calmed, "then calms down and is gentle again")
+	w.battle_on = false
+
+	await fresh()
+	w.battle_on = false
+	var jedi := dummy("knight", 0, "red", 150.0)
+	var sw := w.spawn_toy("laser_sword", jedi.center())
+	jedi.equip(sw)
+	jedi.facing = -1.0
+	var gunman := dummy("soldier", -500, "blue", 150.0)
+	gunman.max_hp = 100.0
+	gunman.hp = 100.0
+	await frames(40)
+	var jhp := jedi.hp
+	seed(5)
+	for i in 30:
+		Combat.shoot(w, gunman, gunman.center() + Vector2(20, -20), (jedi.center() - gunman.center() - Vector2(20, -20)).angle(), 900.0, 10.0, 60.0)
+	var pings := int(events.get("deflect", 0))
+	check(pings >= 10 and pings < 30, "a laser sword bats bullets away (%d of 30)" % pings)
+	check(jhp - jedi.hp < 30 * 10.0 * 0.75 and gunman.hp < 100.0, "the knight takes fewer hits, and some go back and hit the shooter (shooter hp %.0f)" % gunman.hp)
+	jedi.facing = 1.0
+	events.erase("deflect")
+	for i in 10:
+		Combat.shoot(w, gunman, gunman.center() + Vector2(20, -20), (jedi.center() - gunman.center() - Vector2(20, -20)).angle(), 900.0, 10.0, 60.0)
+	check(int(events.get("deflect", 0)) == 0, "but not from behind")
+
+
+func _juice() -> void:
+	print("✨ swooshes, jolts, hitstop and night lights")
+	await fresh()
+	w.battle_on = true
+	var a := w.spawn_fighter("viking", Vector2(-60, 150), "red", "attack")
+	var b := dummy("knight", 40, "blue", 150.0)
+	var swooshed: bool = await wait_for(func(): return not fxv.slashes.is_empty(), 4.0)
+	check(swooshed, "a sword swing draws a swoosh in front of the fighter")
+	w.battle_on = false
+	await fresh()
+	fxv.kick = Vector2.ZERO
+	ToyLogic.boom(w, Vector2(fxv.view_rect.get_center().x + 400.0, 250), 260.0, 1500.0, false)
+	await frames(4)
+	await get_tree().process_frame
+	check(fxv.kick.x > 0.5, "a blast to the right jolts the screen toward it (%.1f px)" % fxv.kick.x)
+	fxv.hitstop_ok = true
+	Engine.time_scale = 1.0
+	fxv.hitstop(0.05)
+	var stopped := Engine.time_scale < 0.5
+	var t0 := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - t0 < 200:
+		await get_tree().process_frame
+	check(stopped and is_equal_approx(Engine.time_scale, w.time_scale), "hitstop stops the game for a blink, then carries on")
+	fxv.hitstop_ok = false
+	Engine.time_scale = 1.0
+
+	await fresh()
+	w.set_night(true)
+	Builders.tub(w, "lava_tub", Vector2(0, 300))
+	var z := w.spawn_wiggly("zappy", Vector2(-150, 200))
+	z.player_id = 99
+	w.spawn_toy("laser_sword", Vector2(300, 250))
+	var torch := dummy("soldier", 500, "red", 150.0)
+	torch.burning = 5.0
+	for i in 6:
+		await get_tree().process_frame
+	var nl: Node = w.get_node("NightLights")
+	var lit: int = nl.get_children().filter(func(l): return l is PointLight2D and l.visible).size()
+	check(lit >= 4, "at night, lava, a Zappy, a laser sword and a fighter on fire light up the dark (%d lights)" % lit)
+	w.set_night(false)
+	for i in 4:
+		await get_tree().process_frame
+	lit = nl.get_children().filter(func(l): return l is PointLight2D and l.visible).size()
+	check(lit == 0, "and by day they're off")
+

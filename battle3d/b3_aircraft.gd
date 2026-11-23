@@ -61,6 +61,7 @@ var _snd_t := 0.0
 var _hv_last := Vector3.ZERO
 var _lifting := false
 var _next_bomb := false
+var _ejected := false           # 🪂 the crew have bailed out (shot down: _eject)
 
 
 func setup(b, k: String, t: String, p: String, seed_: int) -> void:
@@ -406,11 +407,14 @@ func _edge_push(w: Vector3) -> Vector3:
 
 # -------------------------------------------------------------------- brain
 ## Planes go after enemy aircraft first (dogfights); helicopters would
-## rather shoot at things on the ground (planes are hard to hit).
+## rather shoot at things on the ground (planes are hard to hit). One look
+## at everyone: not B3Unit._think as well, whose pick (by distance across the
+## ground) this would only throw away, and whose keeping apart from
+## neighbours (`sep`) aircraft don't use. (A peaceful one never goes after
+## anyone, but its gun still turns to the enemy it would pick.)
 func _think() -> void:
-	super._think()
-	if pers == "peaceful":
-		return
+	sep = Vector3.ZERO
+	ally = null
 	var best: B3Unit = null
 	var bs := 1e18
 	var gr := guard_radius()
@@ -429,7 +433,10 @@ func _think() -> void:
 		if s < bs:
 			bs = s
 			best = u
-	target = best
+	if best != target:
+		target = best
+		if target and voice_t <= 0.0 and pers != "peaceful":
+			_voice()
 
 
 func guard_radius() -> float:
@@ -731,6 +738,8 @@ func _ko(vel: Vector3, by: B3Unit) -> void:
 ## something it crashes and blows apart.
 func _fall_tick(dt: float) -> void:
 	_fall_t += dt
+	if not _ejected and _fall_t > 0.3:
+		_eject()
 	_sync_facing()
 	if plane:
 		pitch = move_toward(pitch, -0.95, dt * 0.55)
@@ -767,7 +776,39 @@ func _fall_tick(dt: float) -> void:
 		_crash()
 
 
+## 🪂 Shot down: the crew bail out under little parachutes in the team
+## colour (B3Fx.chute, just for show: they drift down, land and vanish in a
+## puff) and the cockpit is empty after.
+func _eject() -> void:
+	_ejected = true
+	var n := 1 if plane else 2
+	var vr := rig as B3VRig
+	if vr and not vr.crew.is_empty():
+		n = clampi(vr.crew.size(), 1, 2)
+	_hide_crew()
+	var col := B3Defs.team_col(team) if team != "wild" else Color("8a7a52")
+	var f := forward()
+	var side := Vector3(-f.z, 0.0, f.x)
+	var c := center()
+	for i in n:
+		var s := 0.0 if n == 1 else (1.0 if i == 0 else -1.0)
+		var at := c + Vector3(0, 0.9, 0) + side * s * 0.7
+		var v := Vector3(linear_velocity.x, 0.0, linear_velocity.z) * 0.3 + Vector3.UP * 8.5 + side * s * 2.5
+		battle.fx.chute(at, v, col)
+	battle.snd("eject", c, 0.8)
+
+
+func _hide_crew() -> void:
+	var vr := rig as B3VRig
+	if vr:
+		for cm in vr.crew:
+			if is_instance_valid(cm):
+				cm.visible = false
+
+
 func _crash() -> void:
+	if not _ejected:
+		_eject()      # (it hit something straight away: they pop out of the wreck)
 	var v := linear_velocity
 	var k: B3Unit = _killer if _killer != null and is_instance_valid(_killer) else null
 	battle.shake(0.5, position)
@@ -900,6 +941,11 @@ func apply_net_state(a: Array) -> void:
 
 
 func _puppet_fx(dt: float) -> void:
+	if falling and not _ejected:
+		_fall_t += dt
+		if _fall_t > 0.3:
+			_ejected = true
+			_hide_crew()      # (the host's 🪂 parachutes come over as effects)
 	if falling and not _fx_remote():
 		_trail_t -= dt
 		if _trail_t <= 0.0:

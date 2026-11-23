@@ -101,6 +101,34 @@ func _ready() -> void:
 
 	check(await wait_for(func(): return friend.net.players.size() == 2, 2.0), "both players show in the player list")
 
+	# 💫 knocked out on the host: knocked out on the friend's screen too, and the friend's 💖 Revive works
+	soldier.hurt(99999.0, Vector2(0, -50))
+	check(await wait_for(func(): return fs is Fighter and not fs.alive() and fs.state == soldier.state, 3.0),
+		"a fighter knocked out on the host is knocked out on the friend's screen (%s)" % (fs.state if fs is Fighter else "?"))
+	friend.select(soldier.uid)
+	friend.hud.refresh_selection()
+	check(not soldier.alive() and String(friend.hud.sel_name.text).contains("KO'd"), "and the friend's info bar says KO'd (%s)" % friend.hud.sel_name.text)
+	friend.send({"cmd": "revive", "uid": soldier.uid})
+	check(await wait_for(func(): return soldier.alive(), 2.0), "💖 a friend's Revive gets the host's fighter back up")
+	check(await wait_for(func(): return fs.alive() and String(fs.state) == "stand", 3.0), "and it's back up on the friend's screen too")
+	friend.select(-1)
+
+	# 👥 snapshots only carry what changed since the last one the friend got
+	var tx: NetDelta.Sender = host.net._tx
+	var rx: NetDelta.Receiver = friend.net._rx
+	var keys0: int = tx.keyframes
+	await wait_for(func(): return false, 0.5)
+	check(tx.keyframes == keys0 and rx.got > 5, "after joining, the friend gets just the changes (%d whole snapshots so far)" % tx.keyframes)
+	# all the friend's snapshots are lost: it can't use the next one, asks for a whole one and is right again
+	rx.hist.clear()
+	var moved_block: Toy = host.world.toys().filter(func(t): return t.id == "wood_block")[3]
+	moved_block.global_position += Vector2(0, -150)
+	check(await wait_for(func(): return tx.keyframes > keys0, 2.0), "when the friend loses track, the host sends a whole snapshot")
+	var pb = friend.world.things.get(moved_block.uid)
+	check(await wait_for(func(): return pb != null and pb.global_position.distance_to(moved_block.global_position) < 20.0, 2.0),
+		"and the friend's screen is right again (%.0f px off)" % (pb.global_position.distance_to(moved_block.global_position) if pb else -1.0))
+	check(_delta_recovers(), "NetDelta: lost snapshots are made up for by the next one, junk is thrown away")
+
 	# a broken (or naughty) copy of the game sends junk: the host ignores it
 	var my_id: int = friend.net.my_id
 	var n_things := host.world.things.size()
@@ -140,15 +168,43 @@ func _ready() -> void:
 	await wait_for(func(): return false, 0.4)
 	friend.send({"cmd": "spawn", "id": "beach_ball", "x": 0, "y": -100})
 	check(await wait_for(func(): return host.world.things.size() == n_before + added + 1, 1.5), "and a moment later spawning works again")
+	# a ready-made contraption is many toys: each one counts against the friend's spawning
+	await wait_for(func(): return false, 3.0)
+	var n_toys := host.world.things.size()
+	for i in 8:
+		friend.send({"cmd": "spawn", "id": "build:domino", "x": -600 + i * 20, "y": -400})
+	await wait_for(func(): return false, 0.6)
+	var dominos := host.world.things.size() - n_toys
+	check(dominos >= 12 and dominos <= 30, "🁢 eight Domino Runs at once from a friend: each domino counts, so only one or two are made (%d toys)" % dominos)
+
+	# a copy of the game that isn't the same version is told, kindly, on both sides
+	var odd := ENetMultiplayerPeer.new()
+	odd.create_client("127.0.0.1", NetCommon.PORT)
+	var omp := SceneMultiplayer.new()
+	omp.root_path = get_path()
+	omp.multiplayer_peer = odd
+	var said := [""]
+	omp.peer_packet.connect(func(_id: int, pkt: PackedByteArray):
+		var why: Variant = NetCommon.decode(pkt).get("why")
+		if why is String:
+			said[0] = why)
+	omp.connected_to_server.connect(func():
+		omp.send_bytes(NetCommon.encode({"m": "hello", "v": NetCommon.VERSION - 1, "name": "Old"}), 1, MultiplayerPeer.TRANSFER_MODE_RELIABLE, 0))
+	check(await wait_for(func():
+		omp.poll()
+		return said[0] != "", 3.0) and said[0] == NetCommon.WRONG_VERSION, "a friend with another version is told: %s" % said[0])
+	check(await wait_for(func(): return _toast_said(host, "different version"), 1.0), "and so is the host")
+	odd.close()
 
 	host.world.allow_world_actions = false
 	friend.send({"cmd": "clear"})
 	await get_tree().create_timer(0.5).timeout
 	check(host.world.things.size() > 5, "when the host locks it, a friend can't clear the world")
 
-	var snap := NetCommon.encode(NetCommon.snapshot(host))
-	print("        snapshot: %d bytes for %d things (%.0f KB/s at %d Hz)" % [snap.size(), host.world.things.size(), snap.size() * NetCommon.SNAP_HZ / 1024.0, int(NetCommon.SNAP_HZ)])
-	check(snap.size() < 24000, "snapshots stay small enough for Wi-Fi")
+	var snap: PackedByteArray = host.net._tx.packet(-1)
+	var change: PackedByteArray = host.net._tx.packet(host.net._tx.n - 1)
+	print("        snapshot: %d bytes whole, %d bytes of changes, for %d things" % [snap.size(), change.size(), host.world.things.size()])
+	check(snap.size() < 24000 and change.size() < snap.size(), "snapshots stay small enough for Wi-Fi")
 	check(NetCommon.decode(snap).get("m", "") == "snap", "and decode back")
 	check(NetCommon.decode(PackedByteArray([1, 255, 255, 255, 127, 9, 9])).is_empty(), "junk packets are ignored")
 
@@ -159,6 +215,21 @@ func _ready() -> void:
 	check(host.net.player_count() == 0, "the host notices when the friend leaves")
 	check(soldier.player_id == -1, "and the fighter they were playing gets its own brain back")
 	host.leave()
+
+	# 📡 the list of games on the Wi-Fi changes when a game's world or players do (and junk is tidied)
+	var lf := LanFinder.new()
+	var beacon := {"game": NetCommon.GAME_ID, "v": NetCommon.VERSION, "name": "Sam", "world": "canvas", "players": 1, "port": NetCommon.PORT}
+	check(lf.heard("10.0.0.5", beacon) and not lf.heard("10.0.0.5", beacon.duplicate()), "📡 a new game shows in the list (and the same one again changes nothing)")
+	var b2 := beacon.duplicate()
+	b2.players = 2
+	var b3 := b2.duplicate()
+	b3.world = "meadow"
+	check(lf.heard("10.0.0.5", b2) and lf.heard("10.0.0.5", b3) and int(lf.games["10.0.0.5"].players) == 2 and lf.games["10.0.0.5"].world == "meadow",
+		"and changes when a friend joins it or its world changes")
+	lf.heard("10.0.0.6", {"game": NetCommon.GAME_ID, "name": ["x"], "world": {}, "players": "lots"})
+	check(lf.games["10.0.0.6"].name == "Friend" and lf.games["10.0.0.6"].world == "" and int(lf.games["10.0.0.6"].players) == 1
+		and not lf.heard("10.0.0.7", "junk") and not lf.heard("10.0.0.7", {"game": "other-game"}), "📡 odd beacons are tidied up or ignored")
+	lf.free()
 
 	# the Play Together panel when another copy of the game is already listening for games
 	var blocker := PacketPeerUDP.new()
@@ -175,3 +246,50 @@ func _ready() -> void:
 	blocker.close()
 	print("test_net: %d failure(s)" % fails)
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+## True if a message with `txt` in it has popped up on `g`'s screen.
+func _toast_said(g, txt: String) -> bool:
+	for l in g.hud.find_children("*", "Label", true, false):
+		if String((l as Label).text).contains(txt):
+			return true
+	return false
+
+
+## NetDelta on its own: a whole snapshot, then just changes; lost ones made
+## up for by the next; one measured against a snapshot the friend never got
+## (or junk) is thrown away and a whole one asked for.
+func _delta_recovers() -> bool:
+	var tables := [["t", PackedInt32Array([NetDelta.STR | NetDelta.ONCE, NetDelta.V2, NetDelta.FIX16])]]
+	var tx := NetDelta.Sender.new(tables)
+	var rx := NetDelta.Receiver.new(tables)
+	var rows := func(xs: Array) -> Dictionary:
+		var l: Array = []
+		for i in xs.size():
+			l.append([i + 1, "ball", Vector2(xs[i], 0.0), 0.5])
+		return {"t": l}
+	tx.push(rows.call([0.0, 10.0, 20.0]), {"st": [1]})
+	var ok := rx.take(NetCommon.decode(tx.packet(-1)))
+	tx.push(rows.call([1.0, 10.0, 20.0]), {"st": [1]})
+	var small := tx.packet(rx.last)
+	ok = ok and rx.take(NetCommon.decode(small))
+	# two snapshots lost on the way (the friend never acks them)...
+	tx.push(rows.call([2.0, 10.0]), {"st": [2]})
+	tx.packet(rx.last)
+	tx.push(rows.call([3.0, 10.0, 25.0, 40.0]), {"st": [3]})
+	tx.packet(rx.last)
+	tx.push(rows.call([4.0, 11.0, 25.0, 40.0]), {"st": [3]})
+	ok = ok and rx.take(NetCommon.decode(tx.packet(rx.last)))
+	var snap := rx.snapshot()
+	var xs := {}
+	for e: Array in snap.t:
+		xs[int(e[0])] = (e[2] as Vector2).x
+	ok = ok and xs == {1: 4.0, 2: 11.0, 3: 25.0, 4: 40.0} and snap.st == [3]
+	# one measured against a snapshot the friend doesn't have, and junk: thrown away, a whole one asked for
+	tx.push(rows.call([5.0]), {"st": [4]})
+	var bad := NetCommon.decode(tx.packet(rx.last))
+	bad.b = 999
+	ok = ok and not rx.take(bad) and rx.need_full
+	ok = ok and not rx.take({"n": 50, "b": -1, "g": {}, "t": PackedByteArray([255, 255, 255, 255, 1])}) and rx.need_full
+	ok = ok and rx.take(NetCommon.decode(tx.packet(-1))) and not rx.need_full and rx.snapshot().t.size() == 1
+	return ok

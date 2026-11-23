@@ -6,23 +6,55 @@ extends CanvasLayer
 var world: Node = null
 var cam_pos := Vector2.ZERO
 var cam_zoom := 1.0
-var _painter: Control
+# Four layers, back to front: the sky (and sun), the stars and moon, the far
+# scenery, and the drifting clouds. The sky and most scenery only change when
+# the camera moves (or the size, world or time of day does), so they're painted
+# again only then; stars, clouds, waves and smoke move every frame.
+var _sky: Control
+var _stars: Control
+var _far: Control
+var _clouds: Control
+var _painter: Control          # whichever layer is being painted (the helpers below draw on it)
+var _static_key := []
+const LIVE_SCENERY := ["sea", "factory", "volcano", "clouds"]   # scenery with moving parts
+const CLOUDY := ["meadow", "candy", "frosty", "lagoon", "clouds"]
 
 
 func _ready() -> void:
 	layer = -10
-	_painter = Control.new()
-	_painter.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_painter.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_painter.draw.connect(_paint)
-	add_child(_painter)
+	_sky = _layer(_paint_sky)
+	_stars = _layer(_paint_stars)
+	_far = _layer(_paint_far)
+	_clouds = _layer(_paint_clouds)
+
+
+func _layer(paint: Callable) -> Control:
+	var c := Control.new()
+	c.set_anchors_preset(Control.PRESET_FULL_RECT)
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.draw.connect(paint)
+	add_child(c)
+	return c
 
 
 func _process(_d: float) -> void:
-	_painter.queue_redraw()
+	var id: String = world.world_id if world else "meadow"
+	var night: bool = world.night if world else false
+	var key := [_sky.size, cam_pos, cam_zoom, id, night]
+	if key != _static_key:
+		_static_key = key
+		_sky.queue_redraw()
+		_far.queue_redraw()
+	elif String(Worlds.sky(id).layer) in LIVE_SCENERY:
+		_far.queue_redraw()
+	if night or id == "moon" or _stars.get_meta("drawn", false):
+		_stars.queue_redraw()
+	if (id in CLOUDY and not night) or _clouds.get_meta("drawn", false):
+		_clouds.queue_redraw()
 
 
-func _paint() -> void:
+func _paint_sky() -> void:
+	_painter = _sky
 	var sz := _painter.size
 	var id: String = world.world_id if world else "meadow"
 	var sky: Dictionary = Worlds.sky(id)
@@ -34,26 +66,61 @@ func _paint() -> void:
 		bottom = bottom.darkened(0.55)
 	_painter.draw_polygon(PackedVector2Array([Vector2.ZERO, Vector2(sz.x, 0), sz, Vector2(0, sz.y)]),
 		PackedColorArray([top, top, bottom, bottom]))
-	var tm := Time.get_ticks_msec() / 1000.0
-	var px := -cam_pos.x * 0.08
-	var py := -cam_pos.y * 0.05
-	if night or id == "moon":
-		var rng := RandomNumberGenerator.new()
-		rng.seed = 7
-		for i in 140:
-			var p := Vector2(fposmod(rng.randf() * sz.x * 1.5 + px * 0.5, sz.x), rng.randf() * sz.y * 0.75)
-			var tw := 0.5 + 0.5 * sin(tm * rng.randf_range(1.0, 3.0) + i)
-			_painter.draw_circle(p, rng.randf_range(0.8, 2.2), Color(1.3, 1.3, 1.5, 0.4 + 0.6 * tw))
-		var moon := Vector2(sz.x * 0.78, sz.y * 0.18)
-		_painter.draw_circle(moon, 70.0, Color(1, 1, 0.9, 0.08))
-		_painter.draw_circle(moon, 42.0, Color(1.25, 1.22, 1.1))
-		_painter.draw_circle(moon + Vector2(-12, -8), 8.0, Color(0.85, 0.85, 0.8))
-		_painter.draw_circle(moon + Vector2(14, 12), 6.0, Color(0.85, 0.85, 0.8))
-	elif sky.get("sun", false):
+	if not (night or id == "moon") and sky.get("sun", false):
 		var sun := Vector2(sz.x * 0.82, sz.y * 0.16)
 		_painter.draw_circle(sun, 90.0, Color(1, 0.95, 0.6, 0.15))
 		_painter.draw_circle(sun, 64.0, Color(1, 0.95, 0.6, 0.25))
 		_painter.draw_circle(sun, 44.0, Color(1.4, 1.25, 0.7))
+
+
+func _paint_stars() -> void:
+	_painter = _stars
+	var sz := _painter.size
+	var id: String = world.world_id if world else "meadow"
+	var night: bool = world.night if world else false
+	_stars.set_meta("drawn", night or id == "moon")
+	if not (night or id == "moon"):
+		return
+	var tm := Time.get_ticks_msec() / 1000.0
+	var px := -cam_pos.x * 0.08
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	for i in 140:
+		var p := Vector2(fposmod(rng.randf() * sz.x * 1.5 + px * 0.5, sz.x), rng.randf() * sz.y * 0.75)
+		var tw := 0.5 + 0.5 * sin(tm * rng.randf_range(1.0, 3.0) + i)
+		_painter.draw_circle(p, rng.randf_range(0.8, 2.2), Color(1.3, 1.3, 1.5, 0.4 + 0.6 * tw))
+	var moon := Vector2(sz.x * 0.78, sz.y * 0.18)
+	_painter.draw_circle(moon, 70.0, Color(1, 1, 0.9, 0.08))
+	_painter.draw_circle(moon, 42.0, Color(1.25, 1.22, 1.1))
+	_painter.draw_circle(moon + Vector2(-12, -8), 8.0, Color(0.85, 0.85, 0.8))
+	_painter.draw_circle(moon + Vector2(14, 12), 6.0, Color(0.85, 0.85, 0.8))
+
+
+func _paint_clouds() -> void:
+	_painter = _clouds
+	var sz := _painter.size
+	var id: String = world.world_id if world else "meadow"
+	var night: bool = world.night if world else false
+	_clouds.set_meta("drawn", false)
+	if not (id in CLOUDY) or night:
+		return
+	_clouds.set_meta("drawn", true)
+	var tm := Time.get_ticks_msec() / 1000.0
+	var px := -cam_pos.x * 0.08
+	for i in 4:
+		var cx := fposmod(i * 420.0 + tm * (12.0 + i * 3.0) + px * 0.3, sz.x + 400.0) - 200.0
+		_cloud(Vector2(cx, sz.y * (0.12 + 0.07 * i)), 1.0 - i * 0.12, Color(1, 1, 1, 0.9))
+
+
+func _paint_far() -> void:
+	_painter = _far
+	var sz := _painter.size
+	var id: String = world.world_id if world else "meadow"
+	var sky: Dictionary = Worlds.sky(id)
+	var night: bool = world.night if world else false
+	var tm := Time.get_ticks_msec() / 1000.0
+	var px := -cam_pos.x * 0.08
+	var py := -cam_pos.y * 0.05
 	# far scenery
 	var far: Color = sky.far
 	var far2: Color = sky.far2
@@ -126,11 +193,6 @@ func _paint() -> void:
 				var cx := fposmod(i * 330.0 + px * (0.5 + i * 0.1) + tm * 6.0, sz.x + 400.0) - 200.0
 				var cy := sz.y * (0.55 + 0.08 * (i % 3))
 				_cloud(Vector2(cx, cy), 1.6 - (i % 3) * 0.3, Color(1, 1, 1, 0.85))
-	# drifting clouds
-	if id in ["meadow", "candy", "frosty", "lagoon", "clouds"] and not night:
-		for i in 4:
-			var cx := fposmod(i * 420.0 + tm * (12.0 + i * 3.0) + px * 0.3, sz.x + 400.0) - 200.0
-			_cloud(Vector2(cx, sz.y * (0.12 + 0.07 * i)), 1.0 - i * 0.12, Color(1, 1, 1, 0.9))
 
 
 func _wave(sz: Vector2, y: float, amp: float, freq: float, ox: float, col: Color) -> void:

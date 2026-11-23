@@ -1,7 +1,8 @@
 class_name Card
 extends Control
 ## A toy-box card: a drawn picture of the thing and its name. Click it to
-## start placing, or drag it straight out into the world.
+## start placing, or drag it straight out into the world. The card you're
+## placing glows gold until you're done.
 
 var id := ""
 var hud = null
@@ -35,11 +36,13 @@ func _gui_input(e: InputEvent) -> void:
 				hud.game.placing = ""
 			hud.card_released(id, out)
 			_dragging = false
+			queue_redraw()
 		accept_event()
 	elif e is InputEventMouseMotion and _down:
 		if not _dragging and e.global_position.distance_to(_from) > 12.0:
 			_dragging = true
 			hud.game.placing = id    # shows the ghost under the mouse
+			queue_redraw()
 		accept_event()
 
 
@@ -48,10 +51,18 @@ func _over_drawer(p: Vector2) -> bool:
 	return d.get_global_rect().has_point(p)
 
 
+## True while this is what a click in the world will place (it lights up).
+func placing() -> bool:
+	return hud != null and hud.game != null and hud.game.placing == id
+
+
 func _draw() -> void:
 	var r := Rect2(Vector2.ZERO, size)
+	var on := placing()
 	var bg := UI.PANEL2.lightened(0.12) if _hover else UI.PANEL2
-	draw_style_box(UI.box(bg, 14, 2, UI.ACCENT if _hover else UI.LINE, 0), r)
+	if on:
+		bg = Color("5a4a1a")
+	draw_style_box(UI.box(bg, 14, 4 if on else 2, UI.ACCENT if _hover or on else UI.LINE, 0), r)
 	Preview.draw_thumb(self, id, Rect2(Vector2(6, 4), Vector2(size.x - 12, size.y - 34)))
 	var name := Catalog.spawn_name(id)
 	var fs := 13
@@ -59,4 +70,4 @@ func _draw() -> void:
 	if w > size.x - 8:
 		fs = 11
 		w = Art.font.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
-	draw_string(Art.font, Vector2((size.x - w) * 0.5, size.y - 10), name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, UI.TEXT)
+	draw_string(Art.font, Vector2((size.x - w) * 0.5, size.y - 10), name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, UI.ACCENT if on else UI.TEXT)

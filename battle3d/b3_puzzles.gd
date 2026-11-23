@@ -23,6 +23,12 @@ const ZONE_COL := Color("ffd34a")     # the glowing build zone (any budget battl
 ## Seconds of battle with nobody knocked out before the blue army stops
 ## waiting and charges (so a puzzle never gets stuck).
 const CHARGE_AFTER := 45.0
+## Booms too big for a puzzle: each reaches far past your side (the nuke's
+## shock wave rolls out 46 m) and would knock out a whole puzzle army for a
+## few points. Their Toy Box cards say 🚫. The small ones still work: they
+## cost points, go on your side and only reach the blue army once it comes
+## over to you.
+const BIG_BOOMS := ["nuke", "airstrike", "artillery"]
 
 ## The stages, easiest first. The camera looks along +x (your side on the
 ## left) unless the stage has a "yaw". zone: your side, Rect2(x, z, width,
@@ -145,6 +151,8 @@ var _said := ""
 var _quiet_t := 0.0
 var _kos_seen := 0
 var _charged := false
+var _win_head := ""           # the winner banner's headline when you won (kept up, see _on_end)
+var _win_col := Color.WHITE
 
 
 # ------------------------------------------------------------------ data
@@ -226,7 +234,8 @@ static func start(bt, pid: String) -> bool:
 	bt.set_fighting(false)
 	if bt.paused:
 		bt.set_paused(false)
-	bt.load_map(String(st.map))      # (this ends any puzzle that was on)
+	bt.load_map(String(st.map))      # (this ends any puzzle that was on, and puts your ⚙️ rules back)
+	neutral_rules()
 	bt.apply_rules()
 	var zone: Rect2 = st.zone
 	var f := B3History.Field.new()
@@ -248,6 +257,8 @@ static func start(bt, pid: String) -> bool:
 	p.stage = st
 	bt.add_child(p)
 	bt.puzzle = p
+	for h in bt.hazards:
+		_mark(h)       # the map's own pools (the volcano's) are scenery too
 	var tops: Array = []
 	for e in st.get("build", []):
 		var ea: Array = e
@@ -267,17 +278,13 @@ static func start(bt, pid: String) -> bool:
 				_mark(bt.spawn_struct(kind, at, deg_to_rad(float(ea[3])), float(ea[4]) if ea.size() > 4 else 0.0))
 	for e in st.get("enemy", []):
 		p._block(e as Array)
-	if not tops.is_empty():
-		# fighters on top of the buildings once those are solid
-		bt.later(0.15, func():
-			if not is_instance_valid(p) or bt.puzzle != p:
-				return
-			for e in tops:
-				var ea: Array = e
-				var x := float(ea[2])
-				var z := float(ea[3])
-				var y: float = bt.surface_y(Vector3(x, bt.world.height_at(x, z) + 30.0, z))
-				p._enemy(String(ea[1]), Vector3(x, y, z), String(ea[4]) if ea.size() > 4 else "defend"))
+	# fighters on top of the buildings, straight away (worked out from the
+	# buildings' blocks, so a quick ▶ Fight! can't leave them out)
+	for e in tops:
+		var ea: Array = e
+		var x := float(ea[2])
+		var z := float(ea[3])
+		p._enemy(String(ea[1]), Vector3(x, p._top_y(x, z), z), String(ea[4]) if ea.size() > 4 else "defend")
 	bt.set_budget(int(st.budget), zone, MINE)
 	# the camera looks across the battle with your side on the left (or at the bottom)
 	var yaw := float(st.get("yaw", 0.0))
@@ -312,14 +319,29 @@ static func _frame(bt, area: Rect2) -> void:
 
 
 ## The puzzle's over (cleared away, another battle, another map...):
-## everything's free again and the glowing area goes.
+## everything's free again, the glowing area goes and your ⚙️ Battle Rules
+## come back.
 func stop() -> void:
 	if b and b.puzzle == self:
 		b.puzzle = null
 		b.clear_budget()
+		B3Rules.load_from_settings()
+		b.apply_rules()
 		if b.ui:
 			b.ui.show_puzzle()
+			b.ui.refresh()
 	queue_free()
+
+
+## ⚙️ A puzzle plays by the normal Battle Rules (♾️ Reinforcements would
+## bring the blue army back forever, ☄️ MEGA blasts or 🥚 Fragile fighters
+## would make the stars too easy or too hard). Only Screen shake stays as
+## you like it. Yours are still saved (Settings.b3_rules) and come back
+## when the puzzle ends (stop).
+static func neutral_rules() -> void:
+	var sh := B3Rules.value("shake")
+	B3Rules.values = B3Rules.DEFAULTS.duplicate()
+	B3Rules.values["shake"] = sh
 
 
 ## A block of the blue army facing your side.
@@ -355,6 +377,21 @@ func _enemy(kind: String, pos: Vector3, pers: String) -> B3Unit:
 static func _mark(n: Node) -> void:
 	if n:
 		n.set_meta("puzzle", true)
+
+
+## The top of the buildings at x, z (or the ground there), worked out from
+## their blocks: right after they're built the physics can't see them yet,
+## but fighters can already stand on them.
+func _top_y(x: float, z: float) -> float:
+	var y: float = b.world.height_at(x, z)
+	for s: B3Struct in b.structs:
+		if not is_instance_valid(s):
+			continue
+		for pc: B3Piece in s.pieces:
+			var bb := pc.world_aabb()
+			if x >= bb.position.x and x <= bb.end.x and z >= bb.position.z and z <= bb.end.z:
+				y = maxf(y, bb.end.y)
+	return y
 
 
 ## True for the puzzle's own fighters, buildings and pools (you can't erase
@@ -402,7 +439,9 @@ func _physics_process(dt: float) -> void:
 	if _guard_t > 0.0:
 		return
 	_guard_t = 0.2
-	# the blue army stays as the puzzle made it: blue, in its own mood, not grabbed
+	# the blue army stays as the puzzle made it: blue, in its own mood (before
+	# and during the fight), not grabbed. (B3Battle.hands_off stops the
+	# Inspector, 🎮 Play as and ✋ Grab; this catches anything else.)
 	for e in enemies:
 		var u = e.u
 		if not is_instance_valid(u) or (u as B3Unit).dead:
@@ -411,12 +450,18 @@ func _physics_process(dt: float) -> void:
 		if bu.team != ENEMY:
 			bu.set_team(ENEMY)
 			_say("🧩 The puzzle's fighters stay blue. Beat them in battle!")
-		if bu.pers_choice != String(e.pers) and not b.fighting:
+		if bu.pers_choice != String(e.pers):
 			bu.set_personality(String(e.pers))
 			_say("🧩 The puzzle's fighters keep their own mood.")
 		if bu.held and b.tools and b.tools.grab_unit == bu:
 			b.tools._grab_end(false)
 			_say("✋ No grabbing in a puzzle. Beat them in battle!")
+		if bu.ctl != null and bu == B3Player.unit and b.tools:
+			b.tools.stop_playing("🎮 You can only play your own army in a puzzle.")
+	# ...and your army stays red
+	for u: B3Unit in b.units:
+		if is_instance_valid(u) and not u.dead and u.team != MINE and not keeps(u):
+			u.set_team(MINE)
 
 
 ## Nobody's been knocked out for a long time (your army can't reach them, or
@@ -428,6 +473,7 @@ func _charge() -> void:
 		var u = e.u
 		if is_instance_valid(u) and not (u as B3Unit).dead and (u as B3Unit).speed > 0.0 and (u as B3Unit).pers != "attack":
 			(u as B3Unit).set_personality("attack")
+			e.pers = "attack"      # (their mood now, as far as the guard's concerned; ⏮ Reset brings back the old one)
 			any = true
 	if any:
 		_say("😤 The blue army is tired of waiting. CHARGE!")
@@ -439,8 +485,31 @@ func _say(txt: String) -> void:
 	_said = txt
 
 
+## ▶ Fight! was just pressed (B3Battle.set_fighting calls this before it
+## remembers the start for ⏮ Reset): the blue army starts the way the
+## puzzle made it. Anyone hurt, moved or knocked out before the fight (by a
+## boom, say) is put back, so every try is fair and ⏮ Try again always
+## brings all of them back.
+func before_fight() -> void:
+	for e in enemies:
+		var u = e.u
+		var pos: Vector3 = e.pos
+		if is_instance_valid(u):
+			var bu := u as B3Unit
+			if not bu.dead and not bu.down and bu.hp >= bu.max_hp - 0.5 \
+					and Vector2(bu.position.x - pos.x, bu.position.z - pos.z).length() < 2.0:
+				continue
+			b.remove_unit(bu, false)
+		var nu: B3Unit = b.spawn_unit(String(e.kind), ENEMY, pos, String(e.pers), float(e.yaw))
+		if nu:
+			nu.set_meta("puzzle", true)
+		e.u = nu
+
+
 ## ⏮ Reset just put everything back (Try again!): what you'd bought is
-## yours again to erase for a refund, and the blue army is the new one.
+## yours again to erase for exactly what you paid (B3Saves keeps the price
+## on each thing, and which things are the puzzle's), and the blue army is
+## the new one.
 func reset_done() -> void:
 	over = false
 	won = 0
@@ -448,22 +517,23 @@ func reset_done() -> void:
 	_said = ""
 	enemies = []
 	for u: B3Unit in b.units:
-		if u.team == ENEMY:
+		if u.team == ENEMY or u.has_meta("puzzle"):
 			u.set_meta("puzzle", true)
-			enemies.append({"u": u, "kind": u.kind, "pos": u.position, "yaw": u.facing, "pers": u.pers_choice})
+			enemies.append({"u": u, "kind": u.kind, "pos": u.home, "yaw": u.facing, "pers": u.pers_choice})
 		elif u.team == MINE and not u.has_meta("cost"):
 			u.set_meta("cost", B3Defs.cost(u.kind))
-	# buildings and pools: yours (on your side) or the puzzle's
+	# buildings and pools that somehow lost their marks: yours (on your side,
+	# at the price of what they are) or the puzzle's
 	var zone: Rect2 = stage.zone
 	for arr: Array in [b.structs, b.hazards]:
 		for o in arr:
 			var n := o as Node3D
-			if not is_instance_valid(n) or n.has_meta("cost"):
+			if not is_instance_valid(n) or n.has_meta("cost") or n.has_meta("puzzle"):
 				continue
 			if zone.has_point(Vector2(n.position.x, n.position.z)):
 				var kind := String(n.get("kind"))
 				if n is B3Hazard:
-					kind = _hazard_id(n as B3Hazard)
+					kind = B3Battle.pool_id(kind, (n as B3Hazard).radius)
 				n.set_meta("cost", B3Defs.cost(kind))
 			else:
 				_mark(n)
@@ -471,20 +541,21 @@ func reset_done() -> void:
 		b.ui.show_puzzle()
 
 
-static func _hazard_id(h: B3Hazard) -> String:
-	if h.radius > 5.0:
-		return "lava_lake" if h.kind == "lava" else "acid_swamp"
-	return h.kind
-
-
 ## The battle ended: red won (stars!) or didn't (try again).
 func _on_end(winner: String) -> void:
 	if b == null or b.puzzle != self or not b.fighting:
 		return
 	if over and won > 0:
-		return      # already won this one (the last red fighter burning out later doesn't undo it)
+		# already won this one: the last red fighter burning out later (a draw
+		# now, as far as the battle goes) doesn't undo it, and the win stays up
+		if b.ui:
+			b.ui.keep_puzzle_win(_win_head, _win_col)
+		return
 	over = true
 	won = stars_for(stage, b.spent) if winner == MINE else 0
+	if won > 0 and b.ui:
+		_win_head = b.ui.banner_lbl.text.split("\n")[0]
+		_win_col = b.ui.banner_lbl.get_theme_color("font_color")
 	var best := stars(id)
 	if won > 0:
 		Settings.puzzle_won(id, won)
@@ -499,10 +570,14 @@ func _on_end(winner: String) -> void:
 
 
 # ------------------------------------------------------------- booms
-## 🪙 Booms cost points in a puzzle and go on your side only. False (and a
-## message) if this one can't be dropped.
+## 🪙 Booms cost points in a puzzle and go on your side only, and the big
+## ones (BIG_BOOMS) are switched off. False (and a message) if this one
+## can't be dropped.
 func pay_boom(boom: String, pos: Vector3) -> bool:
 	var why: String = b.can_place(boom, pos)
+	if boom in BIG_BOOMS:
+		why = "🚫 The %s %s is too big for a puzzle: it would blow up the whole thing! Try mines, barrels or C4." % [
+			B3Defs.BOOMS[boom].icon, B3Defs.BOOMS[boom].name]
 	if why != "":
 		if b.ui:
 			b.ui.toast(why, false)

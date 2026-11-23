@@ -81,6 +81,8 @@ static func run(game: Game, name: String) -> void:
 				n.fuse = 1.2
 		"vs_powers", "vs_machines", "vs_traps":
 			_toyfight(game, name)
+		"trap_builds", "combos", "glow", "juice", "ropes", "breaking", "dino_tricks":
+			_juice(game, name)
 		"ui":
 			var ws := w.wigglies()
 			if not ws.is_empty():
@@ -210,3 +212,164 @@ static func _toyfight(game: Game, name: String) -> void:
 					walker.player_id = -1
 				if bat and dyn:
 					w.add_link("wire", bat, dyn, bat.global_position, dyn.global_position))
+
+
+## For screenshots of the new bits (with --world=canvas): trap_builds (the three
+## 🔌 Battle Trap Builds going off, about 3 s), combos (a zap through a pool and
+## along metal beams, a Bloop trampoline, Twinkle's warp, a monster truck
+## smashing ice; about 2.5 s), glow (night lights: lava, fire, glowing Wigglies,
+## laser swords; about 1.5 s), juice (sword swooshes in a close-up melee;
+## about 2 s), ropes (sagging ropes; about 1.5 s), breaking (platforms cracked
+## and broken by booms; about 2 s) and dino_tricks (a pterodactyl carrying a
+## stick figure off, an angry Brachiosaurus; about 3.5 s).
+static func _juice(game: Game, name: String) -> void:
+	var w := game.world
+	var later := func(sec: float, fn: Callable) -> void:
+		game.get_tree().create_timer(sec).timeout.connect(fn)
+	var view := func(r: Rect2) -> void:
+		later.call(0.05, func(): game.cam.fit(r, game.get_viewport_rect().size))
+	w._clear_all()   # (no starter Wigglies getting in the way)
+	w.battle_on = false
+	match name:
+		"trap_builds":
+			view.call(Rect2(-860, -300, 1720, 640))
+			w.spawn("build:trap_minefield", Vector2(-560, 200))
+			w.spawn("build:disarm_gate", Vector2(40, 200))
+			w.spawn("build:ufo_abductor", Vector2(560, 200))
+			var walker := w.spawn_fighter("soldier", Vector2(-820, 150), "red", "peaceful")
+			var knight := w.spawn_fighter("knight", Vector2(-160, 150), "blue", "peaceful")
+			var rider := w.spawn_fighter("stick", Vector2(400, 150), "green", "peaceful")
+			for f in [walker, knight, rider]:
+				if f:
+					f.max_hp = 9999.0
+					f.hp = 9999.0
+			later.call(0.3, func():
+				for f in [walker, knight, rider]:
+					if f:
+						f.player_id = 0
+						f.move_input = 1.0)
+			later.call(1.6, func():
+				if rider:
+					rider.move_input = 0.0)
+		"combos":
+			view.call(Rect2(-900, -380, 1800, 760))
+			# a pool of soldiers and a Zappy at its edge
+			w.apply_command(0, {"cmd": "platform", "x0": -880, "y0": 280, "x1": -320, "y1": 300, "style": "stone"})
+			w.apply_command(0, {"cmd": "platform", "x0": -880, "y0": 150, "x1": -860, "y1": 280, "style": "stone"})
+			w.apply_command(0, {"cmd": "platform", "x0": -340, "y0": 150, "x1": -320, "y1": 280, "style": "stone"})
+			w.add_liquid(Rect2(-860, 170, 520, 110), "water", w.next_group)
+			w._cut_water()
+			for i in 4:
+				w.spawn_fighter("soldier", Vector2(-800 + i * 130, 120), "red", "peaceful")
+			var z := w.spawn_wiggly("zappy", Vector2(-300, 60))
+			# metal beams in a row, a knight on the far one
+			for i in 3:
+				var b := w.spawn_toy("metal_beam", Vector2(-160 + i * 160, 285))
+				if b:
+					b.nailed = true
+					b.update_freeze()
+			w.spawn_fighter("knight", Vector2(160, 150), "blue", "peaceful")
+			var z2 := w.spawn_wiggly("zappy", Vector2(-250, 200))
+			# a Bloop trampoline
+			var bl := w.spawn_wiggly("bloop", Vector2(420, 230))
+			if bl:
+				bl.player_id = 99
+			var hopper := w.spawn_fighter("ninja", Vector2(420, -150), "green", "peaceful")
+			# a monster truck and a frozen soldier
+			var truck := Builders.ride(w, "monster_truck", Vector2(560, 220))
+			var ice := w.spawn_fighter("soldier", Vector2(820, 150), "yellow", "peaceful")
+			later.call(0.6, func():
+				if ice:
+					ice.set_frozen(4.0)
+				if truck:
+					truck.on = true)
+			later.call(1.9, func():
+				if z:
+					z.use_special()
+				if z2:
+					z2.use_special())
+		"glow":
+			view.call(Rect2(-760, -300, 1520, 640))
+			w.set_night(true)
+			Builders.tub(w, "lava_tub", Vector2(-480, 300))
+			w.fires.append({"p": Vector2(80, 285), "r": 90.0, "t": 30.0})
+			for k in ["zappy", "blaze", "twinkle"]:
+				var g := w.spawn_wiggly(k, Vector2(-180 + ["zappy", "blaze", "twinkle"].find(k) * 90, 220))
+				if g:
+					g.player_id = 99
+			for i in 2:
+				var jedi := w.spawn_fighter("knight", Vector2(330 + i * 160, 150), ["red", "blue"][i], "peaceful")
+				var ls := w.spawn_toy("laser_sword", Vector2(330 + i * 160, 150))
+				if jedi and ls:
+					jedi.equip(ls)
+					jedi.facing = 1.0 if i == 0 else -1.0
+			var torch := w.spawn_fighter("soldier", Vector2(160, 150), "green", "peaceful")
+			if torch:
+				torch.max_hp = 9999.0
+				torch.hp = 9999.0
+				torch.burning = 30.0
+		"juice":
+			view.call(Rect2(-420, -120, 840, 400))
+			for i in 3:
+				w.spawn_fighter(["viking", "knight", "ninja"][i], Vector2(-200 + i * 40, 150), "red", "berserk")
+				w.spawn_fighter(["giant", "knight", "viking"][i], Vector2(200 - i * 40, 150), "blue", "berserk")
+			var jedi := w.spawn_fighter("knight", Vector2(-60, 150), "red", "berserk")
+			var ls := w.spawn_toy("laser_sword", Vector2(-60, 150))
+			if jedi and ls:
+				jedi.equip(ls)
+			for f in w.fighters():
+				f.max_hp = 9999.0
+				f.hp = 9999.0
+			w.battle_on = true
+		"ropes":
+			view.call(Rect2(-600, -320, 1200, 600))
+			var posts: Array = []
+			for x in [-450.0, -150.0, 150.0, 450.0]:
+				var b := w.spawn_toy("wood_block", Vector2(x, -150))
+				if b:
+					b.nailed = true
+					b.update_freeze()
+					posts.append(b)
+			for i in posts.size() - 1:
+				var l := w.add_link("rope", posts[i], posts[i + 1], posts[i].global_position, posts[i + 1].global_position)
+				if l:
+					l.rest = 300.0 + i * 120.0
+			var bal := w.spawn_toy("balloon", Vector2(-300, 0))
+			var box := w.spawn_toy("wood_block", Vector2(-300, 200))
+			if bal and box:
+				w.add_link("rope", bal, box, bal.global_position, box.global_position)
+			var gw := w.spawn_wiggly("gummy", Vector2(300, 200))
+			if gw:
+				gw.mood = "strain"
+				gw.grabbed_by[7] = true
+				gw.stretch = 2.2
+		"breaking":
+			view.call(Rect2(-700, -320, 1400, 640))
+			w.apply_command(0, {"cmd": "platform", "x0": -600, "y0": 60, "x1": -320, "y1": 84, "style": "wood"})
+			w.apply_command(0, {"cmd": "platform", "x0": -140, "y0": 60, "x1": 140, "y1": 84, "style": "stone"})
+			w.apply_command(0, {"cmd": "platform", "x0": 320, "y0": 60, "x1": 600, "y1": 84, "style": "concrete"})
+			for x in [-460.0, 0.0, 460.0]:
+				w.spawn_fighter("soldier", Vector2(x, 0), "red", "peaceful")
+			later.call(0.8, func():
+				ToyLogic.boom(w, Vector2(-460, 100), 230.0, 1500.0, false, 65.0)
+				ToyLogic.boom(w, Vector2(0, 100), 230.0, 1500.0, false, 65.0)
+				ToyLogic.boom(w, Vector2(460, 100), 230.0, 1500.0, false, 65.0))
+			later.call(1.1, func():
+				ToyLogic.boom(w, Vector2(-460, 100), 230.0, 1500.0, false, 65.0))
+		"dino_tricks":
+			view.call(Rect2(-800, -420, 1600, 760))
+			w.spawn_fighter("ptero", Vector2(-700, -150), "wild", "attack")
+			var lunch := w.spawn_fighter("stick", Vector2(-350, 150), "red", "peaceful")
+			if lunch:
+				lunch.max_hp = 9999.0
+				lunch.hp = 9999.0
+			var brach := w.spawn_fighter("brachio", Vector2(380, 50), "wild", "")
+			var pest := w.spawn_fighter("soldier", Vector2(80, 150), "blue", "attack")
+			if pest:
+				pest.max_hp = 9999.0
+				pest.hp = 9999.0
+			w.battle_on = true
+			later.call(0.5, func():
+				if brach and pest:
+					brach.hurt(20.0, Vector2.ZERO, pest))
+

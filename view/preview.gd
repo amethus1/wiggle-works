@@ -176,13 +176,40 @@ static func _build_icon(ci: CanvasItem, id: String, c: Vector2, s: float) -> voi
 	var wood := Color("c98a48")
 	match id:
 		"seesaw":
-			ci.draw_colored_polygon(PackedVector2Array([c + Vector2(-s * 0.3, s * 0.5), c + Vector2(s * 0.3, s * 0.5), c + Vector2(0, s * 0.05)]), Color("7cc1ff"))
+			ci.draw_colored_polygon(PackedVector2Array([c + Vector2(-s * 0.4, s * 0.5), c + Vector2(s * 0.4, s * 0.5), c + Vector2(0, s * 0.05)]), Color("7cc1ff"))
 			ci.draw_line(c + Vector2(-s, s * 0.25), c + Vector2(s, -s * 0.15), wood, s * 0.14, true)
+		"trap_minefield":
+			ci.draw_line(c + Vector2(-s, s * 0.45), c + Vector2(s, s * 0.45), Color("6ab04c"), s * 0.08, true)
+			ci.draw_rect(Rect2(c + Vector2(-s * 0.95, s * 0.22), Vector2(s * 0.42, s * 0.2)), Color("ffd43b"))
+			for i in 3:
+				var mc := c + Vector2(-s * 0.2 + i * s * 0.48, s * 0.4)
+				ci.draw_colored_polygon(Art.ellipse(mc, s * 0.17, s * 0.1, 12), Color("4b5320"))
+				ci.draw_circle(mc + Vector2(0, -s * 0.07), s * 0.04, Color(2.2, 0.5, 0.4))
+				ci.draw_line(c + Vector2(-s * 0.74, s * 0.22), mc + Vector2(0, -s * 0.08), Color(0.4, 2.0, 0.9), maxf(1.5, s * 0.03), true)
+			Art._star(ci, c + Vector2(s * 0.3, -s * 0.25), s * 0.35, Color(2.2, 1.4, 0.4))
+		"disarm_gate":
+			ci.draw_line(c + Vector2(-s, s * 0.5), c + Vector2(s, s * 0.5), Color("6ab04c"), s * 0.08, true)
+			for i in 2:
+				ci.draw_rect(Rect2(c + Vector2(-s * 0.55 + i * s * 0.6, s * 0.3), Vector2(s * 0.5, s * 0.16)), Color("74b9ff"))
+			var u := PackedVector2Array()
+			for i in 13:
+				var a := PI * float(i) / 12.0
+				u.append(c + Vector2(cos(a) * s * 0.4, -sin(a) * s * 0.42 - s * 0.35))
+			ci.draw_polyline(u, Color("e74c3c"), s * 0.2, true)
+			ci.draw_arc(c + Vector2(0, -s * 0.2), s * 0.5, 0.5, PI - 0.5, 16, Color(1.2, 0.5, 0.5, 0.6), maxf(1.5, s * 0.04), true)
+			ci.draw_line(c + Vector2(s * 0.3, s * 0.05), c + Vector2(s * 0.7, -s * 0.25), Color("dfe6e9"), s * 0.08, true)
+		"ufo_abductor":
+			ci.draw_colored_polygon(PackedVector2Array([c + Vector2(-s * 0.15, -s * 0.35), c + Vector2(s * 0.15, -s * 0.35), c + Vector2(s * 0.5, s * 0.5), c + Vector2(-s * 0.5, s * 0.5)]), Color(0.6, 1.6, 1.2, 0.4))
+			ci.draw_colored_polygon(Art.ellipse(c + Vector2(0, -s * 0.55), s * 0.25, s * 0.2, 16), Color(0.6, 0.95, 1.0, 0.9))
+			ci.draw_colored_polygon(Art.ellipse(c + Vector2(0, -s * 0.42), s * 0.7, s * 0.18, 20), Color("a4b0be"))
+			ci.draw_rect(Rect2(c + Vector2(-s * 0.3, s * 0.5), Vector2(s * 0.6, s * 0.14)), Color("2ed573"))
+			ci.draw_line(c + Vector2(0, s * 0.05), c + Vector2(0, s * 0.35), Color("1e1b2e"), maxf(2.0, s * 0.06), true)
+			ci.draw_circle(c + Vector2(0, -s * 0.02), s * 0.08, Color("f6d7b0"))
 		"catapult":
 			ci.draw_rect(Rect2(c + Vector2(-s * 0.5, s * 0.25), Vector2(s, s * 0.3)), Color("d0573f"))
-			ci.draw_line(c + Vector2(-s * 0.1, s * 0.15), c + Vector2(s * 0.8, -s * 0.6), wood, s * 0.12, true)
-			ci.draw_circle(c + Vector2(s * 0.8, -s * 0.75), s * 0.18, Color("ffd43b"))
-			ci.draw_circle(c + Vector2(-s * 0.1, s * 0.15), s * 0.18, Color("2d3436"))
+			ci.draw_line(c + Vector2(s * 0.1, s * 0.15), c + Vector2(-s * 0.8, -s * 0.6), wood, s * 0.12, true)
+			ci.draw_circle(c + Vector2(-s * 0.8, -s * 0.75), s * 0.18, Color("ffd43b"))
+			ci.draw_circle(c + Vector2(s * 0.1, s * 0.15), s * 0.18, Color("2d3436"))
 		"ferris":
 			ci.draw_circle(c, s * 0.75, Color(1, 1, 1, 0.0))
 			ci.draw_arc(c, s * 0.75, 0, TAU, 32, wood, s * 0.08, true)

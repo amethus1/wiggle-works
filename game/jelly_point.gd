@@ -5,9 +5,16 @@ extends RigidBody2D
 var wiggly = null
 var index := 0
 var _prev := {}
+var _last := Vector2.INF   # where the physics (or our own code) last put us (see Toy.stop_wild_jump)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_TRANSFORM_CHANGED:
+		_last = global_position
 
 
 func _integrate_forces(s: PhysicsDirectBodyState2D) -> void:
+	_last = Toy.stop_wild_jump(self, s, _last)
 	var n := s.get_contact_count()
 	if n == 0:
 		_prev.clear()

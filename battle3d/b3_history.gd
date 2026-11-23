@@ -207,7 +207,8 @@ static func star_count(id: String) -> int:
 	return n
 
 
-## "🔴 Greeks (Spartans)": the side that lost long ago, as the sides line says it.
+## "🔴 Greeks (Spartans)": the side that lost long ago, as the sides line says
+## it (the ⭐ Change history message names them: earn_stars).
 static func loser_name(id: String) -> String:
 	var d := info(id)
 	var icon := String(B3Defs.TEAM.get(String(d.get("lost", "")), {}).get("icon", ""))
@@ -228,7 +229,8 @@ static func earn_stars(b, id: String, win: String) -> void:
 	if Settings.history_star(id, "finish"):
 		got.append("Finish it")
 	if win == String(d.get("lost", "")) and Settings.history_star(id, "change"):
-		got.append("Change history")
+		var who := loser_name(id)
+		got.append("Change history (%s won)" % who if who != "" else "Change history")
 	if _hero_won(win) and Settings.history_star(id, "hero"):
 		got.append("Hero")
 	if got.is_empty() or b == null or b.ui == null:

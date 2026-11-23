@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Regenerate Wiggle Works' audio/ folder: every sound effect and the music loop.
+"""Regenerate Wiggle Works' audio/ folder: every sound effect and the music loops.
 
 All sounds are synthesized from scratch with the Python standard library only
 (no numpy, no sample files, no network) using a fixed random seed, so the
 output is identical on every run. Files written (relative to the project root):
 
     audio/sfx/<name>.wav         one per sound effect (see SFX below)
-    audio/music/wiggle_loop.wav  seamless 16-bar music loop
+    audio/music/<loop>.wav       seamless 16-bar music loops (see LOOPS):
+        wiggle_loop  the title menu         calm_loop    the 2D sandbox
+        ready_loop   building a 3D battle   battle_loop  3D fighting
+        each with its loop points in the file (see LOOP_LEAD)
 
 Format: 16-bit mono PCM WAV at 22050 Hz. Effects are peak-normalized to about
--1 dBFS with short fades; the music loop peaks around -3 dBFS.
+-1 dBFS with short fades; the music loops peak at or below about -3 dBFS.
 
 Run from anywhere:
     python3 tools/gen_audio.py              # regenerate everything, then verify
-    python3 tools/gen_audio.py boom pop     # only those effects ("music" = loop)
+    python3 tools/gen_audio.py boom pop     # only those effects ("music" = every loop)
+    python3 tools/gen_audio.py calm_loop    # only that loop
     python3 tools/gen_audio.py --verify     # only check the existing files
 """
 
@@ -1784,6 +1788,205 @@ def _battle_start(rng):     # "BOOM-boom" war drum, then a heroic horn call "doo
     return tame(x, 6000)
 
 
+@combat_sfx("defeat")
+def _defeat(rng):           # gentle "aww" trombone: "wah, wah, wah, waaah" (D4 C#4 C4 B3), soft and round
+    x = buf(2.3)
+    notes = ((0.0, 62, 0.36), (0.38, 61, 0.36), (0.76, 60, 0.36), (1.14, 59, 1.05))
+    for t, m, d in notes:
+        n = ns(d)
+        f0 = midi(m)
+        last = m == 59
+        # each note leans in from a touch sharp; the last one sags and wobbles ("waaah")
+        fr = fpath(n, [(0, f0 * 1.025), (0.06, f0), (d, f0 * (0.965 if last else 0.995))])
+        if last:
+            fr = vibrato(fr, 0.03, 4.8, 0.25)
+        src = buzz(fr, 12, 1.1)
+        # the "wah": the mouth opens from "oo" to "aww" on every note
+        f1 = env(n, [(0, 360), (0.13, 700), (d, 560 if last else 640)])
+        f2 = env(n, [(0, 780), (0.13, 1080), (d, 920 if last else 1000)])
+        v = add((vowel(src, [(f1, 3.0, 1.0), (f2, 4.5, 0.45)]), 1.0), (lowpass(src, 500), 0.25))
+        rel = 0.45 if last else 0.08
+        a = env(n, [(0, 0), (0.035, 1), (max(0.04, d - rel), 0.75 if last else 0.85), (d, 0)])
+        mix(x, mul(norm(v), a), t, 0.9 if last else 0.75)
+    mix(x, ping(midi(83), 0.09), 1.95, 0.12)          # a tiny "plink" to keep it cute
+    return tame(lowpass(x, 2600), 3800)
+
+
+# ---- 3D: parachutes, ejecting, wood
+@combat_sfx("chute_open")
+def _chute_open(rng):       # a parachute catching the air: a soft cloth "fwump" with a flutter
+    x = buf(0.55)
+    n = ns(0.5)
+    cloth = norm(svf(noise(n, rng), env(n, [(0, 280), (0.06, 900), (0.5, 380)]), 1.1, "bp"))
+    flutter = [0.6 + 0.4 * sin(TAU * env_f * i / SR) for i, env_f in enumerate(ramp(n, 32, 14))]
+    cloth = mul(mul(cloth, flutter), env(n, [(0, 0), (0.035, 1), (0.12, 0.55), (0.5, 0)]))
+    mix(x, cloth, 0.0, 0.8)
+    mix(x, thump(0.3, 150, 70, 0.07, 0.03, attack=0.012), 0.02, 0.7)          # the "wump" as it fills
+    return tame(x, 4500)
+
+
+@combat_sfx("eject")
+def _eject(rng):            # cartoony ejector seat: a cork "POP!" and a little rising "fweee"
+    x = buf(0.55)
+    mix(x, thump(0.12, 700, 220, 0.03, 0.01), 0.0, 0.9)
+    mix(x, nburst(rng, 0.05, 1500, 0.9, 0.01), 0.0, 0.5)
+    mix(x, chirp(0.32, 520, 1500, "cute", 0.0, attack=0.01, release=0.12, power=0.7), 0.05, 0.4)
+    n = ns(0.4)
+    hiss = mul(norm(svf(noise(n, rng), ramp(n, 900, 2600, "exp"), 1.2, "bp")), env(n, [(0, 0), (0.03, 1), (0.4, 0)]))
+    mix(x, hiss, 0.03, 0.25)
+    return tame(x, 6000)
+
+
+@combat_sfx("wood_crunch")
+def _wood_crunch(rng):      # a tank rolling over a crate, a fence or a tree: splintery "CRRUNCH"
+    x = buf(0.6)
+    mix(x, thump(0.25, 200, 80, 0.05, 0.02), 0.0, 0.7)
+    for _ in range(18):          # splinters: short dry cracks, thickest at the start
+        r = rng.random()
+        t = 0.24 * r ** 1.6
+        mix(x, nburst(rng, 0.03, rng.uniform(900, 2600), 1.3, rng.uniform(0.004, 0.01)), t,
+            rng.uniform(0.3, 0.7) * (1.0 - 0.5 * r))
+    for _ in range(6):           # hollow wooden knocks
+        f = rng.uniform(220, 480)
+        tau = rng.uniform(0.02, 0.035)
+        mix(x, partials_tone(f, tau * 5, [(1, 1.0, tau), (2.4, 0.35, tau * 0.5)], attack=0.001),
+            rng.uniform(0.0, 0.3), rng.uniform(0.3, 0.55))
+    return tame(sat(x, 1.4), 4500)
+
+
+@combat_sfx("crackle")
+def _crackle(rng):          # dry wood catching fire: a soft whoosh and a few crackles (one go, no loop)
+    x = buf(0.75)
+    n = ns(0.7)
+    bed = mul(noise_lp(n, rng, 500), env(n, [(0, 0), (0.12, 1), (0.4, 0.6), (0.7, 0)]))
+    mix(x, bed, 0.0, 0.35)
+    for _ in range(14):
+        t = rng.uniform(0.02, 0.62)
+        mix(x, grain(rng, rng.uniform(0.004, 0.012), rng.uniform(1500, 3800), 1.5), t, rng.uniform(0.35, 0.9))
+    for _ in range(3):           # a couple of fatter pops
+        mix(x, nburst(rng, 0.03, rng.uniform(600, 1100), 1.0, 0.008), rng.uniform(0.05, 0.55), 0.6)
+    return tame(x, 5500)
+
+
+@combat_sfx("chop")
+def _chop(rng):             # an axe biting into a wooden post: a hollow "THOCK"
+    x = buf(0.3)
+    mix(x, partials_tone(310, 0.25, [(1, 1.0, 0.045), (2.37, 0.45, 0.02), (3.9, 0.2, 0.01)], attack=0.0008),
+        0.0, 0.8)
+    mix(x, thump(0.18, 260, 120, 0.04, 0.012), 0.0, 0.6)
+    mix(x, nburst(rng, 0.02, 2200, 1.0, 0.003), 0.0, 0.35)                     # the blade's bite
+    return tame(x, 5000)
+
+
+@combat_sfx("land_puff")
+def _land_puff(rng):        # landing softly under a parachute: a gentle thud and a puff of dust
+    x = buf(0.5)
+    mix(x, thump(0.25, 130, 60, 0.06, 0.02, attack=0.004), 0.0, 0.7)
+    n = ns(0.4)
+    dust = mul(norm(svf(noise(n, rng), ramp(n, 1100, 450, "exp"), 0.9, "bp")), env(n, [(0, 0), (0.02, 1), (0.4, 0)]))
+    mix(x, dust, 0.0, 0.45)
+    nf = ns(0.3)
+    flop = mul(norm(svf(noise(nf, rng), 500, 1.2, "bp")), env(nf, [(0, 0), (0.08, 1), (0.3, 0)]))
+    mix(x, flop, 0.12, 0.3)                                                   # the canopy settling
+    return tame(x, 4000)
+
+
+# ---- 2D: toys and creatures against fighters
+@combat_sfx("laser_ping")
+def _laser_ping(rng):       # a laser sword bats a bullet away: "pew-PING!"
+    x = buf(0.5)
+    mix(x, chirp(0.06, 2200, 900, "tri", attack=0.002, release=0.02), 0.0, 0.45)
+    mix(x, partials_tone(2350, 0.45, [(1, 1.0, 0.11), (1.51, 0.3, 0.06), (2.1, 0.12, 0.03)], attack=0.001),
+        0.03, 0.75)
+    mix(x, harmonic_tone(vibrato([1175.0] * ns(0.4), 0.02, 18), [(1, 0.4, 0.12)], attack=0.002), 0.03, 0.4)
+    return tame(x, 6000)
+
+
+@combat_sfx("ice_crunch")
+def _ice_crunch(rng):       # a frozen fighter's ice block smashed: "KRSSH" with tinkling bits
+    x = buf(0.8)
+    mix(x, thump(0.2, 240, 90, 0.04, 0.015), 0.0, 0.6)
+    for _ in range(22):          # the crunch: dense bright cracks
+        r = rng.random()
+        mix(x, nburst(rng, 0.025, rng.uniform(1800, 4200), 1.6, rng.uniform(0.003, 0.008)),
+            0.12 * r ** 1.5, rng.uniform(0.3, 0.8))
+    for _ in range(14):          # the bits tinkling down
+        r = rng.random()
+        f = rng.uniform(2000, 3800)
+        tau = rng.uniform(0.03, 0.07)
+        mix(x, partials_tone(f, tau * 5, [(1, 1.0, tau)], attack=0.001), 0.05 + 0.6 * r ** 1.3,
+            rng.uniform(0.15, 0.35) * (1.0 - 0.5 * r))
+    return tame(x, 6000)
+
+
+@combat_sfx("plat_crash")
+def _plat_crash(rng):       # a built platform blown to bits: "CRASH!" and the pieces clattering down
+    x = buf(1.0)
+    mix(x, thump(0.4, 170, 55, 0.08, 0.025), 0.0, 0.8)
+    mix(x, snap_noise(rng, 0.06, 0.012, 600, 4200), 0.0, 0.6)
+    n = ns(0.6)
+    mix(x, mul(noise_lp(n, rng, 700), env(n, [(0, 0), (0.01, 1), (0.25, 0.4), (0.6, 0)])), 0.0, 0.4)
+    for _ in range(16):          # the pieces landing: wood and stone knocks, spreading out
+        r = rng.random()
+        t = 0.12 + 0.75 * r ** 1.2
+        f = rng.uniform(260, 900)
+        tau = rng.uniform(0.015, 0.035)
+        mix(x, partials_tone(f, tau * 5, [(1, 1.0, tau), (2.6, 0.3, tau * 0.5)], attack=0.001), t,
+            rng.uniform(0.25, 0.5) * (1.0 - 0.6 * r))
+    return tame(sat(x, 1.3), 4500)
+
+
+@combat_sfx("zap_buzz")
+def _zap_buzz(rng):         # electricity running through water or metal: a buzzing "BZZZT!"
+    n = ns(0.55)
+    f = jitter(fpath(n, [(0, 120), (0.5, 110)]), rng, 0.03, 30)
+    hum = buzz(f, 30, 0.9, top=5000.0)
+    hum = mul(hum, [0.55 + 0.45 * sin(TAU * 32 * i / SR) for i in range(n)])     # the "zzz" flutter
+    hum = mul(hum, smooth_rand(n, rng, 90, 0.5, 1.0))
+    crack = [0.0] * n
+    for _ in range(12):
+        mix(crack, nburst(rng, 0.012, rng.uniform(2500, 4500), 1.5, 0.002), rng.randrange(n), rng.uniform(0.4, 1.0),
+            samples=True)
+    x = add((norm(svf(hum, 1600, 0.8, "bp")), 0.7), (norm(lowpass(hum, 900)), 0.4), (crack, 0.35))
+    return tame(mul(x, env(n, [(0, 0), (0.01, 1), (0.4, 0.8), (0.55, 0)])), 5500)
+
+
+@combat_sfx("swoop")
+def _swoop(rng):            # a pterodactyl diving down to grab someone: "fwoosh" and a "kree!"
+    x = buf(0.8)
+    n = ns(0.75)
+    fc = env(n, [(0, 350), (0.3, 1500), (0.75, 450)])
+    wind = mul(norm(svf(noise(n, rng), fc, 1.4, "bp")), env(n, [(0, 0), (0.28, 1), (0.75, 0)]))
+    mix(x, wind, 0.0, 0.6)
+    m = ns(0.3)
+    f = jitter(vibrato(fpath(m, [(0, 1100), (0.06, 1700), (0.3, 1350)]), 0.02, 14), rng, 0.02, 30)
+    kree = mul(vowel(buzz(f, 5, 1.2), [(1800, 2.5, 1.0), (2900, 3.0, 0.3)]), env(m, [(0, 0), (0.02, 1), (0.2, 0.8), (0.3, 0)]))
+    mix(x, norm(kree), 0.25, 0.55)
+    return tame(x, 5000)
+
+
+@combat_sfx("grumble")
+def _grumble(rng):          # a gentle giant (a Brachiosaurus) losing its temper: a low, rumbly "hrrMMPH"
+    n = ns(0.9)
+    f = jitter(fpath(n, [(0, 62), (0.25, 80), (0.6, 74), (0.9, 58)]), rng, 0.05, 14)
+    src = mul(buzz(f, 36, 1.0, top=3000.0), subharm(f, 0.3))
+    f1 = env(n, [(0, 280), (0.3, 480), (0.65, 330), (0.9, 250)])                     # "hrr" opening to "MM"
+    voice = vowel(src, [(f1, 2.5, 1.0), (850, 4.0, 0.35)])
+    chest = lowpass(lowpass(src, 220), 220)
+    x = add((norm(voice), 1.0), (norm(chest), 0.6))
+    x = mul(x, env(n, [(0, 0), (0.08, 0.7), (0.3, 1), (0.7, 0.75), (0.9, 0)]))
+    return tame(sat(x, 1.1), 3000)
+
+
+@combat_sfx("thwack")
+def _thwack(rng):           # the beat of stillness after a big hit: a short, punchy "THWACK!"
+    x = buf(0.28)
+    mix(x, thump(0.2, 220, 85, 0.045, 0.012), 0.0, 0.6)
+    mix(x, nburst(rng, 0.04, 1500, 0.9, 0.008), 0.0, 1.0)
+    mix(x, snap_noise(rng, 0.02, 0.004, 1200, 5000), 0.0, 0.6)
+    return tame(sat(x, 1.5), 5500)
+
+
 # ================================================================== music
 BPM = 108                       # 60/108 s per beat = exactly 12250 samples
 BEAT = SR * 60.0 / BPM
@@ -1915,11 +2118,434 @@ def render_music():
     return norm(out, MUSIC_PEAK)
 
 
+# ------------------------------------------------------- more music loops
+# One loop per mood (autoload/sfx.gd MOODS): wiggle_loop above on the title
+# menu, calm_loop in the 2D sandbox, ready_loop while a 3D battle is set up
+# (and between 🌊 waves), battle_loop while it's fought. Each is a whole
+# number of bars, and every ringing tail past the end is wrapped back onto
+# the start, so it loops with no click. Each has its own seed, so changing
+# one never changes another.
+
+def _wrap(master, L):
+    """Folds everything past sample L back onto the start: a seamless loop."""
+    out = master[:L]
+    for i in range(L, len(master)):
+        out[(i - L) % L] += master[i]
+    return out
+
+
+def _level(x, rms, peak=MUSIC_PEAK):
+    """Scales a loop to loudness `rms`. The few drum hits that would then go
+    past 60% of `peak` are rounded off smoothly so they never reach it. That
+    goes sample by sample, so a seamless loop stays seamless."""
+    r = math.sqrt(sum(v * v for v in x) / len(x)) or 1.0
+    k = 0.6 * peak
+    tanh = math.tanh
+
+    def soft(v):
+        a = abs(v)
+        if a <= k:
+            return v
+        return math.copysign(k + (peak - k) * tanh((a - k) / (peak - k)), v)
+    return [soft(v * rms / r) for v in x]
+
+
+def _m_kalimba(m):
+    x = partials_tone(midi(m), 1.5, [(1, 1.0, 0.45), (2, 0.04, 0.12), (5.9, 0.09, 0.03)], attack=0.0025)
+    return fade_tail(x, 0.1)
+
+
+def _m_glock(m, tau=0.32):
+    return fade_tail(partials_tone(midi(m), 1.0, [(1, 1.0, tau), (2.76, 0.1, tau * 0.25)], attack=0.0015), 0.06)
+
+
+def _m_pizz(m, tau=0.1, dur=0.5):
+    x = partials_tone(midi(m), dur, [(1, 1.0, tau), (2, 0.45, tau * 0.6), (3, 0.25, tau * 0.4),
+                                     (4, 0.12, tau * 0.3), (5, 0.06, tau * 0.2)], attack=0.003)
+    return fade_tail(x, 0.06)
+
+
+def _m_pad(midis, dur, rng, attack=0.6, release=0.9, fc=1400.0):
+    """Soft, slightly chorused chord: pairs of triangle waves, gently lowpassed."""
+    n = ns(dur + release)
+    out = [0.0] * n
+    for m in midis:
+        f = midi(m)
+        for det in (-0.0035, 0.0035):
+            mix(out, osc(f * (1.0 + det), n, "tri", 0.003, rng.uniform(4.0, 5.5)), 0, 0.5, samples=True)
+    out = lowpass(lowpass(out, fc), fc)
+    return mul(out, env(n, [(0, 0), (attack, 1), (dur, 0.85), (dur + release, 0)]))
+
+
+def _m_softbass(m, dur):
+    n = ns(dur)
+    x = partials_tone(midi(m), dur, [(1, 1.0, 0), (2, 0.3, 0.3), (3, 0.08, 0.12)], attack=0.02)
+    return mul(x, env(n, [(0, 0), (0.05, 1), (max(0.06, dur - 0.15), 0.7), (dur, 0)]))
+
+
+def _m_bass(m, dur, fc=700.0):
+    """Round, punchy bass: a buzzy tone through a lowpass, plucked envelope."""
+    n = ns(dur)
+    src = buzz([midi(m)] * n, 10, 1.3)
+    a = env(n, [(0, 0), (0.005, 1), (dur * 0.5, 0.75), (max(0.006, dur - 0.02), 0.6), (dur, 0)])
+    return mul(lowpass(lowpass(src, fc), fc), a)
+
+
+def _m_kick(rng, f0=150.0):
+    x = thump(0.3, f0, 48, 0.11, 0.022, attack=0.0015)
+    mix(x, nburst(rng, 0.02, 2500, 0.8, 0.004), 0, 0.12)
+    return fade_tail(x, 0.08)
+
+
+def _m_snare(rng, tone=185.0, tau=0.065, bright=3000.0, dur=0.25):
+    n = ns(dur)
+    body = partials_tone(tone, dur, [(1, 1.0, 0.045), (1.62, 0.5, 0.03)], attack=0.001)
+    wires = mul(norm(svf(noise(n, rng), bright, 0.6, "bp")), decay(n, tau, 0.0008))
+    return fade_tail(add((body, 0.55), (wires, 0.85)), 0.05)
+
+
+def _m_hat(rng, tau=0.016, fc=5200.0):
+    n = ns(0.09)
+    return mul(norm(svf(noise(n, rng), fc, 1.1, "bp")), decay(n, tau, 0.0005))
+
+
+def _m_tom(rng, f):
+    x = thump(0.4, f * 1.5, f, 0.13, 0.04, attack=0.0015)
+    mix(x, nburst(rng, 0.05, 900, 0.8, 0.012), 0, 0.15)
+    return fade_tail(x, 0.1)
+
+
+def _m_crash(rng, dur=1.8):
+    n = ns(dur)
+    x = norm(add((svf(noise(n, rng), 4300, 0.5, "bp"), 1.0), (svf(noise(n, rng), 2500, 0.8, "bp"), 0.45)))
+    return mul(x, decay(n, 0.5, 0.002))
+
+
+def _m_block(f):
+    """Woodblock "tok" (the tick-tock of a clock)."""
+    return fade_tail(partials_tone(f, 0.12, [(1, 1.0, 0.028), (2.71, 0.25, 0.01)], attack=0.0008), 0.02)
+
+
+def _m_shaker(rng, tau=0.025):
+    n = ns(0.09)
+    return mul(norm(svf(noise(n, rng), 4300, 0.9, "bp")), decay(n, tau, 0.006))
+
+
+def _cache():
+    store = {}
+
+    def note(key, make):
+        if key not in store:
+            store[key] = make()
+        return store[key]
+    return note
+
+
+# ---- calm_loop: the 2D sandbox. Slow and dreamy: kalimba over a soft pad.
+CALM_BPM = 100                  # 13230 samples a beat
+CALM_BARS = 16                  # 38.4 s
+CALM_CHORDS = ["F", "Dm", "Bb", "C6", "F", "Am", "Bb", "Csus",
+               "Dm", "Am", "Bb", "F", "Gm", "Bb", "Csus", "C7"]
+CALM_PAD = {"F": (53, 57, 60, 64), "Dm": (53, 57, 60, 62), "Bb": (53, 57, 58, 62), "C6": (55, 57, 60, 64),
+            "Am": (52, 57, 60, 64), "Csus": (53, 55, 60, 62), "Gm": (53, 55, 58, 62), "C7": (52, 55, 58, 60)}
+CALM_ROOT = {"F": 41, "Dm": 38, "Bb": 46, "C6": 48, "Am": 45, "Csus": 48, "Gm": 43, "C7": 48}
+CALM_MELODY = [                 # (beat, note) per bar, F major pentatonic-ish
+    [(0, 81), (1.5, 79), (2, 77), (3, 72)],
+    [(0, 74), (0.5, 77), (1, 81), (3, 79)],
+    [(0, 77), (1, 74), (1.5, 77), (2, 81), (3.5, 79)],
+    [(0, 79), (1.5, 81), (2, 79), (3, 76)],
+    [(0, 81), (0.5, 84), (1, 81), (2, 79), (3, 77)],
+    [(0, 76), (1, 79), (2, 84), (3, 81)],
+    [(0, 86), (1, 84), (1.5, 81), (2, 77), (3, 79)],
+    [(0, 77), (2, 76), (3, 72)],
+    [(0, 74), (1, 77), (2, 81), (2.5, 84), (3, 81)],
+    [(0, 79), (1, 76), (2, 72), (3, 76)],
+    [(0, 77), (0.5, 81), (1, 86), (2, 84), (3, 81)],
+    [(0, 84), (2, 81), (3, 77)],
+    [(0, 79), (1, 82), (2, 86), (3, 84)],
+    [(0, 81), (1, 77), (2, 74), (3, 77)],
+    [(0, 79), (1, 77), (2, 79), (3, 84)],
+    [(0, 82), (1, 81), (2, 79), (3, 76)],
+]
+
+
+def render_calm():
+    rng = random.Random(SEED * 7 + 101)
+    beat = SR * 60.0 / CALM_BPM
+    L = int(round(beat * 4 * CALM_BARS))
+    total = L + ns(6.0)
+    kal, box, pad, bass, kick, perc = ([0.0] * total for _ in range(6))
+    note = _cache()
+
+    def pos(bar, b):
+        return int(round((bar * 4 + b) * beat))
+
+    tok = _m_block(1050.0)
+    kick_s = mul(_m_kick(rng, 120.0), 0.8)
+    shk = _m_shaker(rng)
+    for bar in range(CALM_BARS):
+        chord = CALM_CHORDS[bar]
+        for b, m in CALM_MELODY[bar]:
+            vel = rng.uniform(0.75, 0.9) + (0.08 if b == int(b) else 0.0)
+            i = max(0, pos(bar, b) + rng.randint(-80, 80))
+            mix(kal, note(("kal", m), lambda m=m: _m_kalimba(m)), i, vel, samples=True)
+        if bar % 8 >= 4:              # a music box twinkles along in the second half of each phrase
+            top = CALM_PAD[chord][-1] + 24
+            for b in (0, 2.5):
+                mix(box, note(("box", top), lambda top=top: _m_glock(top, 0.45)), pos(bar, b), 0.6, samples=True)
+        mix(pad, note(("pad", chord), lambda c=chord: _m_pad(CALM_PAD[c], 4 * beat / SR, rng)),
+            pos(bar, 0), 1.0, samples=True)
+        r = CALM_ROOT[chord]
+        for b, m, beats, g in ((0, r, 2.6, 1.0), (3, r + 7, 0.9, 0.6)):
+            mix(bass, note(("bass", m, beats), lambda m=m, beats=beats: _m_softbass(m, beats * beat / SR)),
+                pos(bar, b), g, samples=True)
+        mix(kick, kick_s, pos(bar, 0), 1.0, samples=True)
+        if bar >= 8:
+            mix(kick, kick_s, pos(bar, 2.5), 0.5, samples=True)
+        for b in (1, 3):
+            mix(perc, tok, pos(bar, b), 0.6, samples=True)
+        for k in range(8):           # lazily swung shaker
+            mix(perc, shk, pos(bar, k * 0.5 + (0.08 if k % 2 else 0.0)), 0.25 if k % 2 else 0.15, samples=True)
+
+    send = add((kal, 1.0), (box, 0.7))
+    wet = echo(send, 0.75 * beat / SR, 0.32, 1.0, 2200)          # dotted-eighth echo
+    wet = [w - s for w, s in zip(wet, send)]
+    master = add((kal, 0.5), (box, 0.12), (pad, 0.16), (bass, 0.42), (kick, 0.3), (perc, 0.1), (wet, 0.25))
+    master = lowpass(highpass(master, 30.0), 6500)
+    return _level(_wrap(master, L), 0.105)
+
+
+# ---- ready_loop: building a 3D battle. A toy-soldier march getting ready:
+# tiptoeing pizzicato, a ticking clock, a snare and soft horns.
+READY_BPM = 120                 # 11025 samples a beat
+READY_BARS = 16                 # 32 s
+READY_CHORDS = ["G", "C", "G", "D", "G", "C", "Am", "D",
+                "Em", "C", "G", "D", "Em", "Am", "C", "D7"]
+READY_HORN = {"G": (55, 59, 62), "C": (55, 60, 64), "D": (54, 57, 62), "Am": (57, 60, 64),
+              "Em": (55, 59, 64), "D7": (54, 60, 62)}
+READY_ROOT = {"G": 43, "C": 48, "D": 50, "Am": 45, "Em": 40, "D7": 50}
+READY_MELODY = [                # (beat, note) per bar, G major
+    [(0, 67), (0.5, 71), (1, 74), (2, 79), (3, 74)],
+    [(0, 76), (0.5, 74), (1, 72), (2, 76), (3, 79)],
+    [(0, 74), (1, 71), (1.5, 74), (2, 79), (3, 78)],
+    [(0, 76), (1, 74), (2, 69), (3, 72)],
+    [(0, 71), (0.5, 74), (1, 79), (2, 83), (3, 81)],
+    [(0, 79), (1, 76), (1.5, 79), (2, 84), (3, 79)],
+    [(0, 81), (1, 76), (2, 72), (3, 74)],
+    [(0, 78), (1, 81), (2, 78), (3, 74)],
+    [(0, 79), (1, 83), (2, 79), (3, 76)],
+    [(0, 76), (1, 79), (2, 84), (3, 79)],
+    [(0, 83), (1, 79), (2, 74), (3, 71)],
+    [(0, 74), (1, 78), (2, 81), (3, 78)],
+    [(0, 76), (0.5, 79), (1, 83), (2, 81), (3, 79)],
+    [(0, 76), (1, 72), (2, 76), (3, 81)],
+    [(0, 79), (1, 76), (2, 72), (3, 76)],
+    [(0, 74), (1, 78), (2, 81), (3, 84)],
+]
+
+
+def render_ready():
+    rng = random.Random(SEED * 7 + 202)
+    beat = SR * 60.0 / READY_BPM
+    L = int(round(beat * 4 * READY_BARS))
+    total = L + ns(5.0)
+    mel, pz, horns, kick, snare, clock = ([0.0] * total for _ in range(6))
+    note = _cache()
+
+    def pos(bar, b):
+        return int(round((bar * 4 + b) * beat))
+
+    kick_s = _m_kick(rng, 110.0)
+    snares = [_m_snare(rng, 200.0, 0.05, 3400.0) for _ in range(3)]
+    tick = _m_block(1500.0)
+    tock = _m_block(1120.0)
+    for bar in range(READY_BARS):
+        chord = READY_CHORDS[bar]
+        for b, m in READY_MELODY[bar]:
+            vel = rng.uniform(0.8, 0.92) + (0.06 if b == int(b) else 0.0)
+            i = max(0, pos(bar, b) + rng.randint(-50, 50))
+            mix(mel, note(("glk", m), lambda m=m: _m_glock(m + 12, 0.28)), i, vel * 0.45, samples=True)
+            mix(mel, note(("pzm", m), lambda m=m: _m_pizz(m, 0.12)), i, vel, samples=True)
+        r = READY_ROOT[chord]
+        for b, m in ((0, r), (1, r + 7), (2, r + 12), (3, r + 7)):
+            mix(pz, note(("pz", m), lambda m=m: _m_pizz(m, 0.09)), pos(bar, b), 1.0 if b in (0, 2) else 0.8,
+                samples=True)
+        for m in READY_HORN[chord]:
+            mix(horns, note(("hn", m), lambda m=m: horn(midi(m), 4 * beat / SR + 0.1, attack=0.25, release=0.35,
+                                                         bright=700, tilt=1.1)), pos(bar, 0), 0.35, samples=True)
+        for b in (0, 2):
+            mix(kick, kick_s, pos(bar, b), 1.0 if b == 0 else 0.7, samples=True)
+        hits = [(0, 0.45), (0.5, 0.2), (0.75, 0.22), (1, 0.85), (2, 0.45), (2.5, 0.2), (2.75, 0.22), (3, 0.85)]
+        if bar % 4 == 3 and bar != READY_BARS - 1:
+            hits += [(3.5, 0.35), (3.75, 0.45)]
+        if bar == READY_BARS - 1:                # a snare roll back to the top
+            hits = [(0, 0.45), (0.5, 0.2), (0.75, 0.22), (1, 0.85)]
+            hits += [(2 + k * 0.25, 0.3 + 0.07 * k) for k in range(8)]
+        for k, (b, g) in enumerate(hits):
+            mix(snare, snares[k % 3], pos(bar, b), g, samples=True)
+        for b in range(4):
+            mix(clock, tick if b % 2 == 0 else tock, pos(bar, b + 0.5), 0.5, samples=True)
+
+    wet = echo(mel, 0.5 * beat / SR, 0.25, 1.0, 2500)
+    wet = [w - s for w, s in zip(wet, mel)]
+    master = add((mel, 0.42), (pz, 0.36), (horns, 0.2), (kick, 0.3), (snare, 0.2), (clock, 0.07), (wet, 0.18))
+    master = lowpass(highpass(master, 30.0), 7000)
+    return _level(_wrap(master, L), 0.12)
+
+
+# ---- battle_loop: the fighting. Bouncy and heroic, never scary: drums,
+# a driving bass, brass stabs and a brass tune.
+BATTLE_BPM = 140                # 9450 samples a beat
+BATTLE_BARS = 16                # 27.4 s
+BATTLE_CHORDS = ["C", "Bb", "F", "C", "C", "Bb", "Ab", "G",
+                 "Am", "F", "C", "G", "Ab", "Bb", "C", "G"]
+BATTLE_STAB = {"C": (60, 64, 67), "Bb": (58, 62, 65), "F": (57, 60, 65), "Ab": (56, 60, 63),
+               "G": (59, 62, 67), "Am": (57, 60, 64)}
+BATTLE_ROOT = {"C": 48, "Bb": 46, "F": 41, "Ab": 44, "G": 43, "Am": 45}
+BATTLE_MELODY = [               # (beat, note, beats) per bar
+    [(0, 67, 0.5), (0.5, 72, 0.5), (1, 76, 1.0), (2.5, 74, 0.5), (3, 72, 1.0)],
+    [(0, 74, 1.5), (1.5, 70, 0.5), (2, 74, 1.0), (3, 77, 1.0)],
+    [(0, 77, 1.0), (1, 76, 0.5), (1.5, 74, 0.5), (2, 72, 1.5), (3.5, 69, 0.5)],
+    [(0, 72, 2.0), (2.5, 67, 0.5), (3, 72, 0.5), (3.5, 76, 0.5)],
+    [(0, 79, 1.0), (1, 76, 0.5), (1.5, 79, 0.5), (2, 84, 1.0), (3, 79, 1.0)],
+    [(0, 77, 1.0), (1, 74, 0.5), (1.5, 77, 0.5), (2, 82, 1.5), (3.5, 79, 0.5)],
+    [(0, 80, 1.0), (1, 79, 0.5), (1.5, 77, 0.5), (2, 75, 1.0), (3, 72, 1.0)],
+    [(0, 74, 1.5), (1.5, 71, 0.5), (2, 74, 1.0), (3, 79, 1.0)],
+    [(0, 76, 1.5), (1.5, 72, 0.5), (2, 69, 1.0), (3, 72, 1.0)],
+    [(0, 77, 1.0), (1, 81, 1.0), (2, 79, 1.0), (3, 77, 1.0)],
+    [(0, 76, 1.0), (1, 79, 1.0), (2, 84, 2.0)],
+    [(0, 83, 1.0), (1, 79, 0.5), (1.5, 74, 0.5), (2, 79, 2.0)],
+    [(0, 72, 1.0), (1, 75, 1.0), (2, 80, 1.5), (3.5, 79, 0.5)],
+    [(0, 77, 1.0), (1, 74, 1.0), (2, 82, 1.5), (3.5, 77, 0.5)],
+    [(0, 79, 0.5), (0.5, 84, 1.5), (2, 79, 0.5), (2.5, 76, 0.5), (3, 72, 1.0)],
+    [(0, 74, 0.5), (0.5, 79, 0.5), (1, 83, 1.0), (2, 86, 1.5), (3.5, 79, 0.5)],
+]
+
+
+def render_battle():
+    rng = random.Random(SEED * 7 + 303)
+    beat = SR * 60.0 / BATTLE_BPM
+    L = int(round(beat * 4 * BATTLE_BARS))
+    total = L + ns(5.0)
+    lead, stabs, bass, kick, snare, hats, toms, crash = ([0.0] * total for _ in range(8))
+    note = _cache()
+
+    def pos(bar, b):
+        return int(round((bar * 4 + b) * beat))
+
+    kick_s = _m_kick(rng, 160.0)
+    snare_s = _m_snare(rng, 190.0, 0.08, 2800.0, 0.3)
+    hat_s = [_m_hat(rng) for _ in range(2)]
+    tom_s = {f: _m_tom(rng, f) for f in (190.0, 150.0, 115.0, 90.0)}
+    crash_s = _m_crash(rng)
+    for bar in range(BATTLE_BARS):
+        chord = BATTLE_CHORDS[bar]
+        for b, m, beats in BATTLE_MELODY[bar]:
+            d = beats * beat / SR * 0.92
+            long_note = beats >= 1.5
+            make = (lambda m=m, d=d, v=long_note: horn(midi(m), d, attack=0.02, release=0.06, scoop=0.03,
+                                                         vib=0.012 if v else 0.0, vib_delay=0.2,
+                                                         bright=3000, tilt=0.75))
+            vel = rng.uniform(0.85, 0.95) + (0.06 if b == int(b) else 0.0)
+            mix(lead, note(("lead", m, beats), make), pos(bar, b), vel, samples=True)
+        for b, g in ((0, 1.0), (1.5, 0.7), (2.5, 0.75)):
+            for m in BATTLE_STAB[chord]:
+                mix(stabs, note(("stab", m), lambda m=m: horn(midi(m), 0.17, attack=0.012, release=0.06,
+                                                              bright=2200, tilt=0.8)),
+                    pos(bar, b), g, samples=True)
+        r = BATTLE_ROOT[chord]
+        for k, up in enumerate((0, 0, 12, 0, 0, 0, 7, 12)):
+            m = r + up
+            mix(bass, note(("bass", m), lambda m=m: _m_bass(m, 0.45 * beat / SR)), pos(bar, k * 0.5),
+                1.0 if k % 2 == 0 else 0.8, samples=True)
+        fill = bar in (7, 15)
+        for b in ((0, 2, 2.5) if not fill else (0, 2)):
+            mix(kick, kick_s, pos(bar, b), 1.0 if b != 2.5 else 0.7, samples=True)
+        for b in ((1, 3) if not fill else (1,)):
+            mix(snare, snare_s, pos(bar, b), 1.0, samples=True)
+        for k in range(8 if not fill else 6):
+            mix(hats, hat_s[k % 2], pos(bar, k * 0.5), 1.0 if k % 2 == 0 else 0.6, samples=True)
+        if bar == 7:            # a quick tom fill
+            for k, f in enumerate((190.0, 150.0, 115.0, 90.0)):
+                mix(toms, tom_s[f], pos(bar, 3 + k * 0.25), 0.8 + 0.05 * k, samples=True)
+        if bar == 15:           # a bigger one, back to the top
+            seq = (190.0, 190.0, 150.0, 150.0, 115.0, 115.0, 90.0, 90.0)
+            for k, f in enumerate(seq):
+                mix(toms, tom_s[f], pos(bar, 2 + k * 0.25), 0.7 + 0.04 * k, samples=True)
+            mix(snare, snare_s, pos(bar, 3.75), 0.6, samples=True)
+        if bar in (0, 8):
+            mix(crash, crash_s, pos(bar, 0), 1.0, samples=True)
+
+    wet = echo(lead, 0.75 * beat / SR, 0.2, 1.0, 2500)
+    wet = [w - s for w, s in zip(wet, lead)]
+    master = add((lead, 0.34), (stabs, 0.12), (bass, 0.3), (kick, 0.55), (snare, 0.32), (hats, 0.05),
+                 (toms, 0.4), (crash, 0.06), (wet, 0.12))
+    master = lowpass(highpass(master, 30.0), 7000)
+    return _level(_wrap(master, L), 0.13)
+
+
+# name -> (render, bars, bpm); wiggle_loop is at MUSIC_PATH
+LOOPS = {
+    "wiggle_loop": (render_music, BARS, BPM),
+    "calm_loop": (render_calm, CALM_BARS, CALM_BPM),
+    "ready_loop": (render_ready, READY_BARS, READY_BPM),
+    "battle_loop": (render_battle, BATTLE_BARS, BATTLE_BPM),
+}
+
+
+def loop_path(name):
+    return os.path.join(os.path.dirname(MUSIC_PATH), name + ".wav")
+
+
+# Godot's mixer reads a little past both ends of a loop: it interpolates
+# towards the sample after the loop's last one, and its QOA decoder (the
+# compressed import) stumbles on the first few samples of a file. With the
+# loop running from the file's first sample to its last, both made a click
+# at the seam. So each loop file has a copy of the loop's last LOOP_LEAD
+# samples before it and of its first LOOP_GUARD samples after it, and a
+# 'smpl' chunk saying where the loop is, which Godot's importer reads
+# (edit/loop_mode "Detect From WAV").
+LOOP_LEAD = 1024
+LOOP_GUARD = 1024
+
+
+def write_loop(path, x):
+    """Writes loop `x` with its lead-in, guard and loop points (see LOOP_LEAD)."""
+    write_wav(path, x[-LOOP_LEAD:] + x + x[:LOOP_GUARD])
+    begin = LOOP_LEAD
+    end = LOOP_LEAD + len(x)          # Godot's loop_end: the first sample after the loop
+    head = [0, 0, int(round(1e9 / SR)), 60, 0, 0, 0, 1, 0]      # maker, product, period, note, ..., 1 loop
+    loop = [0, 0, begin, end, 0, 0]                              # id, forward, start, end, fraction, forever
+    chunk = b"smpl" + (4 * (len(head) + len(loop))).to_bytes(4, "little") + b"".join(
+        v.to_bytes(4, "little") for v in head + loop)
+    with open(path, "r+b") as f:
+        f.seek(0, 2)
+        f.write(chunk)
+        size = f.tell()
+        f.seek(4)
+        f.write((size - 8).to_bytes(4, "little"))
+
+
+def loop_points(path):
+    """(begin, end) from a WAV file's 'smpl' chunk, or None."""
+    with open(path, "rb") as f:
+        b = f.read()
+    off = 12
+    while off + 8 <= len(b):
+        cid = b[off:off + 4]
+        size = int.from_bytes(b[off + 4:off + 8], "little")
+        if cid == b"smpl" and size >= 60:
+            at = off + 8 + 36 + 8
+            return (int.from_bytes(b[at:at + 4], "little"), int.from_bytes(b[at + 4:at + 8], "little"))
+        off += 8 + size + (size & 1)
+    return None
+
+
 # ============================================================ verification
 SFX_MAX_SEC = {"boom": 1.6, "mega_boom": 2.3, "firework_burst": 1.7, "party": 1.6,
                "wind": 2.5, "rain": 2.5, "rumble": 2.5,
                "roar": 1.7, "nuke": 4.2, "whistle": 1.4, "plane": 2.7, "alarm": 1.7,
-               "victory": 2.1, "battle_start": 2.1, "gun_mg": 0.1}
+               "victory": 2.1, "battle_start": 2.1, "defeat": 2.4, "gun_mg": 0.1}
 
 
 def _read(path):
@@ -1977,32 +2603,59 @@ def verify():
     if combat_total > 4 * 1024 * 1024:
         problems.append("combat sfx total %.2f MB exceeds 4 MB" % (combat_total / 1048576.0))
 
-    if not os.path.isfile(MUSIC_PATH):
-        problems.append("missing " + MUSIC_PATH)
-    else:
-        params, nf, data = _read(MUSIC_PATH)
-        size = os.path.getsize(MUSIC_PATH)
-        sec = nf / float(SR)
-        peak = max(abs(v) for v in data) / 32767.0
-        rms = math.sqrt(sum(v * v for v in data) / nf) / 32767.0
-        diffs = sorted(abs(data[i + 1] - data[i]) for i in range(0, nf - 1, 7))
+    music_total = 0
+    for name, (_, bars, bpm) in LOOPS.items():
+        path = loop_path(name)
+        if not os.path.isfile(path):
+            problems.append("missing " + path)
+            continue
+        params, nf, data = _read(path)
+        size = os.path.getsize(path)
+        music_total += size
+        pts = loop_points(path)
+        if pts is None:
+            problems.append("%s: no loop points ('smpl' chunk)" % name)
+            continue
+        begin, end = pts
+        L = end - begin
+        if begin != LOOP_LEAD or end + LOOP_GUARD != nf or \
+                list(data[:begin]) != list(data[end - begin:end]) or \
+                list(data[end:nf]) != list(data[begin:begin + nf - end]):
+            problems.append("%s: the lead-in and guard aren't copies of the loop's ends" % name)
+        loop = data[begin:end]
+        sec = L / float(SR)
+        peak = max(abs(v) for v in loop) / 32767.0
+        rms = math.sqrt(sum(v * v for v in loop) / L) / 32767.0
+        diffs = sorted(abs(loop[i + 1] - loop[i]) for i in range(0, L - 1, 7))
         typical = diffs[int(len(diffs) * 0.999)]
-        seam = abs(data[0] - data[-1])
-        print("-- music: %.3f s (%d bars @ %d BPM), %d bytes (%.2f MB), peak %.3f (%.1f dBFS), "
-              "rms %.3f, loop seam jump %d (99.9th pct step %d)" % (
-                  sec, BARS, BPM, size, size / 1048576.0, peak, 20 * math.log10(peak), rms, seam, typical))
+        bends = sorted(abs(loop[i + 1] - 2 * loop[i] + loop[i - 1]) for i in range(1, L - 1, 7))
+        typical_bend = bends[int(len(bends) * 0.999)]
+        # the seam: the step from the loop's last sample back to its first, and
+        # how much the slope changes there (a click would show up in both)
+        seam = abs(loop[0] - loop[-1])
+        bend = abs(loop[0] - 2 * loop[-1] + loop[-2])
+        print("-- %s: %.3f s loop (%d bars @ %d BPM, samples %d-%d of %d), %d bytes (%.2f MB), "
+              "peak %.3f (%.1f dBFS), rms %.3f (%.1f dBFS)"
+              % (name, sec, bars, bpm, begin, end, nf, size, size / 1048576.0, peak, 20 * math.log10(peak), rms,
+                 20 * math.log10(rms)))
+        print("   loop seam: step %d (99.9th pct step %d), slope change %d (99.9th pct %d), "
+              "ends %d %d %d | starts %d %d" % (seam, typical, bend, typical_bend,
+                                                loop[-3], loop[-2], loop[-1], loop[0], loop[1]))
         if params != (1, 2, SR, "NONE"):
-            problems.append("music: wrong format %r" % (params,))
+            problems.append("%s: wrong format %r" % (name, params))
         if not 24.0 <= sec <= 40.0:
-            problems.append("music: duration %.2f s outside 24-40 s" % sec)
-        if nf != BAR * BARS:
-            problems.append("music: length is not a whole number of bars")
+            problems.append("%s: duration %.2f s outside 24-40 s" % (name, sec))
+        if L != int(round(SR * 60.0 / bpm * 4 * bars)):
+            problems.append("%s: the loop is not a whole number of bars" % name)
         if peak < 0.3 or peak > 0.75:
-            problems.append("music: peak %.3f not near -3 dBFS" % peak)
-        if seam > typical:
-            problems.append("music: loop seam jump %d larger than normal steps" % seam)
+            problems.append("%s: peak %.3f not near -3 dBFS" % (name, peak))
+        if seam > typical or bend > typical_bend:
+            problems.append("%s: the loop seam jumps more than normal steps" % name)
         if size > 2.5 * 1024 * 1024:
-            problems.append("music: file over 2.5 MB")
+            problems.append("%s: file over 2.5 MB" % name)
+    print("-- %d music loops, %.2f MB" % (len(LOOPS), music_total / 1048576.0))
+    if music_total > 7 * 1024 * 1024:
+        problems.append("music total %.2f MB exceeds 7 MB" % (music_total / 1048576.0))
     for p in problems:
         print("FAIL:", p)
         ok = False
@@ -2015,9 +2668,10 @@ def main(argv):
     if "--verify" in argv:
         return 0 if verify() else 1
     wanted = [a for a in argv if not a.startswith("-")]
-    unknown = [a for a in wanted if a not in SFX and a != "music"]
+    unknown = [a for a in wanted if a not in SFX and a not in LOOPS and a != "music"]
     if unknown:
-        print("unknown sound(s): %s\nknown: %s music" % (", ".join(unknown), " ".join(SFX)))
+        print("unknown sound(s): %s\nknown: %s music (all the loops) %s" % (
+            ", ".join(unknown), " ".join(SFX), " ".join(LOOPS)))
         return 2
     os.makedirs(SFX_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(MUSIC_PATH), exist_ok=True)
@@ -2027,9 +2681,10 @@ def main(argv):
         rng = random.Random(SEED * 1000003 + zlib.crc32(name.encode("utf-8")))
         write_wav(os.path.join(SFX_DIR, name + ".wav"), finish(fn(rng)))
         print("sfx  ", name)
-    if not wanted or "music" in wanted:
-        print("music  wiggle_loop (takes a little while)...")
-        write_wav(MUSIC_PATH, render_music())
+    for name, (render, _, _) in LOOPS.items():
+        if not wanted or "music" in wanted or name in wanted:
+            print("music ", name, "(takes a little while)...")
+            write_loop(loop_path(name), render())
     return 0 if verify() else 1
 
 

@@ -83,9 +83,27 @@ static func parse_release(data: Dictionary, os_name: String) -> Dictionary:
 		"version": ver,
 		"newer": ver != "" and newer(ver, current()),
 		"notes": String(data.get("body", "") if data.get("body") != null else ""),
-		"page": String(data.get("html_url", PAGE)),
+		"page": safe_page(String(data.get("html_url", PAGE)) if data.get("html_url") is String else PAGE),
 		"asset": pick_asset(data.get("assets", []) if data.get("assets") is Array else [], os_name),
+		"sums": _named(data.get("assets", []) if data.get("assets") is Array else [], "SHA256SUMS.txt"),
 	}
+
+
+## The release asset called `file_name`, or {}.
+static func _named(assets: Array, file_name: String) -> Dictionary:
+	for a in assets:
+		if a is Dictionary and String(a.get("name", "")) == file_name:
+			return a
+	return {}
+
+
+## A release page to open in the browser: only this game's own GitHub pages
+## (anything else in GitHub's answer opens the usual releases page instead).
+static func safe_page(url: String) -> String:
+	var mine := "https://github.com/" + REPO.to_lower() + "/"
+	if url.to_lower().begins_with(mine) and not url.contains("..") and not url.contains("@"):
+		return url
+	return PAGE
 
 
 ## True when "Update now" can install by itself (the exported Windows game).
@@ -133,6 +151,18 @@ func check() -> Dictionary:
 	return info
 
 
+## The "sha256:..." line for `file_name` in a SHA256SUMS.txt (the release's list
+## of fingerprints, made by tools/release.sh), or "" if it isn't there.
+static func sum_for(sums_text: String, file_name: String) -> String:
+	for line in sums_text.split("\n"):
+		var parts := line.strip_edges().split(" ", false)
+		if parts.size() == 2 and parts[1].trim_prefix("*") == file_name:
+			var hex := parts[0].to_lower()
+			if hex.length() == 64 and hex.is_valid_hex_number():
+				return "sha256:" + hex
+	return ""
+
+
 ## True for downloads from this game's own GitHub releases (https only).
 static func trusted(url: String) -> bool:
 	return url.to_lower().begins_with(DOWNLOADS.to_lower())
@@ -140,21 +170,43 @@ static func trusted(url: String) -> bool:
 
 ## Downloads `asset` (from a release) to `path` and makes sure it arrived
 ## whole. Returns "" when it's good, or what went wrong.
-func fetch(asset: Dictionary, path: String) -> String:
+## When GitHub's answer has no digest for it, the fingerprint comes from the
+## release's SHA256SUMS.txt (`sums`, also only from this game's releases).
+func fetch(asset: Dictionary, path: String, sums := {}) -> String:
 	var url := String(asset.get("browser_download_url", ""))
 	if url == "":
 		return "That version has nothing to download for this computer."
 	if not trusted(url):
 		return "That download isn't from Wiggle Works' GitHub page, so it was skipped."
 	var total := int(asset.get("size", 0))
+	var digest := str(asset.get("digest", "")) if asset.get("digest") != null else ""
+	if not digest.begins_with("sha256:") and not sums.is_empty():
+		digest = sum_for(await _small_text(String(sums.get("browser_download_url", ""))), String(asset.get("name", "")))
 	var problem := await download(url, path, total)
 	if problem == "":
-		problem = verify(path, total, str(asset.get("digest", "")))
+		problem = verify(path, total, digest)
 	if problem != "" and FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 	else:
 		progress.emit(total, total)
 	return problem
+
+
+## A small text file (SHA256SUMS.txt) from this game's releases, or "".
+func _small_text(url: String) -> String:
+	if not trusted(url):
+		return ""
+	var h := HTTPRequest.new()
+	h.timeout = 15.0
+	h.body_size_limit = 64 * 1024
+	add_child(h)
+	var text := ""
+	if h.request(url, PackedStringArray(["User-Agent: " + UA])) == OK:
+		var r: Array = await h.request_completed
+		if int(r[0]) == HTTPRequest.RESULT_SUCCESS and int(r[1]) == 200:
+			text = (r[3] as PackedByteArray).get_string_from_utf8()
+	h.queue_free()
+	return text
 
 
 ## Saves `url` to `path`, reporting progress. Returns "" when it all arrived,
@@ -207,8 +259,8 @@ func download(url: String, path: String, total: int) -> String:
 
 
 ## The downloaded file must be the right size and have exactly the bytes of
-## GitHub's "sha256:..." digest. Without a digest there's nothing to check it
-## against, so it doesn't pass.
+## GitHub's "sha256:..." digest (or the release's SHA256SUMS.txt line). Without
+## one there's nothing to check it against, so it doesn't pass.
 static func verify(path: String, size: int, digest: String) -> String:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
@@ -261,14 +313,14 @@ static func clean_up(exe: String, always := false) -> void:
 ## Returns "" if the game is restarting, or what went wrong.
 func install(info: Dictionary) -> String:
 	if not can_install():
-		OS.shell_open(String(info.get("page", PAGE)))
+		OS.shell_open(safe_page(String(info.get("page", PAGE))))
 		return ""
 	if installing:
 		return "Already updating."
 	installing = true
 	var exe := OS.get_executable_path()
 	var tmp := exe + ".new"
-	var problem := await fetch(info.get("asset", {}), tmp)
+	var problem := await fetch(info.get("asset", {}), tmp, info.get("sums", {}) if info.get("sums") is Dictionary else {})
 	if problem == "" and swap(tmp, exe) != OK:
 		problem = "Couldn't swap in the new version. Try moving Wiggle Works to your Documents or Desktop folder."
 		DirAccess.remove_absolute(tmp)

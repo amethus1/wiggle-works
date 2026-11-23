@@ -33,6 +33,11 @@ var battle = null
 var _hidden_near: Array = []    # teammates right in front of your face (hidden in first person)
 var _hid: Array = []            # the meshes of your own body we hid (they go with it into a ragdoll)
 var _fp_rig := 0                # the model we hid (its id); standing up or changing team builds a new one
+var _fp_king := false           # it had its 👑 crown when we hid it (crowning it adds one to hide)
+var _bomb_mark: Node3D = null   # ✈️ where a bomb let go now would land (playing a fighter plane)
+var _bomb_mat: StandardMaterial3D = null
+var _bomb_last := Vector3.INF   # (a friend's copy: where its plane was last frame, for its speed)
+var _bomb_vel := Vector3.ZERO
 const HIDE_LAYER := 1 << 19     # render layer for the body you're looking out of
 
 
@@ -114,6 +119,7 @@ func _new_body(u: B3Unit) -> void:
 	hands.setup(u)
 	_hide_body(u)
 	_fp_rig = u.rig.get_instance_id() if u.rig else 0
+	_fp_king = u.king
 
 
 ## Puts a fighter's body on a layer the first-person camera doesn't draw, so
@@ -142,6 +148,7 @@ func _show_body() -> void:
 			vi.remove_meta("fp_layers")
 	_hid.clear()
 	_fp_rig = 0
+	_fp_king = false
 
 
 ## True if `n` or a parent (up to the unit) has the "fp_keep" meta.
@@ -183,6 +190,9 @@ func _process(_d: float) -> void:
 	if first_person():
 		if fp_unit.rig != null and fp_unit.rig.get_instance_id() != _fp_rig:
 			_new_body(fp_unit)      # got back up, or changed team: a new model to hide (and a new weapon to hold)
+		elif fp_unit.king != _fp_king:
+			_fp_king = fp_unit.king
+			_hide_body(fp_unit)     # 👑 crowned King while you look out of its eyes: its new crown hides too
 		var p := fp_unit.global_position
 		focus = Vector3(p.x, 0, p.z)
 		_hide_near(p)
@@ -203,6 +213,7 @@ func _process(_d: float) -> void:
 			var goal := Vector3(p.x, 0, p.z) - right * size * offset_k
 			focus = focus.lerp(goal, minf(1.0, dt * 4.0))
 			_clamp()
+	_bomb_tick(dt)
 	apply()
 
 
@@ -229,6 +240,8 @@ func _hide_near(at: Vector3) -> void:
 ## 🔭 A sniper's scope (right-click in first person): the view zooms in
 ## smoothly and a round black edge closes in around it.
 func _zoom(dt: float) -> void:
+	if fp_unit.down and fp_ctl.fire2 and B3Player.power(fp_unit) == "scope":
+		fp_ctl.fire2 = false      # knocked down: the scope comes out (right-click puts it back in)
 	var want := SCOPE_FOV if B3Player.scoped(fp_unit, fp_ctl) else fov
 	if absf(cam.fov - want) > 0.05:
 		cam.fov = move_toward(cam.fov, want, dt * 300.0)
@@ -276,6 +289,91 @@ void fragment() {
 	q.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	q.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	return q
+
+
+## ✈️ Flying a fighter plane (either view): a ring on the ground where a bomb
+## let go right now would land (B3Player.bomb_landing), as wide as its blast.
+## Bright orange with the bomb loaded, grey while the next one loads.
+func _bomb_tick(dt: float) -> void:
+	var a: B3Aircraft = null
+	if B3Player.active():
+		a = B3Player.unit as B3Aircraft
+	if a == null or not a.plane or a.falling or battle == null:
+		if _bomb_mark != null and _bomb_mark.visible:
+			_bomb_mark.visible = false
+		_bomb_last = Vector3.INF
+		return
+	var vel := a.linear_velocity
+	if battle.puppet:
+		# a friend's copy glides to where the host says: its speed is how fast it glides
+		var p := a.global_position
+		if _bomb_last != Vector3.INF and dt > 0.0:
+			_bomb_vel = _bomb_vel.lerp((p - _bomb_last) / dt, minf(1.0, dt * 8.0))
+		_bomb_last = p
+		vel = _bomb_vel
+	var at := B3Player.bomb_landing(a, vel)
+	if at == Vector3.INF:
+		if _bomb_mark != null:
+			_bomb_mark.visible = false
+		return
+	if _bomb_mark == null:
+		_bomb_mark = _make_bomb_mark()
+		add_child(_bomb_mark)
+	_bomb_mark.visible = true
+	var col := Color(1.0, 0.42, 0.15, 0.9) if B3Player.bomb_ready(a) else Color(0.85, 0.85, 0.9, 0.4)
+	if _bomb_mat.albedo_color != col:
+		_bomb_mat.albedo_color = col
+	var n: Vector3 = battle.world.normal_at(at.x, at.z)
+	var r := float(B3Defs.weapon("plane_bomb").get("radius", 4.4)) * B3Rules.boom_r()
+	var x := n.cross(Vector3.FORWARD).normalized() if absf(n.z) < 0.95 else n.cross(Vector3.RIGHT).normalized()
+	var z := x.cross(n).normalized()
+	_bomb_mark.global_transform = Transform3D(Basis(x * r, n, z * r), at + n * 0.15)
+
+
+## The bomb marker: a ring with a cross in the middle, drawn over everything
+## (so hills and long grass can't hide it), with no shadow.
+func _make_bomb_mark() -> Node3D:
+	var root := Node3D.new()
+	root.name = "BombMark"
+	root.top_level = true
+	root.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_bomb_mat = StandardMaterial3D.new()
+	_bomb_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_bomb_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_bomb_mat.no_depth_test = true
+	_bomb_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_bomb_mat.render_priority = 40
+	_bomb_mat.albedo_color = Color(1.0, 0.42, 0.15, 0.9)
+	var ring := TorusMesh.new()
+	ring.inner_radius = 0.9
+	ring.outer_radius = 1.0
+	ring.rings = 48
+	ring.ring_segments = 4
+	var parts: Array = [[ring, Vector3.ZERO, Vector3(1.0, 0.05, 1.0)]]
+	var bar := BoxMesh.new()
+	bar.size = Vector3(0.06, 0.02, 0.5)
+	for a in 4:
+		# four short ticks pointing in at the middle, and a dot there
+		var d := Vector3(sin(a * PI * 0.5), 0, cos(a * PI * 0.5))
+		parts.append([bar, d * 0.42, Vector3.ONE, a * PI * 0.5])
+	var dot := CylinderMesh.new()
+	dot.top_radius = 0.07
+	dot.bottom_radius = 0.07
+	dot.height = 0.02
+	dot.radial_segments = 12
+	parts.append([dot, Vector3.ZERO, Vector3.ONE])
+	for p: Array in parts:
+		var mi := MeshInstance3D.new()
+		mi.mesh = p[0]
+		mi.material_override = _bomb_mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.position = p[1]
+		mi.scale = p[2]
+		if p.size() > 3:
+			mi.rotation.y = float(p[3])
+		mi.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		root.add_child(mi)
+	return root
 
 
 func shake(a: float) -> void:

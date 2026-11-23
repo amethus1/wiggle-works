@@ -61,7 +61,9 @@ func _process(dt: float) -> void:
 	var off := Vector2.ZERO
 	if effects and effects.shake > 0.05:
 		var t := Time.get_ticks_msec() / 1000.0
-		off = Vector2(sin(t * 53.0), cos(t * 72.6)) * effects.shake
+		off = Vector2(sin(t * 53.0), cos(t * 72.6)) * effects.shake * Settings.shake_2d      # (📳 ⚙️ Settings)
+	if effects:
+		off += effects.kick * Settings.shake_2d   # a jolt toward a blast or along a big blow
 	position = _base + off
 	Sfx.listener_pos = _base
 	Sfx.listener_zoom = zoom.x

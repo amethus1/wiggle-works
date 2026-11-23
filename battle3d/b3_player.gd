@@ -13,7 +13,9 @@ class_name B3Player
 ## dinosaurs. Each has a cooldown (B3Unit.power_cd) so it can't be spammed.
 ## Vehicles use right-click for their second gun instead.
 ##   shield  - hold: shield up. Blocks much better and wider from the front,
-##             but you walk at half speed.
+##             but you walk at half speed. Block or swing, not both: a raised
+##             shield can't swing (let go to attack), and while a swing is
+##             going the shield stays down (it comes back up after).
 ##   scope   - sniper. First person: right-click puts the scope in and out
 ##             (zoom, slower mouse look; B3Tools, B3Cam). Overhead: hold for a
 ##             steady aim (a red laser, dead-on shots, a quicker aim, slower walk).
@@ -23,8 +25,10 @@ class_name B3Player
 ##   pounce  - raptor: leaps at where you aim and claws whoever it lands on.
 ##   heal    - medic: a green pulse that heals teammates nearby (and you a little).
 ##   swoop   - dragon and pterodactyl: dive at where you aim and bite.
-##   gorilla - aim close: ground pound. Aim far away: throw a boulder there.
-##   roar    - T-Rex (and the elephant's trumpet): pushes back and stuns enemies nearby.
+##   gorilla - an enemy close by (or aiming close): ground pound. Otherwise
+##             throw a boulder where you aim. Feet on the ground for both.
+##   roar    - T-Rex (and the elephant's trumpet): pushes back and stuns enemies
+##             nearby (from the ground, not in mid-jump).
 ##   shove   - everyone else: a kick (people) or a shove (animals) that pushes
 ##             the enemy in front back a little.
 ## Powers run on the host like everything else, so friends' work too.
@@ -165,8 +169,9 @@ static func control(u: B3Unit, dt: float) -> void:
 			c.windup = ""
 	if not locked:
 		u.target = _pick_target(u, c)
-	_swing_landed(u, dt)
-	if c.fire and u.cd <= 0.0 and u.act == "":
+	# (a raised shield can't swing: let go of right-click first. Hits you land
+	# flash the first-person hit marker from B3Unit.hurt.)
+	if c.fire and u.cd <= 0.0 and u.act == "" and not u.shield_up:
 		_attack(u, c)
 
 
@@ -174,16 +179,6 @@ static func control(u: B3Unit, dt: float) -> void:
 ## true if it has an enemy to shoot at.
 static func _had_target(u: B3Unit) -> bool:
 	return is_instance_valid(u.target) and not u.target.down
-
-
-## A melee swing lands halfway through (B3Unit._melee_hit). If it hurt the
-## enemy just now, the first-person crosshair shows a hit marker.
-static func _swing_landed(u: B3Unit, dt: float) -> void:
-	if u.act != "attack" or u.act_len <= 0.0 or not is_instance_valid(u.target):
-		return
-	var half := u.act_len * 0.5
-	if u.act_t >= half and u.act_t - dt < half and u.target.hurt_t <= 0.0:
-		u.battle.player_hit(u, u.target)
 
 
 ## The enemy under the cursor or crosshair, or (for melee) whoever is right in front.
@@ -370,7 +365,7 @@ static func power_help(u: B3Unit) -> String:
 	var icon := String(u.def.get("icon", ""))
 	match power(u):
 		"shield":
-			return "hold right-click 🛡️ shield up"
+			return "hold right-click 🛡️ block (let go to swing)"
 		"scope":
 			return "right-click 🔭 scope" if me.fp else "hold right-click 🎯 steady aim"
 		"bayonet":
@@ -384,7 +379,7 @@ static func power_help(u: B3Unit) -> String:
 		"swoop":
 			return "right-click %s swoop" % icon
 		"gorilla":
-			return "right-click 🦍 ground pound (aim far: 🪨 boulder)"
+			return "right-click 🦍 ground pound up close (far: 🪨 boulder)"
 		"roar":
 			return "right-click %s %s" % [icon, "trumpet" if u.kind == "elephant" else "roar"]
 		"shove":
@@ -392,22 +387,132 @@ static func power_help(u: B3Unit) -> String:
 	return ""
 
 
-## How ready `u`'s power is: 0 just used, 1 ready again (for a cooldown meter;
-## only the host knows, so a friend's copy always reads 1).
+## The power's short name, for the pill that shows its cooldown overhead
+## (B3UI): "👟 Kick", "🐂 Charge"...
+static func power_name(u: B3Unit) -> String:
+	if u == null or not is_instance_valid(u):
+		return ""
+	var icon := String(u.def.get("icon", ""))
+	match power(u):
+		"shield":
+			return "🛡️ Shield"
+		"scope":
+			return "🔭 Scope"
+		"bayonet":
+			return "🗡️ Bayonet"
+		"charge":
+			return "%s Charge" % icon
+		"pounce":
+			return "%s Pounce" % icon
+		"heal":
+			return "💚 Heal"
+		"swoop":
+			return "%s Swoop" % icon
+		"gorilla":
+			return "🦍 Pound / 🪨 Boulder"
+		"roar":
+			return "%s %s" % [icon, "Trumpet" if u.kind == "elephant" else "Roar"]
+		"shove":
+			return "👟 Kick" if kicks(u) else "💥 Shove"
+	return ""
+
+
+## How ready `u`'s power is: 0 just used, 1 ready again. The cooldown ring
+## round the first-person crosshair and the pill under "You're the ..." show
+## it (B3UI). Only the host really knows: a friend's copy reads the power_cd
+## and power_len the host sends along, or what set_net_gauges was given.
 static func power_ready(u: B3Unit) -> float:
-	if u == null or not is_instance_valid(u) or u.power_cd <= 0.0:
+	if u == null or not is_instance_valid(u):
+		return 1.0
+	if u.has_meta("net_gauges") and u.battle != null and u.battle.puppet:
+		return _net_gauge(u, 0)
+	if u.power_cd <= 0.0:
 		return 1.0
 	return clampf(1.0 - u.power_cd / maxf(u.power_len, 0.01), 0.0, 1.0)
 
 
+## True if `u`'s power has a cooldown to show (holding up a shield or a
+## sniper's scope doesn't: they're held, not used up).
+static func power_has_cd(u: B3Unit) -> bool:
+	var pw := power(u)
+	return pw != "" and float(POWERS.get(pw, {}).get("cd", 0.0)) > 0.0
+
+
+## A reload shorter than this is just the time between swings or shots: the
+## reload bar (and reload_ready) leave it out.
+const RELOAD_MIN := 0.6
+
+
+## How far `u`'s main weapon has reloaded: 0 just fired, 1 ready. Short
+## waits between shots (and every melee swing) read 1, so only real reloads
+## show: the musket, sniper, bazooka, bow, a machine gun's new belt, a tank's
+## shell... The first-person reload bar shows it (B3UI). On the host it
+## remembers how long the wait was when it started (meta "cd_full"); a
+## friend's copy reads what the host sent (set_net_gauges), or 1.
+static func reload_ready(u: B3Unit) -> float:
+	if u == null or not is_instance_valid(u):
+		return 1.0
+	if u.has_meta("net_gauges") and u.battle != null and u.battle.puppet:
+		return _net_gauge(u, 1)
+	var cd := u.cd
+	var full: float = u.get_meta("cd_full", 0.0)
+	if cd > float(u.get_meta("cd_prev", 0.0)) + 0.001:
+		full = cd      # a new wait just started
+		u.set_meta("cd_full", full)
+	u.set_meta("cd_prev", cd)
+	if cd <= 0.0 or full < RELOAD_MIN or (not (u is B3Vehicle) and String(u.wpn.get("type", "")) == "melee"):
+		return 1.0
+	return clampf(1.0 - cd / full, 0.0, 1.0)
+
+
+## 👥 For friends' screens (B3Net). Only the host runs the battle, so only it
+## knows how far a power or a reload has got. For each unit a friend plays,
+## the host can send net_gauges(u) (two numbers 0..1: power, reload; a byte
+## each is plenty) and the friend's copy passes them to set_net_gauges(u, a).
+## power_ready and reload_ready then read them there. (Sending power_cd and
+## power_len themselves works for the power too: power_ready reads those
+## when it hasn't been given gauges.)
+static func net_gauges(u: B3Unit) -> PackedFloat32Array:
+	return PackedFloat32Array([power_ready(u), reload_ready(u)])
+
+
+static func set_net_gauges(u: B3Unit, a: Variant) -> void:
+	if u == null or not is_instance_valid(u) or not (a is PackedFloat32Array or a is Array):
+		return
+	var src: Array = Array(a)
+	var g := PackedFloat32Array([1.0, 1.0])
+	for i in mini(2, src.size()):
+		var v: Variant = src[i]
+		if (v is float or v is int) and is_finite(float(v)):
+			g[i] = clampf(float(v), 0.0, 1.0)
+	u.set_meta("net_gauges", g)
+
+
+static func _net_gauge(u: B3Unit, i: int) -> float:
+	if not u.has_meta("net_gauges"):
+		return 1.0
+	var g: Variant = u.get_meta("net_gauges")
+	if g is PackedFloat32Array and (g as PackedFloat32Array).size() > i:
+		return (g as PackedFloat32Array)[i]
+	return 1.0
+
+
+## Right-click held on a shield carrier with no swing going: the shield
+## goes up (B3Unit.shield_up). Swinging lowers it, and a raised shield can't
+## swing (control), so it's block or swing, not both at once.
+static func guard_wanted(u: B3Unit, c: B3Ctl) -> bool:
+	return c != null and c.fire2 and u.act == "" and not u.down and power(u) == "shield"
+
+
 ## A sniper looking through its scope (first person, right-click toggled on).
+## Knocked down, the scope comes out (B3Cam drops it).
 static func scoped(u: B3Unit, c: B3Ctl) -> bool:
-	return c != null and c.fp and c.fire2 and power(u) == "scope"
+	return c != null and c.fp and c.fire2 and is_instance_valid(u) and not u.down and power(u) == "scope"
 
 
 ## A sniper holding right-click in the overhead view: a steady aim.
 static func steady(u: B3Unit, c: B3Ctl) -> bool:
-	return c != null and not c.fp and c.fire2 and power(u) == "scope"
+	return c != null and not c.fp and c.fire2 and is_instance_valid(u) and not u.down and power(u) == "scope"
 
 
 ## People and robots kick; animals shove.
@@ -420,7 +525,7 @@ static func kicks(u: B3Unit) -> bool:
 ## charge or a swoop carries it along (it steers itself; no attacking then).
 static func _power_tick(u: B3Unit, c: B3Ctl, dt: float) -> bool:
 	var pw := power(u)
-	var up := pw == "shield" and c.fire2
+	var up := guard_wanted(u, c)
 	if up != u.shield_up:
 		u.shield_up = up
 		if up:
@@ -476,19 +581,46 @@ static func _use_power(u: B3Unit, c: B3Ctl, pw: String) -> void:
 		"swoop":
 			_start_swoop(u, c)
 		"gorilla":
-			if u._flat(c.aim - u.position).length() > 6.5:
+			if not u._grounded:
+				return      # (feet on the ground first: no pounding the air)
+			if pound_close(u, c):
+				u._start_act("pound", 0.95, B3Defs.weapon("gorilla_pound"))
+				b.snd("growl", u.position, 0.7)
+			else:
 				u._start_act("hurl", 1.15, B3Defs.weapon("boulder"))     # B3Special._hurl throws it where you aim
 				b.snd("growl", u.position, 0.6)
 				cd = BOULDER_CD
-			else:
-				u._start_act("pound", 0.95, B3Defs.weapon("gorilla_pound"))
-				b.snd("growl", u.position, 0.7)
 		"roar":
+			if not u._grounded:
+				return
 			_roar(u)
 		_:
 			return       # shield and scope are held, not used up
 	u.power_cd = cd
 	u.power_len = cd
+
+
+const POUND_AIM := 6.5       # the gorilla aiming closer than this pounds (farther: a boulder)
+const POUND_NEAR := 1.6      # ...and it always pounds with an enemy this close past its blast
+
+## The gorilla's right-click: a ground pound if an enemy is close enough for
+## its blast to reach (or you aim at the ground close by), otherwise a
+## boulder thrown where you aim. In first person the crosshair usually points
+## far ahead, so it's whoever's close that counts.
+static func pound_close(u: B3Unit, c: B3Ctl) -> bool:
+	if u._flat(c.aim - u.position).length() <= POUND_AIM:
+		return true
+	var r := float(B3Defs.weapon("gorilla_pound").get("aoe", 3.8)) * clampf(u.size, 0.6, 2.5) + POUND_NEAR
+	var fwd := u.forward()
+	for o: B3Unit in u.battle.units_near(u.position, r, 2.0):
+		if o == u or o.down or o.dead or not u.is_enemy(o) or u._height_gap(o) > 2.5:
+			continue
+		var off := u._flat(o.position - u.position)
+		var d := off.length()
+		# (the pound lands in front: an enemy right behind you doesn't count)
+		if d < r + o.radius and (d < 1.0 or fwd.dot(off / d) > -0.2):
+			return true
+	return false
 
 
 ## Where a charge, pounce or swoop goes: where you look (first person) or
@@ -604,3 +736,74 @@ static func _roar(u: B3Unit) -> void:
 			o.stun_t = maxf(o.stun_t, 0.6)
 			if o.pers == "coward":
 				o.fleeing = true
+
+
+# ----------------------------------------------------- first-person gauges
+## ✈️ Where a bomb let go from fighter plane `u` right now would land on the
+## ground (Vector3.INF if `u` isn't a plane). It works it out the way the bomb
+## flies: it leaves the bomb rack with 95% of the plane's velocity `vel` plus
+## 1 m/s down (B3Aircraft._drop_bomb) and falls under the 🌍 Gravity rule
+## (B3Proj.gravity("bomb")), a physics step at a time like B3Proj, so the
+## marker is right in Moon gravity too. (A friend's copy passes the speed it
+## sees its copy of the plane gliding at.) Buildings and trees aren't counted.
+static func bomb_landing(u: B3Unit, vel: Vector3) -> Vector3:
+	if u == null or not is_instance_valid(u) or not (u is B3Aircraft) or not (u as B3Aircraft).plane:
+		return Vector3.INF
+	var vr := u.rig as B3VRig
+	var p0: Vector3 = vr.bomb_node.global_position if vr != null and vr.bomb_node != null else u.global_position + Vector3(0, 0.4, 0)
+	var v0 := vel * 0.95 + Vector3(0, -1.0, 0)
+	var g := B3Proj.gravity("bomb")
+	var h := 1.0 / maxf(1.0, float(Engine.physics_ticks_per_second))
+	var w = u.battle.world
+	# B3Proj takes off g*h from the speed and then moves, every step: after
+	# time t that's p0 + v0*t - g*t*(t + h)/2 down. Coarse steps find where it
+	# goes under the ground, then halving narrows it down.
+	var t0 := 0.0
+	var t1 := 0.0
+	var found := false
+	for i in 160:
+		t1 = t0 + 0.1
+		var q := p0 + v0 * t1 - Vector3(0, 0.5 * g * t1 * (t1 + h), 0)
+		if q.y <= float(w.height_at(q.x, q.z)):
+			found = true
+			break
+		t0 = t1
+	if not found:
+		return Vector3.INF
+	for i in 7:
+		var tm := (t0 + t1) * 0.5
+		var qm := p0 + v0 * tm - Vector3(0, 0.5 * g * tm * (tm + h), 0)
+		if qm.y <= float(w.height_at(qm.x, qm.z)):
+			t1 = tm
+		else:
+			t0 = tm
+	var hit := p0 + v0 * t1 - Vector3(0, 0.5 * g * t1 * (t1 + h), 0)
+	return Vector3(hit.x, float(w.height_at(hit.x, hit.z)), hit.z)
+
+
+## The plane's bomb is loaded (its model shows it under the plane; a
+## friend's copy gets that from the host too).
+static func bomb_ready(u: B3Unit) -> bool:
+	var vr: B3VRig = null
+	if u != null and is_instance_valid(u):
+		vr = u.rig as B3VRig
+	return vr != null and vr.bomb_node != null and vr.bomb_node.visible
+
+
+## The fighter plane's throttle, 0..1 (W/S). A friend's copy works it out
+## from how fast the propeller spins, which follows the throttle.
+static func throttle_of(u: B3Unit) -> float:
+	if u == null or not is_instance_valid(u) or not (u is B3Aircraft):
+		return 0.0
+	var a := u as B3Aircraft
+	if u.battle != null and u.battle.puppet:
+		return clampf((a.rotor - 0.55) / 0.45, 0.0, 1.0)
+	return clampf(a.throttle, 0.0, 1.0)
+
+
+## How high `u` is over the ground under it (m).
+static func altitude_of(u: B3Unit) -> float:
+	if u == null or not is_instance_valid(u):
+		return 0.0
+	var p := u.global_position
+	return maxf(0.0, p.y - float(u.battle.world.height_at(p.x, p.z)))

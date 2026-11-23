@@ -75,6 +75,20 @@ var _look_ref := 0.0
 # puppets (network copies)
 var _smoking := false
 var _pfx_t := 0.0
+# the hull rocking back when the big gun fires (on the model, so friends see it in the tilt)
+var _kick_t := 9.0              # seconds since the last shell or cannonball
+var _kick_yaw := 0.0            # which way the gun pointed (on the hull)
+var _dust: CPUParticles3D = null    # dust kicked up behind the wheels or treads (made on first use)
+var _crush_t := 0.0
+
+const KICK := 0.12             # how far the hull rocks back when the big gun fires (radians)
+## Scenery that tanks (and, smaller ones, jeeps) flatten when they drive into
+## it at speed (see _crush_tick): [biggest size a tank, a jeep crushes].
+const CRUSH_TREES := {"tree": [1.25, 0.95], "pine": [1.25, 0.95], "pine_snow": [1.25, 0.95],
+	"deadtree": [1.4, 1.1], "olive": [1.3, 1.0], "cactus": [1.4, 1.1]}
+## Buildings whose pieces tanks and jeeps drive straight through (History fences and stakes).
+const CRUSH_BUILDINGS := ["fence", "stakes"]
+static var _crush_q: PhysicsShapeQueryParameters3D = null
 
 
 static func grip_mat() -> PhysicsMaterial:
@@ -209,6 +223,8 @@ func _physics_process(dt: float) -> void:
 		_vfire()
 	if mobile and not tumbling and battle.fighting:
 		_ram_tick()
+	if mobile and not tumbling and not wrecked and not dead and (battle.fighting or player):
+		_crush_tick(dt)
 
 
 func _drive(dt: float) -> void:
@@ -298,7 +314,18 @@ func _tilt_to_ground(dt: float, gh: float) -> void:
 		var ln := global_basis.inverse() * n
 		t = Vector3(atan2(ln.z, ln.y), 0.0, -atan2(ln.x, ln.y))
 	_tilt = _tilt.lerp(t, minf(1.0, dt * 6.0))
-	rig.rotation = _tilt
+	_kick_t += dt
+	rig.rotation = _tilt + _kick_rock()
+
+
+## The hull rocking back on its springs after the big gun fires: the gun's
+## side lifts, then it dips forward a little and settles (about a second).
+func _kick_rock() -> Vector3:
+	if _kick_t > 1.2:
+		return Vector3.ZERO
+	var t := _kick_t
+	var a := KICK * clampf(t / 0.04, 0.0, 1.0) * exp(-4.5 * t) * cos(11.0 * t)
+	return Vector3(-cos(_kick_yaw), 0.0, sin(_kick_yaw)) * a
 
 
 func style_is(s: String) -> bool:
@@ -345,7 +372,11 @@ func _vdecide(dt: float) -> void:
 		target = null
 		if not mobile:
 			return
-		if pers == "defend":
+		if _hill_pull(INF, speed):
+			# 🚩 off to the hill (or 🌊 the Fort Keep), B3Modes
+			want = _safe(want + sep * speed * 0.3)
+			_unstick(dt)
+		elif pers == "defend":
 			_go_home()
 		elif battle.enemies_left(self):
 			_wander(dt, 0.3)
@@ -359,6 +390,11 @@ func _vdecide(dt: float) -> void:
 	var dist := to.length()
 	var dir := to / maxf(dist, 0.001)
 	var rng_ := float(wpn.range)
+	if _hill_pull(dist, speed):
+		# 🚩 off to the hill (or holding it), shooting anyone in range on the way
+		want = _safe(want + sep * speed * 0.3)
+		_unstick(dt)
+		return
 	if pers == "berserk":
 		want = dir * speed * 1.15
 	elif style_is("car"):
@@ -384,6 +420,10 @@ func _vdecide(dt: float) -> void:
 		elif dist < 6.0:
 			want = -dir * speed * 0.6
 			_back = true
+		if style_is("tank") and _los_blocked():
+			# a wall in the way of the big gun: drive round it for a clear shot
+			want = (Vector3(-dir.z, 0, dir.x) * _orbit + dir * 0.3).normalized() * speed
+			_back = false
 	if pers == "defend":
 		var off := _flat(position - home)
 		if off.length() > guard_radius() + 1.5 and dist > rng_:
@@ -581,8 +621,8 @@ func _vfire() -> void:
 	var ok := aim_err < (0.09 if style_is("tank") or style_is("cannon") else 0.18) and dist <= rng_ and dist >= float(wpn.get("min", 0.0))
 	match String(def.style):
 		"tank":
-			if cd <= 0.0 and ok:
-				_fire_shell()
+			if cd <= 0.0 and ok and clear_shot(_muzzle_pos(), target, float(wpn.get("radius", 3.0))):
+				_fire_shell()      # (not into a wall in the way: B3Unit.clear_shot)
 			if not mg.is_empty() and cd2 <= 0.0 and dist <= float(mg.range) and aim_err < 0.3:
 				_vgun(mg, vr.mg_muzzle, true)
 		"cannon":
@@ -653,6 +693,8 @@ func _fire_shell() -> void:
 	if rig:      # (the shot may have blown up something right next to us, and us with it)
 		rig.recoil = 1.0
 	linear_velocity -= _flat(d) * 0.8
+	_kick_t = 0.0
+	_kick_yaw = turret_yaw      # (the hull rocks back away from where the gun points)
 	cd = float(wpn.cd) * rng.randf_range(0.9, 1.15)
 
 
@@ -672,6 +714,8 @@ func _fire_ball() -> void:
 	if rig:      # (the shot may have blown up something right next to us, and us with it)
 		rig.recoil = 1.0
 	linear_velocity -= forward() * 1.6
+	_kick_t = 0.0
+	_kick_yaw = 0.0
 	cd = float(wpn.cd) * rng.randf_range(0.9, 1.15)
 
 
@@ -761,6 +805,81 @@ func _rams(u: B3Unit, fwd: Vector3, car: bool, now: float) -> bool:
 	return float(_ram.get(u.uid, -9.0)) <= now - 1.0
 
 
+## Tanks and jeeps driving at speed flatten crates, History fences and stakes
+## and small trees in their way (CRUSH_TREES): CRUNCH, a puff of dust, and it
+## slows down a little. Bigger trees, walls and buildings still stop it.
+func _crush_tick(dt: float) -> void:
+	_crush_t -= dt
+	if _crush_t > 0.0:
+		return
+	_crush_t = 0.05
+	var tank := style_is("tank")
+	if not tank and not style_is("jeep"):
+		return
+	var spd := absf(fwd_spd)
+	if spd < (1.5 if tank else 3.5) or not _grounded:
+		return
+	if _crush_q == null:
+		_crush_q = PhysicsShapeQueryParameters3D.new()
+		_crush_q.shape = SphereShape3D.new()
+		_crush_q.collision_mask = B3Defs.L_PROP | B3Defs.L_STRUCT | B3Defs.L_SCENERY
+	var dir := forward() * signf(fwd_spd)
+	(_crush_q.shape as SphereShape3D).radius = radius * 0.8
+	# (looking further ahead the faster it goes, so it's crushed before the bump)
+	_crush_q.transform = Transform3D(Basis.IDENTITY, position + dir * (radius * 0.7 + spd * 0.12) + Vector3(0, 0.7, 0))
+	var res := get_world_3d().direct_space_state.intersect_shape(_crush_q, 16)
+	var crunched := 0
+	var c0: int = battle.chunks.size()
+	for hit in res:
+		var o: Object = hit.collider
+		if o == null or not is_instance_valid(o):
+			continue
+		var push := dir * spd * 0.9 + Vector3.UP * (1.5 + spd * 0.2)
+		if o is B3Prop:
+			var pr := o as B3Prop
+			if pr.kind == "crate" and not pr.is_queued_for_deletion():
+				pr.linear_velocity = push
+				battle.break_crate(pr)
+				crunched += 1
+		elif o is B3Piece:
+			var pc := o as B3Piece
+			if crushes_piece(pc):
+				var st: Variant = pc.structure
+				battle.break_piece(pc, push, true)
+				if st is B3Struct and is_instance_valid(st):
+					battle._settle_soon(st as B3Struct)      # (the rails a crushed post held up fall too)
+				crunched += 1
+		elif o is StaticBody3D and (o as Node).has_meta("scenery") and not (o as Node).has_meta("gone"):
+			var sb := o as StaticBody3D
+			var sz: Array = CRUSH_TREES.get(String(sb.get_meta("scenery")), [])
+			if not sz.is_empty() and float(sb.get_meta("ks", 1.0)) <= float(sz[0 if tank else 1]):
+				var fall := dir * (1.5 + spd * 0.6) + Vector3.UP * 0.8
+				var sid: int = battle.world.scenery_index(sb)
+				if battle.net and sid >= 0:
+					battle.net.rec_event(["uproot", sid, fall])      # (friends' screens too)
+				battle.world.uproot(sb, fall, battle)
+				crunched += 1
+	if crunched > 0:
+		# what it crushed lies flat under it: the bits don't stop it
+		for i in range(c0, battle.chunks.size()):
+			var ch: RigidBody3D = battle.chunks[i]
+			if is_instance_valid(ch):
+				add_collision_exception_with(ch)
+		fwd_spd *= 0.85 if tank else 0.75
+		linear_velocity = Vector3(linear_velocity.x * 0.85, linear_velocity.y, linear_velocity.z * 0.85)
+		var at := position + dir * radius
+		battle.fx.dust(at, 1.0 + 0.3 * crunched)
+		battle.snd("wood_crunch", at, 0.8)
+		battle.shake(0.06, at)
+
+
+## A History fence rail or stake a tank or jeep drives straight through.
+func crushes_piece(pc: B3Piece) -> bool:
+	if pc.is_queued_for_deletion() or not is_instance_valid(pc.structure):
+		return false
+	return CRUSH_BUILDINGS.has(String((pc.structure as B3Struct).kind))
+
+
 ## The race car's cartoon BONK: whoever it hits goes flying up in the air
 ## (it doesn't hurt much). Big heavy things don't budge: the car bounces off.
 func _bump(u: B3Unit, fwd: Vector3) -> void:
@@ -816,8 +935,7 @@ func hurt(dmg: float, dir: Vector3, knock: float, by: B3Unit = null, how := "hit
 		fleeing = true
 	var kv := knock / stab
 	if hp <= 0.0:
-		if by and is_instance_valid(by):
-			by.kills += 1
+		_credit_ko(by)   # (only an enemy's knock-out counts: B3Unit._credit_ko)
 		_ko(dir * kv, by)
 		return
 	if kv > TUMBLE:
@@ -976,7 +1094,48 @@ func _process(dt: float) -> void:
 		_pose()
 	if puppet and not wrecked:
 		_puppet_fx(dt)
+	_wheel_dust()
 	super._process(dt)
+
+
+## A trail of dust behind the wheels or treads while it drives along the
+## ground. Each computer makes its own from the speed (friends' copies get it
+## in the vehicle's state), so nothing extra is sent over Wi-Fi.
+func _wheel_dust() -> void:
+	if flying or not mobile:
+		return
+	var on := not wrecked and not dead and not tumbling and _spd > 2.2 and battle != null and is_inside_tree()
+	if on:
+		var p := global_position
+		var w: B3World = battle.world
+		on = p.y - w.height_at(p.x, p.z) < 0.45 and w.water_depth(p.x, p.z) < 0.1
+	if _dust == null:
+		if not on:
+			return
+		_dust = battle.fx.make_particles("dust")
+		_dust.one_shot = false
+		_dust.explosiveness = 0.0
+		_dust.amount = 14
+		_dust.lifetime = 0.9
+		_dust.local_coords = false
+		_dust.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+		_dust.emission_box_extents = Vector3(radius * 0.5, 0.05, 0.15)
+		_dust.radial_accel_min = 0.0
+		_dust.radial_accel_max = 0.0
+		_dust.initial_velocity_min = 0.4
+		_dust.initial_velocity_max = 1.2
+		_dust.spread = 50.0
+		_dust.gravity = Vector3(0, 0.6, 0)
+		_dust.scale_amount_min = 0.45 if not style_is("tank") else 0.6
+		_dust.scale_amount_max = 0.9 if not style_is("tank") else 1.2
+		var dc: Color = (B3Defs.MAPS.get(String(battle.map_id), {}) as Dictionary).get("dust", Color(0.7, 0.65, 0.55))
+		_dust.color_ramp = battle.fx._ramp([Color(dc, 0.7), Color(dc, 0.0)])
+		_dust.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		add_child(_dust)
+	if on:
+		_dust.global_transform = Transform3D(global_basis, global_transform * Vector3(0, 0.15, -radius * 0.8 * signf(fwd_spd + 0.01)))
+	if _dust.emitting != on:
+		_dust.emitting = on
 
 
 ## Smoke on a badly hurt puppet (the real one makes its own in physics).
