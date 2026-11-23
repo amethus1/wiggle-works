@@ -1,22 +1,14 @@
-extends Node
+extends TestBase
 ## Switching between the title menu, the 3D battle and the 2D sandbox, the way
 ## a player does it: the 3D mode changes physics settings while it's open, and
 ## the 2D game must get them back. Then what carries on across every mode:
 ## the sound and music levels, the music loop, and sticker progress being saved.
 ## godot --headless --path . -- --test=modes
 
-var fails := 0
 
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
-
-func frames(n: int) -> void:
-	for i in n:
-		await get_tree().physics_frame
+## (frames() waits physics steps here: the playground's clock)
+func _init() -> void:
+	frames_are_steps = true
 
 
 ## Waits `sec` real seconds (slow motion or not).
@@ -49,7 +41,7 @@ func _ready() -> void:
 	var btn := _find_button(main.menu, "3D Battle")
 	check(btn != null, "the title menu has a 3D Battle button")
 	if btn == null:
-		_done()
+		finish()
 		return
 	btn.pressed.emit()
 	await frames(30)
@@ -134,7 +126,7 @@ func _ready() -> void:
 	await _hud_2d(main)
 	await _sound_and_settings()
 	await _music_fades(main)
-	_done()
+	finish()
 
 
 func _sound_and_settings() -> void:
@@ -202,6 +194,26 @@ func _sound_and_settings() -> void:
 	saved = c.get_value("play", "counters", {}) if c.load(path) == OK else {}
 	check(not Settings.unsaved() and int(saved.get("test_jumps", 0)) == int(Settings.counters.test_jumps),
 		"and when the game closes before that, it's saved on the way out")
+	# settings are saved safely: into a .tmp file first, then moved over the old one
+	check(not FileAccess.file_exists(path + ".tmp"), "a save leaves nothing half-written behind")
+	# 🌊 the best wave used to have a file of its own: it moves in, once
+	var keep_best := Settings.b3_wave_best
+	var old := "user://test_old_waves.cfg"
+	var oc := ConfigFile.new()
+	oc.set_value("waves", "best", 7)
+	oc.save(old)
+	Settings.b3_wave_best = 3
+	Settings._migrate_waves(old)
+	c = ConfigFile.new()
+	check(Settings.b3_wave_best == 7 and c.load(path) == OK and int(c.get_value("battle3d", "wave_best", 0)) == 7
+		and not FileAccess.file_exists(old) and FileAccess.file_exists(old + ".old"),
+		"🌊 the best wave moves in from its old file and is saved (the old file is kept as .old)")
+	DirAccess.rename_absolute(path, path + ".tmp")   # (as if the game stopped half-way through moving the new file in)
+	Settings.b3_wave_best = 0
+	Settings.load_settings()
+	check(Settings.b3_wave_best == 7 and FileAccess.file_exists(path), "and settings cut off half-way through a save still load")
+	Settings.b3_wave_best = keep_best
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(old + ".old"))
 	Settings.testing = keep_testing
 	Settings.file = Settings.PATH
 	if keep_counter == null:
@@ -777,7 +789,3 @@ func _hud_2d(main: Node) -> void:
 	hud.close_top()
 	hud.toggle_drawer("toybox", false)
 
-
-func _done() -> void:
-	print("test_modes: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)

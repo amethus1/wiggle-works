@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for the 3D Battle maps (B3World): every map loads, the
 ## height field matches height_at() out to the edges, fighters placed far
 ## out (±150 m) stand on the ground, the volcano has its pools, beach water
@@ -12,39 +12,10 @@ extends Node
 
 const SPEED := 4.0
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
 
 func fresh(map: String) -> void:
-	if b and is_instance_valid(b):
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(4242)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
-	b.begin({"seed": 99, "no_ui": true, "map": map})
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
+	await drop_battle()
+	start_battle(4242, {"seed": 99, "no_ui": true, "map": map})
 
 
 ## Ground height straight down from above, on the real collider.
@@ -83,8 +54,7 @@ func _ready() -> void:
 	for i in 3:
 		await get_tree().process_frame
 	print("test_maps: done in %.1fs" % ((Time.get_ticks_msec() - t0) / 1000.0))
-	print("test_maps: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 func _every_map() -> void:

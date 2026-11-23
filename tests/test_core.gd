@@ -1,23 +1,14 @@
-extends Node
+extends TestBase
 ## Headless gameplay checks: worlds, Wiggly jelly physics, split & merge,
 ## power, booms, freezing, undo, saves, every toy and spell.
 ## godot --headless --path . -- --test=core
 
-var fails := 0
 var w: World
 
 
-func check(cond: bool, msg: String) -> void:
-	if cond:
-		print("  ok    ", msg)
-	else:
-		print("  FAIL  ", msg)
-		fails += 1
-
-
-func frames(n: int) -> void:
-	for i in n:
-		await get_tree().physics_frame
+## (frames() waits physics steps here: the playground's clock)
+func _init() -> void:
+	frames_are_steps = true
 
 
 func _ready() -> void:
@@ -314,8 +305,7 @@ func _ready() -> void:
 	print("💾 save slots")
 	await _save_slots()
 
-	print("test_core: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 ## 💾 Six named save slots (Saves), and the old single save moving into slot 1.
@@ -358,6 +348,10 @@ func _save_slots() -> void:
 	w.load_world("meadow")
 	await frames(2)
 	check(Saves.load_slot(w, 3) and w.count_wigglies() == n3 and w.world_id == "canvas", "loading slot 3 brings back what was saved there (%d of %d Wigglies)" % [w.count_wigglies(), n3])
+	# saved safely: written next to the slot first, then moved over it
+	check(not FileAccess.file_exists(Saves.path(3) + ".tmp"), "a save leaves nothing half-written behind")
+	DirAccess.rename_absolute(Saves.path(3), Saves.path(3) + ".tmp")   # (as if the game stopped half-way through moving it in)
+	check(Saves.has_slot(3) and String(Saves.read(3).get("name", "")) == "My Castle", "and a save cut off half-way is still found")
 	Saves.delete_all_test_saves()
 	check(not Saves.has_slot(), "(test saves cleaned up)")
 

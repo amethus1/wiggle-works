@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## A big, busy 2D scene for measuring speed: a 160-fighter battle in Battle
 ## Valley (more than the game's own limit of 120) with toys, Wigglies, fans,
 ## magnets, bubblers, a saucer, cars, a Ferris wheel, wired lamps and motors,

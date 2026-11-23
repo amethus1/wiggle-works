@@ -247,7 +247,7 @@ func _tick(bn: Burn, dt: float, remote: bool) -> bool:
 		var st: Variant = pc2.structure
 		battle.break_piece(pc2, v, true)
 		if st is B3Struct and is_instance_valid(st):
-			battle._settle_soon(st as B3Struct)
+			battle.combat.settle_soon(st as B3Struct)
 		return false
 	return true
 

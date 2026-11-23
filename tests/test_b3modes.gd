@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for the 🏁 battle goals (⚙️ Battle Rules: ⚔️ Last team
 ## standing, 👑 Defend the King, 🚩 King of the Hill), 🌊 Wave Defense (the
 ## 🎯 Ready-made card) and their panel (B3ModeHud), with the 🏆 scoreboard
@@ -6,54 +6,16 @@ extends Node
 ## godot --headless --path . -- --test=b3modes
 
 const SPEED := 4.0
-const TEST_BEST := "user://test_b3waves.cfg"
-
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
+const TEST_SETTINGS := "user://test_b3waves.cfg"   # (🌊 the best wave is saved with the other progress)
 
 
 func fresh(map := "grassland", more := {}) -> void:
 	if b and is_instance_valid(b):
 		B3Player.stop()
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(99)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
+	await drop_battle()
 	var opts := {"seed": 777, "map": map}
 	opts.merge(more, true)
-	b.begin(opts)
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-func frames(n := 3) -> void:
-	for i in n:
-		await get_tree().process_frame
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
-
-
-func ko(u: B3Unit, by: B3Unit = null) -> void:
-	if is_instance_valid(u) and not u.dead:
-		u.hurt(99999.0, Vector3.UP, 1.0, by, "blast")
+	start_battle(99, opts)
 
 
 func live(team := "") -> Array:
@@ -63,11 +25,6 @@ func live(team := "") -> Array:
 
 func kings() -> Array:
 	return live().filter(func(u: B3Unit) -> bool: return u.king)
-
-
-func rule(id: String, v: String) -> void:
-	B3Rules.set_value(id, v)
-	b.apply_rules()
 
 
 func headline() -> String:
@@ -101,9 +58,12 @@ func _ready() -> void:
 	B3Rules.reset()
 	var keep_stickers: Dictionary = Settings.stickers.duplicate(true)
 	var keep_counters: Dictionary = Settings.counters.duplicate(true)
-	B3Modes.best_file = TEST_BEST
-	B3Modes.best = -1
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(TEST_BEST))
+	var keep_testing := Settings.testing
+	var keep_best := Settings.b3_wave_best
+	Settings.file = TEST_SETTINGS
+	Settings.testing = false
+	Settings.b3_wave_best = 0
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(TEST_SETTINGS))
 	await _rules()
 	await _last()
 	await _king()
@@ -131,15 +91,15 @@ func _ready() -> void:
 		b = null
 	Engine.time_scale = 1.0
 	B3Rules.reset()
-	B3Modes.best_file = B3Modes.BEST_PATH
-	B3Modes.best = -1
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(TEST_BEST))
+	Settings.testing = keep_testing
+	Settings.file = Settings.PATH
+	Settings.b3_wave_best = keep_best
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(TEST_SETTINGS))
 	Settings.stickers = keep_stickers
 	Settings.counters = keep_counters
 	for i in 3:
 		await get_tree().process_frame
-	print("test_b3modes: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 # ------------------------------------------------------------------ rules
@@ -607,9 +567,9 @@ func _waves_play() -> void:
 	check(b.modes.phase == "break" and b.modes.break_t > 5.0 and b.winner == "", "a short break, nobody has won")
 	check(String(b.ui.mode_hud.title.text).contains("Wave 2 is coming"), "🌊 Wave 2 is coming! (%s)" % b.ui.mode_hud.title.text)
 	check(b.ui.mode_hud.next_btn.visible and b.ui.mode_hud.next_btn.text == "▶ Next wave", "with ▶ Next wave")
-	check(B3Modes.best == 1, "⭐ best wave: 1")
+	check(Settings.b3_wave_best == 1, "⭐ best wave: 1")
 	var cf := ConfigFile.new()
-	check(cf.load(TEST_BEST) == OK and int(cf.get_value("waves", "best", 0)) == 1, "...and it's saved")
+	check(cf.load(TEST_SETTINGS) == OK and int(cf.get_value("battle3d", "wave_best", 0)) == 1, "...and it's saved")
 	# buying during the break
 	b.tools.place_id = "archer"
 	b.tools._place(at(4, 12), at(4, 12), false, false)

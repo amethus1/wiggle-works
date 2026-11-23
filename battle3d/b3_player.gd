@@ -75,7 +75,7 @@ static func start(u: B3Unit) -> void:
 	unit = u
 	playing = true
 	what = String(u.def.name)
-	was_vehicle = u is B3Vehicle
+	was_vehicle = u.is_vehicle()
 	kind = u.kind
 	team = u.team
 	last_pos = u.global_position
@@ -332,7 +332,7 @@ static func _throw_at(u: B3Unit, w: Dictionary, point: Vector3) -> void:
 ## Which right-click power `u` has (see the top of this file). "" for
 ## vehicles: right-click fires their second gun (player_drive).
 static func power(u: B3Unit) -> String:
-	if u == null or not is_instance_valid(u) or u is B3Vehicle:
+	if u == null or not is_instance_valid(u) or u.is_vehicle():
 		return ""
 	match u.kind:
 		"sniper":
@@ -460,7 +460,7 @@ static func reload_ready(u: B3Unit) -> float:
 		full = cd      # a new wait just started
 		u.set_meta("cd_full", full)
 	u.set_meta("cd_prev", cd)
-	if cd <= 0.0 or full < RELOAD_MIN or (not (u is B3Vehicle) and String(u.wpn.get("type", "")) == "melee"):
+	if cd <= 0.0 or full < RELOAD_MIN or (not u.is_vehicle() and String(u.wpn.get("type", "")) == "melee"):
 		return 1.0
 	return clampf(1.0 - cd / full, 0.0, 1.0)
 
@@ -706,7 +706,7 @@ static func _heal_pulse(u: B3Unit) -> void:
 	b.snd("heal", u.position, 1.0)
 	var c := u.center()
 	for o: B3Unit in b.units:
-		if o.dead or o is B3Vehicle or o.team != u.team or u.is_enemy(o) or o.center().distance_to(c) > HEAL_R:
+		if o.dead or o.is_vehicle() or o.team != u.team or u.is_enemy(o) or o.center().distance_to(c) > HEAL_R:
 			continue
 		o.hp = minf(o.max_hp, o.hp + (HEAL_SELF if o == u else HEAL_FRIEND))
 		o.hurt_t = 0.0        # shows their health bar filling up
@@ -724,7 +724,7 @@ static func _roar(u: B3Unit) -> void:
 	b.fx.ring(u.position + Vector3(0, 0.6, 0), 1.0, r, 0.55, Color(1.0, 0.95, 0.8, 0.7))
 	b.fx.word(u.position + Vector3(0, u.tall + 0.8, 0), "TOOT!" if u.kind == "elephant" else "ROAR!", Color("ffb347"))
 	for o: B3Unit in b.units.duplicate():
-		if o == u or o.down or o.dead or o is B3Vehicle or not u.is_enemy(o) or u._height_gap(o) > 3.0:
+		if o == u or o.down or o.dead or o.is_vehicle() or not u.is_enemy(o) or u._height_gap(o) > 3.0:
 			continue
 		var off := u._flat(o.position - u.position)
 		var d := off.length()
@@ -747,7 +747,7 @@ static func _roar(u: B3Unit) -> void:
 ## marker is right in Moon gravity too. (A friend's copy passes the speed it
 ## sees its copy of the plane gliding at.) Buildings and trees aren't counted.
 static func bomb_landing(u: B3Unit, vel: Vector3) -> Vector3:
-	if u == null or not is_instance_valid(u) or not (u is B3Aircraft) or not (u as B3Aircraft).plane:
+	if u == null or not is_instance_valid(u) or not u.is_plane():
 		return Vector3.INF
 	var vr := u.rig as B3VRig
 	var p0: Vector3 = vr.bomb_node.global_position if vr != null and vr.bomb_node != null else u.global_position + Vector3(0, 0.4, 0)

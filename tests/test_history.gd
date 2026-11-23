@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for 📜 History (B3History) and the History fighters:
 ## every battle sets up (two or more sides, everyone standing on the ground,
 ## not too many fighters, nothing moving before Fight), a few play out to a
@@ -10,35 +10,10 @@ const SPEED := 4.0
 const MAX_FIGHTERS := 165
 const PLAY_OUT := ["thermopylae", "alesia", "agincourt"]
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
 
 func fresh(map := "grassland") -> void:
-	if b and is_instance_valid(b):
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(99)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
-	b.begin({"seed": 777, "no_ui": false, "map": map})
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
+	await drop_battle()
+	start_battle(99, {"seed": 777, "no_ui": false, "map": map})
 
 
 func _ready() -> void:
@@ -54,8 +29,7 @@ func _ready() -> void:
 	Engine.time_scale = 1.0
 	for i in 3:
 		await get_tree().process_frame
-	print("test_history: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 # ------------------------------------------------------------------ list

@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for the 📜 pop-up's 🎯 Ready-made tab, the 🏆 scoreboard
 ## under the winner banner (and the copy a friend gets), and the 3D Battle
 ## 📒 stickers, plus the title screen's Sticker Book. Also the 3D HUD: pop-ups
@@ -9,65 +9,14 @@ extends Node
 const SPEED := 4.0
 const NEW_STICKERS := ["b3win", "ace", "tankbuster", "historybuff", "fphero"]
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
 
 func fresh(map := "grassland", more := {}) -> void:
 	if b and is_instance_valid(b):
 		B3Player.stop()
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(99)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
+	await drop_battle()
 	var opts := {"seed": 777, "map": map}
 	opts.merge(more, true)
-	b.begin(opts)
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-func frames(n := 3) -> void:
-	for i in n:
-		await get_tree().process_frame
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
-
-
-## Knocks `u` out straight away, as if `by` did it.
-func ko(u: B3Unit, by: B3Unit = null) -> void:
-	if is_instance_valid(u) and not u.dead:
-		u.hurt(99999.0, Vector3.UP, 1.0, by, "blast")
-
-
-## Every bit of text shown inside `n`.
-func texts(n: Node) -> String:
-	var out := ""
-	if n is Label:
-		out += (n as Label).text + "\n"
-	elif n is Button:
-		out += (n as Button).text + "\n"
-	for c in n.get_children():
-		out += texts(c)
-	return out
+	start_battle(99, opts)
 
 
 func live(team := "") -> int:
@@ -108,8 +57,7 @@ func _ready() -> void:
 	B3Rules.reset()
 	for i in 3:
 		await get_tree().process_frame
-	print("test_b3menu: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 # ------------------------------------------------------------ 🎯 Ready-made

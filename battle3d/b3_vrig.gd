@@ -703,7 +703,7 @@ func break_apart(battle, vel: Vector3, rng: RandomNumberGenerator) -> RigidBody3
 		var xf := n.global_transform
 		var sz: Vector3 = wp.size
 		var off: Vector3 = wp.offset
-		var rb: RigidBody3D = battle._chunk_body(Transform3D(xf.basis.orthonormalized(), xf.origin), sz, 1.0)
+		var rb: RigidBody3D = battle.combat.chunk_body(Transform3D(xf.basis.orthonormalized(), xf.origin), sz, 1.0)
 		rb.mass = float(wp.mass)
 		var cs := CollisionShape3D.new()
 		var bs := BoxShape3D.new()
@@ -734,7 +734,7 @@ func break_apart(battle, vel: Vector3, rng: RandomNumberGenerator) -> RigidBody3
 			mi.rotation_degrees = Vector3(0, 0, a)
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			e.add_child(mi)
-	battle._trim_chunks()
+	battle.combat.trim_chunks()
 	queue_free()
 	return main_body
 

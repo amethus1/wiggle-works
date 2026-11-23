@@ -787,7 +787,7 @@ func _unit_entry(u: B3Unit) -> Array:
 		u.ragdoll.set_meta("nid", u.get_instance_id())
 		if is_instance_valid(u.ragdoll.root_body):
 			vel = u.ragdoll.root_body.linear_velocity
-	var rot: Variant = u.global_basis.get_rotation_quaternion() if u is B3Vehicle else u.facing
+	var rot: Variant = u.global_basis.get_rotation_quaternion() if u.is_vehicle() else u.facing
 	var ns: Variant = u.call("net_state") if u.has_method("net_state") else null
 	# how ready the power and the weapon are, for whoever plays it (their meters)
 	var gauges := B3Player.net_gauges(u) if u.player else PackedFloat32Array([1.0, 1.0])
@@ -1281,7 +1281,7 @@ func _knock_out(u: B3Unit, nid: int, vel: Vector3) -> void:
 	var b = battle
 	puppets.erase(nid)
 	_seen.erase(nid)
-	if u is B3Vehicle and u.has_method("_wreck"):
+	if u.is_vehicle() and u.has_method("_wreck"):
 		u.freeze = false
 		u.call("_wreck", vel, null)
 		return

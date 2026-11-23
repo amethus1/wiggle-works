@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Screenshots of the menus, the Toy Boxes and the pop-ups, to check the UI
 ## by eye at different window sizes. Not part of the suite (it needs a window):
 ## godot --path . --resolution 1280x720 -- --test=uishots --out=/some/dir [--only=title,help3d]

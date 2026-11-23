@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## 3D Battle speed benchmark: a huge battle, timed headless, step by step.
 ## It takes about half a minute, so it isn't part of tools/run_tests.sh.
 ##   godot --headless --path . --fixed-fps 60 -- --test=b3bench
@@ -24,9 +24,8 @@ extends Node
 ## ends with "instructions retired", which hardly changes from run to run
 ## (with --fixed-fps the same battle plays out every time).
 
-var b = null
 var recording := false
-var frames: Array[float] = []       # whole frame (ms), one per physics step
+var frame_ms: Array[float] = []     # whole frame (ms), one per physics step
 var scripts: Array[float] = []      # _physics_process scripts (ms)
 var procs: Array[float] = []        # _process scripts (ms)
 var _tick_t0 := 0
@@ -57,7 +56,7 @@ func on_tick(first: bool) -> void:
 	var now := Time.get_ticks_usec()
 	if first:
 		if recording and _have_tick:
-			frames.append((now - _tick_t0) / 1000.0)
+			frame_ms.append((now - _tick_t0) / 1000.0)
 			scripts.append(_tick_ms)
 			procs.append(_proc_ms)
 		_tick_t0 = now
@@ -128,7 +127,7 @@ func _ready() -> void:
 	while w < secs - 0.01:
 		var span := minf(5.0, secs - w)
 		await _window("%3.0f-%2.0fs" % [w, w + span], span)
-		all_f.append_array(frames)
+		all_f.append_array(frame_ms)
 		all_s.append_array(scripts)
 		all_p.append_array(procs)
 		_clear_samples()
@@ -141,12 +140,11 @@ func _ready() -> void:
 	for i in 3:
 		await get_tree().process_frame
 	Engine.time_scale = 1.0
-	print("test_b3bench: 0 failure(s)")
-	get_tree().quit(0)
+	finish()
 
 
 func _clear_samples() -> void:
-	frames.clear()
+	frame_ms.clear()
 	scripts.clear()
 	procs.clear()
 
@@ -172,8 +170,8 @@ func _window(label: String, t: float) -> void:
 		if is_instance_valid(rd) and rd.dead:
 			corpses += 1
 	print("  %-9s frame avg %6.2f ms  p99 %6.2f  worst %6.1f | script %5.2f phys+rest %5.2f proc %5.2f | up %3d down %3d corpses %3d chunks %3d shots %3d" % [
-		label, _avg(frames), _pct(frames, 0.99), _pct(frames, 1.0), _avg(scripts),
-		_avg(frames) - _avg(scripts) - _avg(procs), _avg(procs),
+		label, _avg(frame_ms), _pct(frame_ms, 0.99), _pct(frame_ms, 1.0), _avg(scripts),
+		_avg(frame_ms) - _avg(scripts) - _avg(procs), _avg(procs),
 		up, down, corpses, b.chunks.size(), b.proj_root.get_child_count()])
 
 
@@ -200,10 +198,6 @@ func _vehicles() -> int:
 		if u is B3Vehicle:
 			n += 1
 	return n
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
 
 
 ## A block of fighters: `mix` is [[kind, how many], ...], filled in rows of

@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for the right-click powers you get while playing a
 ## fighter, animal or dinosaur in 3D Battle (B3Player.power), and for ⇥ Tab
 ## (or N) jumping into the next teammate.
@@ -6,66 +6,15 @@ extends Node
 
 const SPEED := 4.0
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
 
 func fresh(map := "grassland") -> void:
 	if b and is_instance_valid(b):
 		b.tools.stop_playing()
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
+	await drop_battle()
 	B3Player.stop()
 	B3Player.me.clear_buttons()
 	B3Player.me.fp = false
-	seed(99)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
-	b.begin({"seed": 777, "map": map})
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-## Waits (up to `t` seconds of battle time) until `fn` says yes.
-func wait_for(fn: Callable, t := 3.0) -> bool:
-	var end: float = b.time + t
-	var guard := 0
-	while not fn.call() and b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-	return fn.call()
-
-
-func frames(n: int) -> void:
-	for i in n:
-		await get_tree().process_frame
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
-
-
-func key(k: Key, down: bool) -> void:
-	var ev := InputEventKey.new()
-	ev.keycode = k
-	ev.physical_keycode = k
-	ev.pressed = down
-	Input.parse_input_event(ev)
+	start_battle(99, {"seed": 777, "map": map})
 
 
 ## A key press as the battle's input handler sees it.
@@ -140,8 +89,7 @@ func _ready() -> void:
 	Engine.time_scale = 1.0
 	for i in 3:
 		await get_tree().process_frame
-	print("test_b3powers: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 # ------------------------------------------------------------ who gets what

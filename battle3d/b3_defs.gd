@@ -1,6 +1,8 @@
 class_name B3Defs
 ## All the data for 3D Battle: teams, personalities, units, weapons,
-## explosives, hazards, structures and maps.
+## explosives, hazards, structures and maps. What it shares with the 2D game
+## (the teams' order and names, the personalities, fighter names, stickers)
+## lives in Catalog, and is read from there.
 
 # physics layers (bit values)
 const L_TERRAIN := 1
@@ -14,24 +16,28 @@ const BOUNDS := 186.0         # units/props beyond this (x or z) are removed (ma
 const MAX_CORPSES := 140      # oldest knocked-out ragdolls are tidied away
 const MAX_CHUNKS := 220       # flying structure pieces and debris
 
-const TEAM_ORDER := ["red", "blue", "green", "yellow", "wild"]
+# The teams' order and names are the 2D game's (Catalog: the one home of what
+# both share); 3D has its own brighter colours, and an icon each.
+const TEAM_ORDER := Catalog.TEAM_ORDER
 const TEAM := {
-	"red": {"name": "Red", "col": Color("ff4646"), "icon": "🔴"},
-	"blue": {"name": "Blue", "col": Color("3d86ff"), "icon": "🔵"},
-	"green": {"name": "Green", "col": Color("3fcf4e"), "icon": "🟢"},
-	"yellow": {"name": "Yellow", "col": Color("ffcc1a"), "icon": "🟡"},
-	"wild": {"name": "Wild", "col": Color("a37a4c"), "icon": "🐾"},
+	"red": {"name": Catalog.TEAMS.red.name, "col": Color("ff4646"), "icon": "🔴"},
+	"blue": {"name": Catalog.TEAMS.blue.name, "col": Color("3d86ff"), "icon": "🔵"},
+	"green": {"name": Catalog.TEAMS.green.name, "col": Color("3fcf4e"), "icon": "🟢"},
+	"yellow": {"name": Catalog.TEAMS.yellow.name, "col": Color("ffcc1a"), "icon": "🟡"},
+	"wild": {"name": Catalog.TEAMS.wild.name, "col": Color("a37a4c"), "icon": "🐾"},
 }
 
-const PERS_ORDER := ["auto", "attack", "defend", "ranged", "berserk", "coward", "peaceful"]
+# The same six personalities as the 2D game (their order, names and icons are
+# Catalog's), with ✨ Auto first and 3D's own tips.
+const PERS_ORDER := ["auto"] + Catalog.PERS_ORDER
 const PERS := {
 	"auto": {"name": "Auto", "icon": "✨", "tip": "Each one does what it's best at"},
-	"attack": {"name": "Attack", "icon": "⚔️", "tip": "Charges at the nearest enemy"},
-	"defend": {"name": "Defend", "icon": "🛡️", "tip": "Guards the spot where you put it"},
-	"ranged": {"name": "Ranged", "icon": "🏹", "tip": "Keeps its distance and shoots"},
-	"berserk": {"name": "Berserk", "icon": "😡", "tip": "Super fast and wild! Always charges in"},
-	"coward": {"name": "Coward", "icon": "😱", "tip": "Runs away when it gets hurt"},
-	"peaceful": {"name": "Peaceful", "icon": "🌼", "tip": "Wanders around and never fights"},
+	"attack": {"name": Catalog.PERS.attack.name, "icon": Catalog.PERS.attack.emoji, "tip": "Charges at the nearest enemy"},
+	"defend": {"name": Catalog.PERS.defend.name, "icon": Catalog.PERS.defend.emoji, "tip": "Guards the spot where you put it"},
+	"ranged": {"name": Catalog.PERS.ranged.name, "icon": Catalog.PERS.ranged.emoji, "tip": "Keeps its distance and shoots"},
+	"berserk": {"name": Catalog.PERS.berserk.name, "icon": Catalog.PERS.berserk.emoji, "tip": "Super fast and wild! Always charges in"},
+	"coward": {"name": Catalog.PERS.coward.name, "icon": Catalog.PERS.coward.emoji, "tip": "Runs away when it gets hurt"},
+	"peaceful": {"name": Catalog.PERS.peaceful.name, "icon": Catalog.PERS.peaceful.emoji, "tip": "Wanders around and never fights"},
 }
 
 const CATS := [
@@ -52,30 +58,31 @@ const CATS := [
 ## Vehicles (see B3Vehicle): turn = turning speed, shot/melee/fire = how much
 ## of that kind of damage gets through the armour (blast > 1: explosives do
 ## extra), boom = wreck blast radius.
+## The kinds the 2D game has too take their names from it (Catalog.FIGHTERS).
 const UNITS := {
-	"stick": {"name": "Stick Figure", "icon": "🧍", "cat": "people", "body": "human", "style": "stick",
+	"stick": {"name": Catalog.FIGHTERS.stick.name, "icon": "🧍", "cat": "people", "body": "human", "style": "stick",
 		"hp": 60, "speed": 4.6, "armor": 0.0, "size": 1.0, "weapon": "fists", "pers": "attack", "mass": 55.0, "stab": 0.9},
-	"soldier": {"name": "Soldier", "icon": "🪖", "cat": "people", "body": "human", "style": "soldier",
+	"soldier": {"name": Catalog.FIGHTERS.soldier.name, "icon": "🪖", "cat": "people", "body": "human", "style": "soldier",
 		"hp": 100, "speed": 4.0, "armor": 0.05, "size": 1.0, "weapon": "rifle", "pers": "ranged", "mass": 75.0, "stab": 1.0},
-	"knight": {"name": "Knight", "icon": "🛡️", "cat": "people", "body": "human", "style": "knight",
+	"knight": {"name": Catalog.FIGHTERS.knight.name, "icon": "🛡️", "cat": "people", "body": "human", "style": "knight",
 		"hp": 150, "speed": 3.4, "armor": 0.35, "size": 1.05, "weapon": "sword", "pers": "attack", "mass": 95.0, "stab": 1.5, "shield": true},
-	"viking": {"name": "Viking", "icon": "🪓", "cat": "people", "body": "human", "style": "viking",
+	"viking": {"name": Catalog.FIGHTERS.viking.name, "icon": "🪓", "cat": "people", "body": "human", "style": "viking",
 		"hp": 140, "speed": 4.2, "armor": 0.1, "size": 1.05, "weapon": "axe", "pers": "berserk", "mass": 90.0, "stab": 1.3},
-	"archer": {"name": "Archer", "icon": "🏹", "cat": "people", "body": "human", "style": "archer",
+	"archer": {"name": Catalog.FIGHTERS.archer.name, "icon": "🏹", "cat": "people", "body": "human", "style": "archer",
 		"hp": 80, "speed": 4.1, "armor": 0.0, "size": 1.0, "weapon": "bow", "pers": "ranged", "mass": 65.0, "stab": 0.9},
-	"sniper": {"name": "Sniper", "icon": "🎯", "cat": "people", "body": "human", "style": "sniper",
+	"sniper": {"name": Catalog.FIGHTERS.sniper.name, "icon": "🎯", "cat": "people", "body": "human", "style": "sniper",
 		"hp": 80, "speed": 3.7, "armor": 0.0, "size": 1.0, "weapon": "sniper", "pers": "ranged", "mass": 70.0, "stab": 0.9},
-	"rocketeer": {"name": "Rocketeer", "icon": "🚀", "cat": "people", "body": "human", "style": "rocketeer",
+	"rocketeer": {"name": Catalog.FIGHTERS.rocketeer.name, "icon": "🚀", "cat": "people", "body": "human", "style": "rocketeer",
 		"hp": 100, "speed": 3.6, "armor": 0.05, "size": 1.0, "weapon": "bazooka", "pers": "ranged", "mass": 80.0, "stab": 1.0},
-	"grenadier": {"name": "Grenadier", "icon": "🤾", "cat": "people", "body": "human", "style": "grenadier",
+	"grenadier": {"name": Catalog.FIGHTERS.grenadier.name, "icon": "🤾", "cat": "people", "body": "human", "style": "grenadier",
 		"hp": 100, "speed": 3.9, "armor": 0.05, "size": 1.0, "weapon": "grenade", "pers": "ranged", "mass": 75.0, "stab": 1.0},
-	"gunner": {"name": "Gunner", "icon": "🔫", "cat": "people", "body": "human", "style": "gunner",
+	"gunner": {"name": Catalog.FIGHTERS.gunner.name, "icon": "🔫", "cat": "people", "body": "human", "style": "gunner",
 		"hp": 130, "speed": 3.2, "armor": 0.1, "size": 1.08, "weapon": "mg", "pers": "ranged", "mass": 95.0, "stab": 1.3},
-	"medic": {"name": "Medic", "icon": "⛑️", "cat": "people", "body": "human", "style": "medic",
+	"medic": {"name": Catalog.FIGHTERS.medic.name, "icon": "⛑️", "cat": "people", "body": "human", "style": "medic",
 		"hp": 90, "speed": 4.4, "armor": 0.0, "size": 1.0, "weapon": "pistol", "pers": "ranged", "mass": 65.0, "stab": 0.9, "heals": true},
-	"ninja": {"name": "Ninja", "icon": "🥷", "cat": "people", "body": "human", "style": "ninja",
+	"ninja": {"name": Catalog.FIGHTERS.ninja.name, "icon": "🥷", "cat": "people", "body": "human", "style": "ninja",
 		"hp": 90, "speed": 7.2, "armor": 0.0, "size": 0.95, "weapon": "katana", "pers": "attack", "mass": 60.0, "stab": 1.0, "dodge": 0.3},
-	"giant": {"name": "Giant", "icon": "🧌", "cat": "people", "body": "human", "style": "giant",
+	"giant": {"name": Catalog.FIGHTERS.giant.name, "icon": "🧌", "cat": "people", "body": "human", "style": "giant",
 		"hp": 520, "speed": 3.1, "armor": 0.1, "size": 2.1, "weapon": "hammer", "pers": "attack", "mass": 400.0, "stab": 4.5, "voice": "roar"},
 	"wizard": {"name": "Wizard", "icon": "🧙", "cat": "people", "body": "human", "style": "wizard",
 		"hp": 85, "speed": 3.8, "armor": 0.0, "size": 1.0, "weapon": "fireball", "pers": "ranged", "mass": 65.0, "stab": 0.9, "special": true},
@@ -115,34 +122,34 @@ const UNITS := {
 	"gi": {"name": "GI", "icon": "🎖️", "cat": "history", "body": "human", "style": "gi",
 		"hp": 100, "speed": 4.0, "armor": 0.05, "size": 1.0, "weapon": "rifle", "pers": "ranged", "mass": 75.0, "stab": 1.0, "coat": "6b6a42"},
 
-	"dog": {"name": "Dog", "icon": "🐕", "cat": "animals", "body": "quad", "style": "dog",
+	"dog": {"name": Catalog.FIGHTERS.dog.name, "icon": "🐕", "cat": "animals", "body": "quad", "style": "dog",
 		"hp": 70, "speed": 7.0, "armor": 0.0, "size": 1.0, "weapon": "bite", "pers": "attack", "mass": 30.0, "stab": 0.8, "voice": "bark"},
-	"wolf": {"name": "Wolf", "icon": "🐺", "cat": "animals", "body": "quad", "style": "wolf",
+	"wolf": {"name": Catalog.FIGHTERS.wolf.name, "icon": "🐺", "cat": "animals", "body": "quad", "style": "wolf",
 		"hp": 95, "speed": 7.6, "armor": 0.0, "size": 1.0, "weapon": "bite_big", "pers": "attack", "mass": 45.0, "stab": 1.0, "voice": "growl"},
-	"bear": {"name": "Bear", "icon": "🐻", "cat": "animals", "body": "quad", "style": "bear",
+	"bear": {"name": Catalog.FIGHTERS.bear.name, "icon": "🐻", "cat": "animals", "body": "quad", "style": "bear",
 		"hp": 300, "speed": 5.2, "armor": 0.1, "size": 1.0, "weapon": "claw", "pers": "attack", "mass": 300.0, "stab": 3.0, "voice": "growl"},
-	"bull": {"name": "Bull", "icon": "🐂", "cat": "animals", "body": "quad", "style": "bull",
+	"bull": {"name": Catalog.FIGHTERS.bull.name, "icon": "🐂", "cat": "animals", "body": "quad", "style": "bull",
 		"hp": 330, "speed": 5.4, "armor": 0.1, "size": 1.0, "weapon": "horns", "pers": "attack", "mass": 500.0, "stab": 3.5, "voice": "moo", "charge": true},
-	"elephant": {"name": "Elephant", "icon": "🐘", "cat": "animals", "body": "quad", "style": "elephant",
+	"elephant": {"name": Catalog.FIGHTERS.elephant.name, "icon": "🐘", "cat": "animals", "body": "quad", "style": "elephant",
 		"hp": 750, "speed": 3.7, "armor": 0.15, "size": 1.0, "weapon": "stomp", "pers": "defend", "mass": 2000.0, "stab": 7.0, "voice": "trumpet"},
-	"chicken": {"name": "Chicken", "icon": "🐔", "cat": "animals", "body": "bird", "style": "chicken",
+	"chicken": {"name": Catalog.FIGHTERS.chicken.name, "icon": "🐔", "cat": "animals", "body": "bird", "style": "chicken",
 		"hp": 25, "speed": 4.2, "armor": 0.0, "size": 1.0, "weapon": "peck", "pers": "peaceful", "mass": 4.0, "stab": 0.45, "voice": "cluck"},
 	"gorilla": {"name": "Gorilla", "icon": "🦍", "cat": "animals", "body": "ape", "style": "gorilla",
 		"hp": 400, "speed": 6.2, "armor": 0.12, "size": 1.3, "weapon": "gorilla_punch", "pers": "attack", "mass": 220.0, "stab": 2.8, "voice": "growl", "special": true},
 	"mammoth": {"name": "Mammoth", "icon": "🦣", "cat": "animals", "body": "quad", "style": "mammoth",
 		"hp": 1050, "speed": 4.4, "armor": 0.15, "size": 1.0, "weapon": "mammoth_tusks", "pers": "attack", "mass": 2600.0, "stab": 7.5, "voice": "trumpet", "charge": true},
 
-	"trex": {"name": "T-Rex", "icon": "🦖", "cat": "dinos", "body": "biped", "style": "trex",
+	"trex": {"name": Catalog.FIGHTERS.trex.name, "icon": "🦖", "cat": "dinos", "body": "biped", "style": "trex",
 		"hp": 1300, "speed": 5.6, "armor": 0.15, "size": 1.0, "weapon": "trex_bite", "pers": "attack", "mass": 3000.0, "stab": 9.0, "voice": "roar"},
-	"raptor": {"name": "Raptor", "icon": "🦎", "cat": "dinos", "body": "biped", "style": "raptor",
+	"raptor": {"name": Catalog.FIGHTERS.raptor.name, "icon": "🦎", "cat": "dinos", "body": "biped", "style": "raptor",
 		"hp": 120, "speed": 8.6, "armor": 0.0, "size": 1.0, "weapon": "raptor_claw", "pers": "attack", "mass": 60.0, "stab": 1.1, "voice": "screech", "pounce": true},
-	"trike": {"name": "Triceratops", "icon": "🦏", "cat": "dinos", "body": "quad", "style": "trike",
+	"trike": {"name": Catalog.FIGHTERS.triceratops.name, "icon": "🦏", "cat": "dinos", "body": "quad", "style": "trike",
 		"hp": 850, "speed": 4.6, "armor": 0.25, "size": 1.0, "weapon": "trike_horns", "pers": "attack", "mass": 2500.0, "stab": 7.0, "voice": "growl", "charge": true},
-	"stego": {"name": "Stegosaurus", "icon": "🦔", "cat": "dinos", "body": "quad", "style": "stego",
+	"stego": {"name": Catalog.FIGHTERS.stego.name, "icon": "🦔", "cat": "dinos", "body": "quad", "style": "stego",
 		"hp": 700, "speed": 3.7, "armor": 0.2, "size": 1.0, "weapon": "tail_swipe", "pers": "defend", "mass": 2200.0, "stab": 6.5, "voice": "growl"},
-	"brachio": {"name": "Brachiosaurus", "icon": "🦕", "cat": "dinos", "body": "quad", "style": "brachio",
+	"brachio": {"name": Catalog.FIGHTERS.brachio.name, "icon": "🦕", "cat": "dinos", "body": "quad", "style": "brachio",
 		"hp": 1800, "speed": 2.9, "armor": 0.1, "size": 1.0, "weapon": "brachio_stomp", "pers": "defend", "mass": 6000.0, "stab": 12.0, "voice": "trumpet"},
-	"ptero": {"name": "Pterodactyl", "icon": "🦅", "cat": "dinos", "body": "bird", "style": "ptero",
+	"ptero": {"name": Catalog.FIGHTERS.ptero.name, "icon": "🦅", "cat": "dinos", "body": "bird", "style": "ptero",
 		"hp": 140, "speed": 8.0, "armor": 0.0, "size": 1.0, "weapon": "swoop", "pers": "attack", "mass": 30.0, "stab": 1.0, "voice": "screech", "flying": true},
 	"dragon": {"name": "Dragon", "icon": "🐉", "cat": "dinos", "body": "dragon", "style": "dragon",
 		"hp": 800, "speed": 6.5, "armor": 0.15, "size": 2.0, "weapon": "fire_breath", "pers": "attack", "mass": 900.0, "stab": 5.0, "voice": "roar", "flying": true, "special": true},

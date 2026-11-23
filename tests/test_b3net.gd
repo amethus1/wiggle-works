@@ -1,31 +1,21 @@
-extends Node
+extends TestBase
 ## 👥 3D Battle together: a host battle and a friend's battle talk over this
 ## computer's network. The friend's battle lives in its own SubViewport (its
 ## own 3D world and physics), like a second computer would.
 ## godot --headless --path . -- --test=b3net
 
-var fails := 0
 var host = null
 var friend = null
 
 
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
+## Waits up to `secs` real seconds for `cond` (two games talking over the network).
+func wait_for(cond: Callable, secs := 3.0) -> bool:
+	return await wait_real_for(cond, secs)
 
 
-func wait_for(cond: Callable, secs: float) -> bool:
-	var end := Time.get_ticks_msec() + int(secs * 1000.0)
-	while Time.get_ticks_msec() < end:
-		if cond.call():
-			return true
-		await get_tree().process_frame
-	return cond.call()
-
-
-func at(b, x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
+## The spot on battle `bt`'s ground at (x, z).
+func at_on(bt, x: float, z: float) -> Vector3:
+	return Vector3(x, bt.world.height_at(x, z), z)
 
 
 ## True if the friend is playing a red fighter on the host (other than the one with id `but`).
@@ -98,12 +88,12 @@ func _ready() -> void:
 	host.begin({"seed": 5, "map": "grassland"})
 	check(host.start_hosting() and host.net.is_host(), "👥 the host starts sharing the battle")
 	for i in 4:
-		host.spawn_unit("soldier", "red", at(host, -8, i * 2.0 - 3.0), "peaceful", PI * 0.5)
-		host.spawn_unit("knight", "blue", at(host, 8, i * 2.0 - 3.0), "peaceful", -PI * 0.5)
-	var tank: B3Unit = host.spawn_unit("tank", "red", at(host, -14, 8), "peaceful", 2.0)
-	var wall: B3Struct = host.spawn_struct("wall", at(host, 0, -10), 0.0, 8.0)
-	host.spawn_prop("xbarrel", at(host, 3, 6))
-	host.spawn_hazard("lava", at(host, 0, 14), 3.0)
+		host.spawn_unit("soldier", "red", at_on(host, -8, i * 2.0 - 3.0), "peaceful", PI * 0.5)
+		host.spawn_unit("knight", "blue", at_on(host, 8, i * 2.0 - 3.0), "peaceful", -PI * 0.5)
+	var tank: B3Unit = host.spawn_unit("tank", "red", at_on(host, -14, 8), "peaceful", 2.0)
+	var wall: B3Struct = host.spawn_struct("wall", at_on(host, 0, -10), 0.0, 8.0)
+	host.spawn_prop("xbarrel", at_on(host, 3, 6))
+	host.spawn_hazard("lava", at_on(host, 0, 14), 3.0)
 	# a blast knocked some trees over before the friend came
 	var knocked: Array = []
 	for n in host.world.scenery.get_children():
@@ -150,7 +140,7 @@ func _ready() -> void:
 	var before: int = alive(host)
 	friend.tools.place_id = "viking"
 	friend.tools.team = "green"
-	friend.tools._place(at(friend, 0, 0), at(friend, 0, 0), false, false)
+	friend.tools._place(at_on(friend, 0, 0), at_on(friend, 0, 0), false, false)
 	check(await wait_for(func(): return alive(host) == before + 1, 3.0), "a friend's placed viking appears in the host's battle")
 	check(await wait_for(func(): return alive(friend) == before + 1, 3.0), "and on the friend's screen")
 
@@ -356,7 +346,7 @@ func _ready() -> void:
 	var n_lock: int = alive(host)
 	friend.tools.place_id = "viking"
 	friend.tools.team = "green"
-	friend.tools._place(at(friend, 2, 2), at(friend, 2, 2), false, false)
+	friend.tools._place(at_on(friend, 2, 2), at_on(friend, 2, 2), false, false)
 	check(await wait_for(func(): return toast_has(friend, "locked"), 2.0) and alive(host) == n_lock, "🔒 locked: a friend's placing is turned away, and they're told why")
 	check(await wait_for(func(): return friend.net.host_locked, 1.0), "and the friend's game knows")
 	host.net.allow_changes = true
@@ -366,8 +356,8 @@ func _ready() -> void:
 	await wait_for(func(): return false, 1.0)
 	var n_box: int = alive(host)
 	for i in 4:
-		friend.net.send_cmd({"c": "place", "id": "soldier", "team": "yellow", "pers": "peaceful", "size": 1.0, "a": at(host, -70, -70),
-			"b": at(host, -40, -40), "dragged": true, "box": true, "yaw": 0.0})
+		friend.net.send_cmd({"c": "place", "id": "soldier", "team": "yellow", "pers": "peaceful", "size": 1.0, "a": at_on(host, -70, -70),
+			"b": at_on(host, -40, -40), "dragged": true, "box": true, "yaw": 0.0})
 	await wait_for(func(): return false, 0.8)
 	var boxed: int = alive(host) - n_box
 	check(boxed >= 100 and boxed <= 2 * 144 + 2, "🟩 four blocks of fighters at once from a friend: only two get made (%d fighters)" % boxed)
@@ -393,25 +383,25 @@ func _ready() -> void:
 	check(await wait_for(func(): return friend.units.filter(func(u): return u.kind == "tank" and not u.dead).is_empty(), 2.0), "erasing on the host erases on the friend's screen")
 
 	# 🔥 a wooden tower catching fire burns on the friend's screen too, and 🪂 parachutes float down there
-	var htw: B3Struct = host.spawn_struct("tower", at(host, -30, -30), 0.0)
+	var htw: B3Struct = host.spawn_struct("tower", at_on(host, -30, -30), 0.0)
 	check(await wait_for(func(): return friend.structs.size() == host.structs.size(), 3.0), "(the friend gets a wooden tower)")
 	await wait_for(func(): return false, 1.2)      # (a friend's new building is left alone for its first second)
 	var fire_ok: bool = host.fighting and B3Fire.of(host).ignite(htw.pieces[0])
 	check(fire_ok and await wait_for(func(): return B3Fire.of(friend).burning.size() == 1, 2.0), "🔥 a tower catching fire burns on the friend's screen too")
-	host.fx.chute(at(host, -30, 30) + Vector3(0, 20, 0), Vector3(0, 8, 0), Color.RED)
+	host.fx.chute(at_on(host, -30, 30) + Vector3(0, 20, 0), Vector3(0, 8, 0), Color.RED)
 	check(await wait_for(func(): return friend.fx.get_children().any(func(c): return c is B3Chute), 2.0), "🪂 a pilot's parachute floats down on the friend's screen")
 	B3Fire.of(host).put_out()
 	host.remove_struct(htw, false)
 
 	# ✈️ an airstrike's plane flies over on the friend's screen too
-	host.airstrike(at(host, 0, 70), Vector3.RIGHT)
+	host.airstrike(at_on(host, 0, 70), Vector3.RIGHT)
 	var hplane: Node3D = (host.planes[0] as Dictionary).node
 	check(await wait_for(func(): return friend_plane() != null and friend_plane().global_position.distance_to(hplane.global_position) < 8.0, 2.0),
 		"✈️ the friend sees the airstrike plane, where the host's is")
 
 	# 📟 C4: the Detonate button counts the same
-	host.spawn_prop("c4", at(host, 40, -40))
-	host.spawn_prop("c4", at(host, 42, -40))
+	host.spawn_prop("c4", at_on(host, 40, -40))
+	host.spawn_prop("c4", at_on(host, 42, -40))
 	check(await wait_for(func(): return c4_text(friend) == "Boom! (2)", 2.0), "📟 the friend's Detonate button counts the host's C4 (%s)" % c4_text(friend))
 	for p in c4_props(host):
 		p.trigger(30.0)
@@ -421,21 +411,21 @@ func _ready() -> void:
 
 	# ☢️ a nuke flashes and shakes the friend's screen like the host's
 	friend.cam.trauma = 0.0
-	friend.net._play_fx(["nuke", at(friend, 90, 90)])
+	friend.net._play_fx(["nuke", at_on(friend, 90, 90)])
 	check(friend.ui._flash > 0.5 and friend.cam.trauma > 0.5, "☢️ a nuke flashes and shakes the friend's screen too")
 	friend.ui._flash = 0.0
-	host.net.rec_fx(["nuke", at(host, 90, 90)])
+	host.net.rec_fx(["nuke", at_on(host, 90, 90)])
 	check(await wait_for(func(): return friend.ui._flash > 0.5, 2.0) and not host.net.snapshot().has("fx"),
 		"☢️ the host's nuke flash comes over on its own reliable channel (not in a snapshot that could get lost)")
 
 	# effects the friend's copy already made itself aren't played twice
 	var skipped: int = friend.net.fx_skipped
 	var played: int = friend.net.fx_played
-	friend.snd("boing", at(friend, 5, 5), 0.5)
-	friend.net._play_fx(["snd", "boing", at(friend, 5.5, 5), 0.5, 1.2])
+	friend.snd("boing", at_on(friend, 5, 5), 0.5)
+	friend.net._play_fx(["snd", "boing", at_on(friend, 5.5, 5), 0.5, 1.2])
 	check(friend.net.fx_skipped == skipped + 1 and friend.net.fx_played == played, "🔁 a sound the friend's screen just made isn't played again when the host's arrives")
-	friend.net._play_fx(["snd", "boing", at(friend, 5.5, 5), 0.5, 1.2])
-	friend.net._play_fx(["dust", at(friend, 5, 5), 1.0])
+	friend.net._play_fx(["snd", "boing", at_on(friend, 5.5, 5), 0.5, 1.2])
+	friend.net._play_fx(["dust", at_on(friend, 5, 5), 1.0])
 	check(friend.net.fx_played == played + 2, "but the next one (and other effects) still are")
 
 	# only real effects, with sensible values, are played from the host
@@ -446,7 +436,7 @@ func _ready() -> void:
 		friend.net._play_fx(e)
 	check(friend.net.fx_played == played and is_instance_valid(friend.fx) and not friend.fx.is_queued_for_deletion(),
 		"🛡️ unknown or broken effects from the host are ignored")
-	friend.net._play_fx(["poof", at(friend, 3, 3), 1.0])
+	friend.net._play_fx(["poof", at_on(friend, 3, 3), 1.0])
 	check(friend.net.fx_played == played + 1, "and real ones still play")
 
 	# the host's rules come over, but your own Screen shake stays yours
@@ -468,11 +458,11 @@ func _ready() -> void:
 	var junk: Array = [
 		{"c": "erase", "nid": fp_u.get_instance_id()}, {"c": "erase", "nid": host.get_instance_id()}, {"c": "erase", "nid": "lots"},
 		{"c": "erase", "nid": friend.get_instance_id()}, {"c": "play", "nid": fp_u.get_instance_id()},
-		{"c": "place", "id": "viking", "team": "purple", "pers": "auto", "a": at(host, 0, 0), "b": at(host, 0, 0)},
-		{"c": "place", "id": "laser_shark", "team": "red", "pers": "auto", "a": at(host, 0, 0), "b": at(host, 0, 0)},
-		{"c": "place", "id": "viking", "team": "red", "pers": "auto", "a": Vector3(NAN, 0, 0), "b": at(host, 0, 0)},
-		{"c": "place", "id": "viking", "team": "red", "pers": "auto", "a": "here", "b": at(host, 0, 0), "yaw": INF},
-		{"c": "drop", "id": "grenade", "pos": "here"}, {"c": "drop", "id": "blackhole", "pos": at(host, 0, 0)},
+		{"c": "place", "id": "viking", "team": "purple", "pers": "auto", "a": at_on(host, 0, 0), "b": at_on(host, 0, 0)},
+		{"c": "place", "id": "laser_shark", "team": "red", "pers": "auto", "a": at_on(host, 0, 0), "b": at_on(host, 0, 0)},
+		{"c": "place", "id": "viking", "team": "red", "pers": "auto", "a": Vector3(NAN, 0, 0), "b": at_on(host, 0, 0)},
+		{"c": "place", "id": "viking", "team": "red", "pers": "auto", "a": "here", "b": at_on(host, 0, 0), "yaw": INF},
+		{"c": "drop", "id": "grenade", "pos": "here"}, {"c": "drop", "id": "blackhole", "pos": at_on(host, 0, 0)},
 		{"c": "drop", "id": "grenade", "pos": Vector3(0, INF, 0)},
 		{"c": "team", "nid": a_red.get_instance_id(), "t": "purple"}, {"c": "mood", "nid": a_red.get_instance_id(), "p": "evil"},
 		{"c": "wave"}, {"c": "wave", "n": 99}, {"c": 5}, {"c": ["fight"]}, {}]
@@ -493,9 +483,9 @@ func _ready() -> void:
 	# too many booms at once: some are turned away (and only one nuke)
 	var props0: int = host.props.size()
 	for i in 5:
-		friend.net.send_cmd({"c": "drop", "id": "nuke", "pos": at(host, 60, 60), "dir": Vector3.RIGHT})
+		friend.net.send_cmd({"c": "drop", "id": "nuke", "pos": at_on(host, 60, 60), "dir": Vector3.RIGHT})
 	for i in 60:
-		friend.net.send_cmd({"c": "drop", "id": "c4", "pos": at(host, -40 + i * 0.5, 40), "dir": Vector3.RIGHT})
+		friend.net.send_cmd({"c": "drop", "id": "c4", "pos": at_on(host, -40 + i * 0.5, 40), "dir": Vector3.RIGHT})
 	await wait_for(func(): return false, 0.6)
 	var c4_made: int = host.props.size() - props0
 	var nukes: Array = host.proj_root.get_children().filter(func(p): return p is B3Proj and p.kind == "nuke")
@@ -594,14 +584,14 @@ func _ready() -> void:
 	var spent0: int = host.spent
 	friend.tools.place_id = "soldier"
 	friend.tools.team = "green"
-	friend.tools._place(at(friend, 0, 10), at(friend, 0, 10), false, false)
+	friend.tools._place(at_on(friend, 0, 10), at_on(friend, 0, 10), false, false)
 	check(await wait_for(func(): return host.spent == spent0 + 2, 3.0), "a friend's soldier in the fort is paid from the host's points")
 	# ("🪙 left / budget", or just "🪙 left" when the top bar is squeezed up: B3UI._compact_top)
 	check(await wait_for(func(): return friend.ui.coin_lbl.text.trim_prefix("🪙 ").split(" ")[0] == str(host.points_left()), 2.0),
 		"and the friend's coins go down too (%s)" % friend.ui.coin_lbl.text)
-	friend.tools._place(at(friend, 0, -30), at(friend, 0, -30), false, false)
+	friend.tools._place(at_on(friend, 0, -30), at_on(friend, 0, -30), false, false)
 	check(await wait_for(func(): return toast_has(friend, "🚧"), 2.0) and host.spent == spent0 + 2, "outside the fort, the friend is told why and nothing's placed")
-	friend.drop("mine", at(friend, 3, 30))
+	friend.drop("mine", at_on(friend, 3, 30))
 	check(await wait_for(func(): return toast_has(friend, "glowing"), 2.0) and host.spent == spent0 + 2, "same for a mine")
 	friend.ui.mode_hud.press_next()
 	check(await wait_for(func(): return host.fighting and host.modes.wave == 1, 3.0), "the friend's ▶ Start wave 1 starts the host's wave")
@@ -687,5 +677,4 @@ func _ready() -> void:
 	vp.queue_free()
 	for i in 3:
 		await get_tree().process_frame
-	print("test_b3net: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()

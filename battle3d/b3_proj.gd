@@ -291,7 +291,7 @@ func _crash(p: Vector3) -> void:
 	var mat := B3Mats.mat(Color("8a8580"), 0.95)
 	for i in 3:
 		var sz := Vector3.ONE * randf_range(0.18, 0.28)
-		var rb: RigidBody3D = battle._chunk_body(Transform3D(Basis.IDENTITY, p + Vector3(0, 0.3, 0)), sz, 1.0)
+		var rb: RigidBody3D = battle.combat.chunk_body(Transform3D(Basis.IDENTITY, p + Vector3(0, 0.3, 0)), sz, 1.0)
 		var cs := CollisionShape3D.new()
 		var bs := BoxShape3D.new()
 		bs.size = sz
@@ -300,7 +300,7 @@ func _crash(p: Vector3) -> void:
 		B3Mats.add(rb, B3Mats.box(sz), mat)
 		rb.linear_velocity = vel * 0.15 + Vector3(randf_range(-3, 3), randf_range(2, 5), randf_range(-3, 3))
 		rb.angular_velocity = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
-	battle._trim_chunks()
+	battle.combat.trim_chunks()
 
 
 func _split() -> void:

@@ -1,18 +1,10 @@
-extends Node
+extends TestBase
 ## Two copies of the game talk over this computer's network: a host and a
 ## friend. Checks joining, mirroring, friend commands, players and snapshots.
 ## godot --headless --path . -- --test=net
 
-var fails := 0
 
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
-
-func wait_for(cond: Callable, secs: float) -> bool:
+func wait_for(cond: Callable, secs := 3.0) -> bool:
 	var t := 0.0
 	while t < secs:
 		if cond.call():
@@ -244,8 +236,7 @@ func _ready() -> void:
 	check(says(panel._list, "Couldn't listen"), "if it can't listen for games on the Wi-Fi, the panel says so")
 	panel.queue_free()
 	blocker.close()
-	print("test_net: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 ## True if a message with `txt` in it has popped up on `g`'s screen.

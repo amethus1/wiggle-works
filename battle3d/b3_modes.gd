@@ -49,7 +49,6 @@ const START_POINTS := 25       # 🪙 to spend before wave 1
 const BREAK := 20.0            # seconds between waves
 const BOSS_SIZE := 2.2
 const BOSS_HP := 2.5           # times the boss kind's normal health
-const BEST_PATH := "user://b3_waves.cfg"
 const HILL_ALPHA := [0.75, 1.0, 0.55]   # the hill's disc, rim and column of light
 
 ## 🌊 The waves: what comes, getting stronger. After 15 the last five come
@@ -72,9 +71,7 @@ const WAVES := [
 	{"name": "A HUGE dragon", "boss": "dragon", "units": [["tank", 3], ["plane", 2], ["heli", 2], ["soldier", 8]]},
 ]
 const BOSSES := ["giant", "trex", "dragon", "mammoth", "gorilla"]
-
-static var best := -1          # 🌊 the best wave held so far (saved in BEST_PATH)
-static var best_file := BEST_PATH    # (tests point this somewhere else)
+# (🌊 the best wave held is kept with the other progress: Settings.b3_wave_best)
 
 var battle = null
 var kind := ""                 # "" (last team standing), "king", "hill" or "waves"
@@ -129,10 +126,6 @@ var _hill_mats: Array[StandardMaterial3D] = []
 var _hill_tint := Color.WHITE
 var _pulse := 0.0
 var _owns_budget := false
-
-
-func _ready() -> void:
-	load_best()
 
 
 # ------------------------------------------------------------------ which
@@ -383,7 +376,7 @@ func _crown(t: String, members: Array) -> void:
 	var c := Vector3.ZERO
 	for u: B3Unit in members:
 		c += u.position
-		if not (u is B3Vehicle) and not u.flying:
+		if not u.is_vehicle() and not u.flying:
 			count[u.kind] = int(count.get(u.kind, 0)) + 1
 	c /= maxf(1.0, members.size())
 	var kind_s := "knight"
@@ -419,7 +412,7 @@ func _crown(t: String, members: Array) -> void:
 	# a few teammates stand guard round the King (never more than half the
 	# army, so a small one still goes on the attack)
 	var near: Array = members.filter(func(u: B3Unit) -> bool:
-		return is_instance_valid(u) and not u.dead and not (u is B3Vehicle) and not u.flying and not u.player \
+		return is_instance_valid(u) and not u.dead and not u.is_vehicle() and not u.flying and not u.player \
 			and u.position.distance_to(spot) < 30.0)
 	near.sort_custom(func(a: B3Unit, b: B3Unit) -> bool: return a.position.distance_to(spot) < b.position.distance_to(spot))
 	for i in mini(mini(GUARDS, floori(members.size() / 2.0)), near.size()):
@@ -473,7 +466,7 @@ func _rout(t: String) -> void:
 		if u.act == "aim" or u.act == "bow" or u.act == "throw":
 			u.act = ""         # (drops what it was about to shoot or throw)
 			u._hide_laser()
-		if u is B3Vehicle:
+		if u.is_vehicle():
 			u.set_personality("peaceful")      # (stops shooting and wanders off)
 		else:
 			u.set_personality("coward")
@@ -900,7 +893,7 @@ static func wave_preview(n: int) -> Array:
 ## 🚩 How hard attacker `u` hits the keep, a second (a boss much harder).
 static func siege_dps(u: B3Unit, boss := false) -> float:
 	var d := 0.0
-	if u is B3Vehicle:
+	if u.is_vehicle():
 		d = 22.0 if u.kind == "tank" else 12.0
 	else:
 		d = clampf(float(u.melee.dmg) / maxf(0.3, float(u.melee.cd)), 6.0, 30.0) * 0.6
@@ -1047,10 +1040,7 @@ func _wave_cleared() -> void:
 	if int(battle.budget) >= 0:
 		battle.budget = int(battle.budget) + bonus
 		battle.budget_changed.emit()
-	var new_best := wave > best
-	if new_best:
-		best = wave
-		save_best()
+	var new_best := Settings.wave_held(wave)      # (saved with the other progress)
 	phase = "break"
 	break_t = BREAK
 	siege = false
@@ -1083,7 +1073,7 @@ func _lose() -> void:
 	phase = "lost"
 	siege = false
 	left = wave_units.size()
-	_toast("💥 The keep fell!  ⭐ Your best: wave %d" % maxi(best, 0))
+	_toast("💥 The keep fell!  ⭐ Your best: wave %d" % Settings.b3_wave_best)
 
 
 # --------------------------------------------------------- 🚩 the Fort Keep
@@ -1146,7 +1136,7 @@ func _siege_tick(step: float) -> void:
 		var reach := 1.8
 		if u.flying:
 			reach = 30.0
-		elif u is B3Vehicle:
+		elif u.is_vehicle():
 			reach = 4.0
 		if gap > reach:
 			continue
@@ -1333,23 +1323,6 @@ func _mark_fought() -> void:
 				(o as Node).set_meta("fought", true)
 
 
-static func load_best() -> void:
-	if best >= 0:
-		return
-	best = 0
-	var c := ConfigFile.new()
-	if c.load(best_file) == OK:
-		best = maxi(0, int(c.get_value("waves", "best", 0)))
-
-
-static func save_best() -> void:
-	if Settings.testing and best_file == BEST_PATH:
-		return      # tests and screenshots never write your real best
-	var c := ConfigFile.new()
-	c.set_value("waves", "best", best)
-	c.save(best_file)
-
-
 # ------------------------------------------------------------ 👥 friends
 ## What friends need for the HUD and the hill (the host's snapshot "md").
 func net_state() -> Array:
@@ -1361,7 +1334,7 @@ func net_state() -> Array:
 		"waves":
 			# ..., the 🚩 keep: health (0..1), where, 0 none / 1 standing / 2 fallen
 			var ks := 0 if keep_node == null else (1 if keep_up else 2)
-			return ["waves", wave, phase, break_t, best, left, keep_hp / maxf(1.0, keep_max), keep_pos, ks]
+			return ["waves", wave, phase, break_t, Settings.b3_wave_best, left, keep_hp / maxf(1.0, keep_max), keep_pos, ks]
 	return [""]
 
 
@@ -1470,7 +1443,7 @@ static func _net_ok(k: String, a: Array) -> bool:
 func shown_best() -> int:
 	if battle and battle.puppet and _host_best >= 0:
 		return _host_best
-	return maxi(best, 0)
+	return Settings.b3_wave_best
 
 
 static func _key_ok(k: String) -> bool:

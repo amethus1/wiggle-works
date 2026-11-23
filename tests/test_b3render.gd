@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## 3D Battle drawing benchmark: how much the renderer has to do in big
 ## scenes. It needs a real window (headless doesn't draw), so it isn't part
 ## of tools/run_tests.sh.

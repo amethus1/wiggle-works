@@ -1,18 +1,11 @@
-extends Node
+extends TestBase
 ## 🔄 The real thing, online: asks GitHub for the newest release and downloads
 ## its Windows .exe the way the game's "Update now" does (into a test folder,
 ## checking the size and fingerprint). Not part of tools/run_tests.sh because
 ## it needs the internet; run it after tools/release.sh.
 ## godot --headless --path . -- --test=update_live
 
-var fails := 0
 const DIR := "user://update_live"
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
 
 
 func _ready() -> void:
@@ -35,5 +28,4 @@ func _ready() -> void:
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
 		DirAccess.remove_absolute(DIR)
-	print("test_update_live: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()

@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for the extra 3D Battle features: Battle Rules, playing as
 ## a fighter (overhead and first person), the follow camera, screen shake,
 ## save slots, ⏮ Reset, Surprise Battle, the MVP and the HUD's layout. Also
@@ -8,52 +8,10 @@ extends Node
 
 const SPEED := 4.0
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
 
 func fresh(map := "grassland", ui := true) -> void:
-	if b and is_instance_valid(b):
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(99)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
-	b.begin({"seed": 777, "no_ui": not ui, "map": map})
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
-
-
-func key(k: Key, down: bool) -> void:
-	var ev := InputEventKey.new()
-	ev.keycode = k
-	ev.physical_keycode = k
-	ev.pressed = down
-	Input.parse_input_event(ev)
-
-
-func rule(id: String, v: String) -> void:
-	B3Rules.set_value(id, v)
-	b.apply_rules()
+	await drop_battle()
+	start_battle(99, {"seed": 777, "no_ui": not ui, "map": map})
 
 
 func _ready() -> void:
@@ -90,8 +48,7 @@ func _ready() -> void:
 	Engine.time_scale = 1.0
 	for i in 3:
 		await get_tree().process_frame
-	print("test_b3more: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 # ------------------------------------------------------------------ rules
@@ -602,16 +559,7 @@ func _sizes() -> void:
 	check(sizes.has(2.5) and sizes.has(0.5), "sizes are saved with the battle (%s)" % str(sizes))
 
 
-
 # ------------------------------------------------------- playing: the fixes
-## Waits (up to `t` seconds of battle time) until `fn` says yes.
-func wait_for(fn: Callable, t := 3.0) -> bool:
-	var end: float = b.time + t
-	var guard := 0
-	while not fn.call() and b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-	return fn.call()
 
 
 func _play_fixes() -> void:
@@ -1134,7 +1082,6 @@ func _player_gravity() -> void:
 		check(miss < 1.5, "🌙 your %s comes down where you aimed in Moon gravity (%.1f m off)" % ["arrow" if kind == "archer" else "grenade", miss])
 		b.tools.stop_playing()
 	rule("gravity", "normal")
-
 
 
 # ----------------------------------------------------- 🔍 box-select and blocks

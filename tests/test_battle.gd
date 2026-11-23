@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for 3D Battle (battle3d/): everything spawns, fights end,
 ## blasts launch ragdolls, knocked-down fighters get back up, nukes clear the
 ## field, lava and acid KO, and each personality behaves.
@@ -6,42 +6,10 @@ extends Node
 
 const SPEED := 4.0          # run the sim 4x faster than real time (dt stays 1/60)
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	if cond:
-		print("  ok    ", msg)
-	else:
-		print("  FAIL  ", msg)
-		fails += 1
-
 
 func fresh(map := "grassland", scenario := "", ui := false) -> void:
-	if b and is_instance_valid(b):
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(1234)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
-	b.begin({"seed": 4321, "no_ui": not ui, "map": map, "scenario": scenario})
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-## Waits `t` seconds of battle time.
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
+	await drop_battle()
+	start_battle(1234, {"seed": 4321, "no_ui": not ui, "map": map, "scenario": scenario})
 
 
 func alive(team := "") -> Array:
@@ -62,8 +30,7 @@ func _ready() -> void:
 			b.queue_free()
 		for i in 3:
 			await get_tree().process_frame
-		print("test_battle: %d failure(s)" % fails)
-		get_tree().quit(1 if fails > 0 else 0)
+		finish()
 		return
 	await _spawn_everything()
 	await _maps()
@@ -101,8 +68,7 @@ func _ready() -> void:
 	for i in 3:
 		await get_tree().process_frame
 	print("test_battle: done in %.1fs" % ((Time.get_ticks_msec() - t0) / 1000.0))
-	print("test_battle: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 # ------------------------------------------------------------------ spawn
@@ -874,9 +840,6 @@ func _vehicle_palette() -> void:
 
 
 # ------------------------------------------------- fixes from a code review
-func rule(id: String, v: String) -> void:
-	B3Rules.set_value(id, v)
-	b.apply_rules()
 
 
 ## A fighter jumps off solid ground only: not again at the top of a jump
@@ -1511,9 +1474,9 @@ func _fighters_map() -> void:
 	b.grid_min = 0
 	await get_tree().physics_frame
 	b.grid_on()      # (made now, inside the physics step)
-	var had: bool = not b._grid.is_empty() and b.grid_r > 0.0
+	var had: bool = not b.grid.cells.is_empty() and b.grid.big_r > 0.0
 	b.clear_units()
-	check(had and b._grid.is_empty() and b.grid_r == 0.0 and b._grid_step == -1 and b.units_near(Vector3.ZERO, 50.0).is_empty(), "clearing everyone away empties the fighters' map")
+	check(had and b.grid.cells.is_empty() and b.grid.big_r == 0.0 and b.grid.step == -1 and b.units_near(Vector3.ZERO, 50.0).is_empty(), "clearing everyone away empties the fighters' map")
 
 
 ## Who a helicopter or plane goes after (B3Aircraft._think): the nearest

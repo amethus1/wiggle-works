@@ -3,7 +3,9 @@ class_name Saves
 ## (slot1.json ... slot6.json) with a little picture of it (slotN.png). A slot
 ## keeps its name, the world, when it was saved and the whole playground
 ## (World.serialize()). The single save from before (user://playground.json)
-## moves into slot 1 the first time the slots are looked at.
+## moves into slot 1 the first time the slots are looked at. A slot is written
+## to slotN.json.tmp first and then moved over the old one, so a crash half-way
+## through saving can't leave a broken save (Settings.write_text).
 
 const SLOTS := 6
 const PATH := "user://playground.json"     # the old single save (migrate())
@@ -51,11 +53,17 @@ static func migrate() -> bool:
 static func has_slot(slot := 0) -> bool:
 	migrate()
 	if slot > 0:
-		return FileAccess.file_exists(path(slot))
+		return _exists(slot)
 	for i in SLOTS:
-		if FileAccess.file_exists(path(i + 1)):
+		if _exists(i + 1):
 			return true
 	return false
+
+
+## Is slot `slot` saved? (Puts back a save a crash cut off: Settings.recover.)
+static func _exists(slot: int) -> bool:
+	Settings.recover(path(slot))
+	return FileAccess.file_exists(path(slot))
 
 
 ## Saves the playground in `slot`. `name` "" keeps the slot's old name (or
@@ -83,17 +91,13 @@ static func save_slot(world: World, slot := 1, name := "", thumb: Image = null) 
 
 static func _write(slot: int, d: Dictionary) -> bool:
 	DirAccess.make_dir_recursive_absolute(dir())
-	var f := FileAccess.open(path(slot), FileAccess.WRITE)
-	if f == null:
-		return false
-	f.store_string(JSON.stringify(d))
-	return true
+	return Settings.write_text(path(slot), JSON.stringify(d))
 
 
 ## Slot `slot` as saved: {name, world, when, data}, or {} if it's empty.
 ## (A raw playground with no name around it, like the old save, still reads.)
 static func read(slot: int) -> Dictionary:
-	if not FileAccess.file_exists(path(slot)):
+	if not _exists(slot):
 		return {}
 	var f := FileAccess.open(path(slot), FileAccess.READ)
 	if f == null:
@@ -149,7 +153,7 @@ static func delete_all_test_saves() -> void:
 	if not Settings.testing:
 		return
 	for i in SLOTS:
-		for p in [path(i + 1), thumb_path(i + 1)]:
+		for p in [path(i + 1), path(i + 1) + ".tmp", thumb_path(i + 1)]:
 			if FileAccess.file_exists(p):
 				DirAccess.remove_absolute(p)
 	for p in [legacy_path(), legacy_path() + ".old"]:

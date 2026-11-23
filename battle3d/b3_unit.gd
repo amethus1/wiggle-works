@@ -293,6 +293,28 @@ func is_enemy(u: B3Unit) -> bool:
 	return false
 
 
+## What sort of unit this is, for code that treats them differently. Plain
+## fighters say no to all of these; B3Vehicle (tanks, jeeps, cars, guns) and
+## B3Aircraft (helicopters and fighter planes) say yes to theirs.
+func is_vehicle() -> bool:
+	return false
+
+
+## A helicopter or a fighter plane (B3Aircraft).
+func is_aircraft() -> bool:
+	return false
+
+
+## A fighter plane (not a helicopter).
+func is_plane() -> bool:
+	return false
+
+
+## An aircraft that's been shot down and is on its way to the ground.
+func going_down() -> bool:
+	return false
+
+
 # ------------------------------------------------------------------ physics
 func _physics_process(dt: float) -> void:
 	if dt <= 0.0 or dead:
@@ -465,7 +487,7 @@ func _nearest_enemy(my: Vector3) -> B3Unit:
 	var ring := 0
 	while ring <= rings:
 		if ring > 0:
-			var lb := (ring - 1) * B3Battle.GRID
+			var lb := (ring - 1) * B3Grid.CELL
 			if lb * lb > bd:
 				break      # (only the one we've got scores lower than its distance)
 		var all := ring > cap
@@ -1046,7 +1068,7 @@ func _hit_piece(pc: B3Piece, dmg: float) -> void:
 		var st: Variant = pc.structure
 		battle.break_piece(pc, (_flat(pc.global_position - position).normalized() + Vector3.UP * 0.3) * 3.0, true)
 		if st is B3Struct and is_instance_valid(st):
-			battle._settle_soon(st as B3Struct)
+			battle.combat.settle_soon(st as B3Struct)
 		_hack = null
 
 

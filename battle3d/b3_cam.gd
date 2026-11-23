@@ -224,7 +224,7 @@ func _hide_near(at: Vector3) -> void:
 	var keep: Array = []
 	if battle != null and at.x != INF:
 		for u: B3Unit in battle.units:
-			if u == fp_unit or u.rig == null or u is B3Vehicle or fp_unit.is_enemy(u):
+			if u == fp_unit or u.rig == null or u.is_vehicle() or fp_unit.is_enemy(u):
 				continue
 			var d := Vector2(u.position.x - at.x, u.position.z - at.z).length()
 			if d < 1.1 + u.radius and absf(u.position.y - at.y) < 2.5:

@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## 🔄 Updater checks that don't need the internet: comparing versions, picking
 ## the right download, only downloading from this game's GitHub releases,
 ## downloading (from a tiny web server on this computer, including one that
@@ -7,14 +7,7 @@ extends Node
 ## godot --headless --path . -- --test=update
 ## (tests/test_update_live.gd checks the real GitHub release, online.)
 
-var fails := 0
 const DIR := "user://update_test"
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
 
 
 func write(path: String, txt: String) -> void:
@@ -193,5 +186,4 @@ func _ready() -> void:
 		DirAccess.remove_absolute(DIR + "/" + f)
 	DirAccess.remove_absolute(DIR)
 	await get_tree().process_frame
-	print("test_update: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()

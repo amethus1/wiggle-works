@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Rough timing: how long one physics step takes in a big battle.
 ##   godot --headless --path . -- --test=perf          the 2D game
 ##   godot --path . -- --test=perf --b3=grassland      3D Battle, 150 fighters, real frames

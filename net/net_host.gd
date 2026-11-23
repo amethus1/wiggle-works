@@ -282,4 +282,4 @@ static func _known_team(t: String, blank_ok: bool) -> bool:
 
 
 static func _known_pers(p: String, blank_ok: bool) -> bool:
-	return (blank_ok and p == "") or Catalog.PERSONALITIES.any(func(x): return x.id == p)
+	return (blank_ok and p == "") or Catalog.PERS.has(p)

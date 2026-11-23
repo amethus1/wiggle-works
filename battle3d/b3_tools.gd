@@ -196,12 +196,12 @@ func next_teammate(skip: Array = [], same_sort := true, standing := false) -> B3
 			continue
 		if o.team == "wild" and o.kind != B3Player.kind:
 			continue      # wild animals and monsters are each on their own side
-		if skip.has(o.get_instance_id()) or (standing and o.down) or (o is B3Aircraft and (o as B3Aircraft).falling):
+		if skip.has(o.get_instance_id()) or (standing and o.down) or o.going_down():
 			continue
 		var d := o.global_position.distance_to(B3Player.last_pos)
 		if o.down:
 			d += 500.0
-		if same_sort and (o is B3Vehicle) != B3Player.was_vehicle:
+		if same_sort and o.is_vehicle() != B3Player.was_vehicle:
 			d += 250.0
 		if d < bd:
 			bd = d
@@ -903,7 +903,7 @@ func _grab_start(sp: Vector2) -> bool:
 		if why != "":
 			_nope(why, pick(sp).pos)
 			return false
-	if u is B3Vehicle and not u.dead:
+	if u and u.is_vehicle() and not u.dead:
 		# vehicles are picked up whole: they dangle, then land back on their wheels
 		grab_body = u
 		grab_unit = u
@@ -1150,7 +1150,7 @@ func _player_tick(v: Vector2) -> void:
 	me.steer = Vector2(v.x, -v.y)
 	me.lift = (1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0) - (1.0 if Input.is_key_pressed(KEY_SHIFT) else 0.0)
 	if me.fp:
-		if battle.puppet and u is B3Vehicle and (u.style_is("car") or u.style_is("jeep")):
+		if battle.puppet and u.is_vehicle() and (u.style_is("car") or u.style_is("jeep")):
 			# in a friend's battle our copy of the car turns, so the view turns with it here
 			var yaw := atan2(u.global_basis.z.x, u.global_basis.z.z)
 			if _veh_yaw != INF:

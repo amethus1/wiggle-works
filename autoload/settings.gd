@@ -1,11 +1,13 @@
 extends Node
 ## Player preferences and sticker progress that survive between games
-## (user://settings.cfg). Autoloaded as `Settings`.
+## (user://settings.cfg), and 3D Battle's progress: 🧩 puzzle stars, 📜 History
+## stars and 🌊 the best wave. Autoloaded as `Settings`.
 
 signal sticker_earned(id: String)
 signal smooth_3d_changed(on: bool)
 
 const PATH := "user://settings.cfg"
+const OLD_WAVES := "user://b3_waves.cfg"   # where 🌊 the best wave used to be kept (see _migrate_waves)
 const SAVE_DELAY := 3.0       # counters save this many seconds after they change (see count)
 const COLORS := [
 	Color8(100, 220, 255), Color8(120, 240, 140), Color8(255, 110, 170), Color8(190, 140, 255),
@@ -30,6 +32,7 @@ var b3_rules := {}            # 3D Battle rules (see B3Rules)
 var b3_mouse_k := 1.0         # first-person mouse speed
 var b3_puzzles := {}          # 🧩 Army Puzzles: stage id -> best stars (1-3); a win opens the next one
 var b3_hist_stars := {}       # 📜 History battles: id -> {"finish": true, "change": true, "hero": true}
+var b3_wave_best := 0         # 🌊 Wave Defense: the best wave held (wave_held)
 var auto_update := true       # 🔄 look for a new version on GitHub when the game starts
 var smooth_3d := true         # 3D Battle: smooth (2x MSAA) edges; off is quicker on slow graphics cards (set_smooth_3d)
 var fullscreen := false       # 🖥️ ⚙️ Settings: the whole screen (set_fullscreen)
@@ -43,6 +46,7 @@ var _unsaved := false         # counters changed since the last save
 func _ready() -> void:
 	testing = DisplayServer.get_name() == "headless" or test_run(OS.get_cmdline_user_args())
 	load_settings()
+	_migrate_waves()
 	if player_name == "":
 		randomize()
 		player_name = "%s %s" % [ADJ[randi() % ADJ.size()], NOUN[randi() % NOUN.size()]]
@@ -62,6 +66,7 @@ static func test_run(args: PackedStringArray) -> bool:
 func load_settings() -> void:
 	if testing:
 		return
+	recover(file)
 	var c := ConfigFile.new()
 	if c.load(file) != OK:
 		return
@@ -79,6 +84,7 @@ func load_settings() -> void:
 	b3_mouse_k = float(c.get_value("battle3d", "mouse", 1.0))
 	b3_puzzles = _dict(c.get_value("battle3d", "puzzles", {}))
 	b3_hist_stars = _dict(c.get_value("battle3d", "hist_stars", {}))
+	b3_wave_best = maxi(0, int(c.get_value("battle3d", "wave_best", 0)))
 	auto_update = bool(c.get_value("update", "auto", true))
 	smooth_3d = bool(c.get_value("battle3d", "smooth", true))
 	fullscreen = bool(c.get_value("screen", "fullscreen", false))
@@ -90,6 +96,11 @@ func save() -> void:
 	_unsaved = false
 	if testing:
 		return
+	_write()
+
+
+## Writes the settings file (safely: see write_config). True if it worked.
+func _write() -> bool:
 	var c := ConfigFile.new()
 	c.set_value("player", "name", player_name)
 	c.set_value("player", "color", player_color)
@@ -105,12 +116,44 @@ func save() -> void:
 	c.set_value("battle3d", "mouse", b3_mouse_k)
 	c.set_value("battle3d", "puzzles", b3_puzzles)
 	c.set_value("battle3d", "hist_stars", b3_hist_stars)
+	c.set_value("battle3d", "wave_best", b3_wave_best)
 	c.set_value("update", "auto", auto_update)
 	c.set_value("battle3d", "smooth", smooth_3d)
 	c.set_value("screen", "fullscreen", fullscreen)
 	c.set_value("screen", "ui_scale", ui_scale)
 	c.set_value("screen", "shake_2d", shake_2d)
-	c.save(file)
+	return write_config(c, file)
+
+
+## Saves `c` to `path` without ever leaving a broken file: it's written to
+## path.tmp first and only then moved over the real one, so a crash half-way
+## through a save leaves the last good file (or the new one) in place.
+## True if it worked.
+static func write_config(c: ConfigFile, path: String) -> bool:
+	var tmp := path + ".tmp"
+	if c.save(tmp) != OK:
+		return false
+	return DirAccess.rename_absolute(tmp, path) == OK
+
+
+## Writes `text` to `path` the same safe way (game/saves.gd's slots).
+static func write_text(path: String, text: String) -> bool:
+	var tmp := path + ".tmp"
+	var f := FileAccess.open(tmp, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(text)
+	var ok := f.get_error() == OK
+	f.close()
+	return ok and DirAccess.rename_absolute(tmp, path) == OK
+
+
+## A save that was cut off between taking the old file away and moving the
+## new one in (moving over a file can do that on Windows) left only path.tmp,
+## and that's the newest: put it back in place.
+static func recover(path: String) -> void:
+	if not FileAccess.file_exists(path) and FileAccess.file_exists(path + ".tmp"):
+		DirAccess.rename_absolute(path + ".tmp", path)
 
 
 ## Turns 3D Battle's smooth edges on or off (saved straight away). 3D Battle
@@ -194,6 +237,31 @@ func puzzle_won(id: String, n: int) -> bool:
 	b3_puzzles[id] = clampi(n, 1, 3)
 	save()
 	return true
+
+
+## 🌊 Wave `n` of Wave Defense was held: keeps the best. True if it's better
+## than before (saved straight away).
+func wave_held(n: int) -> bool:
+	if n <= b3_wave_best:
+		return false
+	b3_wave_best = n
+	save()
+	return true
+
+
+## 🌊 The best wave used to have a file of its own (user://b3_waves.cfg, from
+## 3D Battle's B3Modes). The first time, it moves in here (the better of the
+## two), and the old file is kept as b3_waves.cfg.old. (`old`: tests use
+## another file.)
+func _migrate_waves(old := OLD_WAVES) -> void:
+	if testing or not FileAccess.file_exists(old):
+		return
+	var c := ConfigFile.new()
+	if c.load(old) != OK:
+		return
+	b3_wave_best = maxi(b3_wave_best, int(c.get_value("waves", "best", 0)))
+	if _write():
+		DirAccess.rename_absolute(old, old + ".old")
 
 
 ## 📜 Earns one of a History battle's three stars ("finish", "change" or

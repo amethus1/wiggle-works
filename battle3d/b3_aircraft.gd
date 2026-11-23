@@ -114,6 +114,19 @@ func _nose() -> Vector3:
 	return Vector3(sin(facing) * cos(pitch), sin(pitch), cos(facing) * cos(pitch))
 
 
+## (B3Unit.is_aircraft, is_plane and going_down.)
+func is_aircraft() -> bool:
+	return true
+
+
+func is_plane() -> bool:
+	return plane
+
+
+func going_down() -> bool:
+	return falling
+
+
 # ------------------------------------------------------------------ physics
 func _physics_process(dt: float) -> void:
 	if dt <= 0.0 or dead or wrecked or puppet:
@@ -426,7 +439,7 @@ func _think() -> void:
 		var s := position.distance_squared_to(u.position)
 		if plane and u.flying:
 			s *= 0.3
-		elif not plane and u is B3Aircraft and (u as B3Aircraft).plane:
+		elif not plane and u.is_plane():
 			s *= 3.0
 		if u == target:
 			s *= 0.55

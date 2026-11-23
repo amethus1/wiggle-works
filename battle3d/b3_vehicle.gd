@@ -332,6 +332,11 @@ func style_is(s: String) -> bool:
 	return String(def.style) == s
 
 
+## (B3Unit.is_vehicle: helicopters and planes are vehicles too.)
+func is_vehicle() -> bool:
+	return true
+
+
 # -------------------------------------------------------------------- brain
 func _think() -> void:
 	var old := target
@@ -847,7 +852,7 @@ func _crush_tick(dt: float) -> void:
 				var st: Variant = pc.structure
 				battle.break_piece(pc, push, true)
 				if st is B3Struct and is_instance_valid(st):
-					battle._settle_soon(st as B3Struct)      # (the rails a crushed post held up fall too)
+					battle.combat.settle_soon(st as B3Struct)      # (the rails a crushed post held up fall too)
 				crunched += 1
 		elif o is StaticBody3D and (o as Node).has_meta("scenery") and not (o as Node).has_meta("gone"):
 			var sb := o as StaticBody3D
@@ -883,7 +888,7 @@ func crushes_piece(pc: B3Piece) -> bool:
 ## The race car's cartoon BONK: whoever it hits goes flying up in the air
 ## (it doesn't hurt much). Big heavy things don't budge: the car bounces off.
 func _bump(u: B3Unit, fwd: Vector3) -> void:
-	var big := u.mass > mass * 1.5 or u is B3Vehicle
+	var big := u.mass > mass * 1.5 or u.is_vehicle()
 	var dir := (fwd * 0.55 + Vector3.UP).normalized()
 	u.hurt(8.0 + _spd * 0.9, dir, 6.0 + _spd * 0.8, self, "hit")
 	var at := (position + u.position) * 0.5 + Vector3(0, 1.3, 0)

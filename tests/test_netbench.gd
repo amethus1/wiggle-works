@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## 👥 How many bytes a second the host sends a friend over Wi-Fi, in a big
 ## 3D battle (the 150-fighter Huge Battle) and a big 2D one (120 fighters).
 ## It counts what ENet really sends (headers, pieces of big packets and
@@ -16,13 +16,9 @@ func wait(t: float) -> void:
 		await get_tree().process_frame
 
 
-func wait_for(cond: Callable, t: float) -> bool:
-	var end := Time.get_ticks_msec() + int(t * 1000.0)
-	while Time.get_ticks_msec() < end:
-		if cond.call():
-			return true
-		await get_tree().process_frame
-	return cond.call()
+## Waits up to `t` real seconds for `cond` (two games talking over the network).
+func wait_for(cond: Callable, t := 3.0) -> bool:
+	return await wait_real_for(cond, t)
 
 
 ## Bytes (and packets) the host's ENet connection sent since the last call.
@@ -42,8 +38,7 @@ func _ready() -> void:
 		await _bench3d()
 	if only != "3d":
 		await _bench2d()
-	print("test_netbench: 0 failure(s)")
-	get_tree().quit(0)
+	finish()
 
 
 var snaps := 0      # snapshots the friend got

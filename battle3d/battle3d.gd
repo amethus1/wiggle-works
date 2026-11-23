@@ -8,6 +8,10 @@ extends Node3D
 ## actions (spawn, explode, nuke, clear). Units, ragdolls, props, projectiles
 ## and hazards each run their own little scripts; B3Tools turns the mouse
 ## and keys into actions; B3UI is the HUD.
+##
+## Some of its work is done by helpers it passes the calls on to: B3Grid
+## (the fighters' map, for "who's near here?"), B3Combat (booms, blasts,
+## hits and breaking things) and B3Budget (the 🪙 budget battles' rules).
 
 const SND_FALLBACK := {
 	"gun_rifle": "snap", "gun_pistol": "snap", "gun_mg": "tick", "gun_sniper": "cannon", "gun_laser": "zap",
@@ -39,6 +43,8 @@ var chunks: Array[RigidBody3D] = []
 var structs: Array[B3Struct] = []
 var hazards: Array[B3Hazard] = []
 var planes: Array = []
+var grid: B3Grid                  # the fighters' map, for "who's near here?" (B3Grid)
+var combat: B3Combat              # booms, blasts, hits and breaking things (B3Combat)
 var fighting := false
 
 ## 🪙 Budget battles (🧩 Puzzles, 🌊 Wave Defense): points to spend on what you
@@ -66,12 +72,7 @@ var map_id := "grassland"
 var kos := 0
 var rng := RandomNumberGenerator.new()
 var _events: Array = []
-var _waves: Array = []
-var _sinking: Array = []
-var _settling := {}               # buildings (instance ids) with a settle() waiting (_settle_soon)
 var _ray := PhysicsRayQueryParameters3D.new()
-var _shape_q := PhysicsShapeQueryParameters3D.new()
-var _sphere := SphereShape3D.new()
 # the physics settings from outside 3D Battle, put back when the last battle
 # closes (a new battle can start while the old one is still closing: it must
 # not mistake the old one's 60 ticks for the game's own)
@@ -79,7 +80,6 @@ static var _live := 0
 static var _old_tps := 60
 static var _old_interp := false
 var _counted := false
-var _hz_t := 0.0
 var _vic_t := 0.0
 var _began := false
 # Battle Rules (see B3Rules), cached for speed
@@ -107,8 +107,11 @@ var fighter_log := {}             # uid -> {team, kind, kills, at}: everyone who
 var _scripted := false            # a later() script is running: booms it sets off aren't yours (no 📒 stickers)
 var _respawning := false
 const DRAW_TXT := "💥  Nobody wins! It's a draw!"
-## Booms from the Toy Box that go off by themselves (the 🎆 Boom Boom Boom sticker counts them).
-const SELF_BOOMS := ["grenade", "dynamite", "cluster", "napalm", "acidbomb", "airstrike", "artillery", "nuke"]
+
+
+func _init() -> void:
+	grid = B3Grid.new(self)
+	combat = B3Combat.new(self)
 
 
 func begin(opts: Dictionary) -> void:
@@ -148,10 +151,6 @@ func begin(opts: Dictionary) -> void:
 	modes = B3Modes.new()
 	modes.battle = self
 	add_child(modes)
-	_sphere.radius = 1.0
-	_shape_q.shape = _sphere
-	_shape_q.collide_with_bodies = true
-	_shape_q.collide_with_areas = false
 	if not opts.get("no_ui", false):
 		tools = load("res://battle3d/b3_tools.gd").new()
 		tools.battle = self
@@ -478,7 +477,7 @@ func spawn_unit(kind: String, team: String, pos: Vector3, pers := "auto", yaw :=
 	if not B3Defs.UNITS.has(kind):
 		return null
 	var u: B3Unit = B3Special.make(kind)    # fighter, special fighter or vehicle
-	if scale != 1.0 and not (u is B3Vehicle):
+	if scale != 1.0 and not u.is_vehicle():
 		u.size_mult = scale
 	var sd: int = rng.randi() if seed_ < 0 else seed_
 	u.set_meta("seed", sd)      # the same seed gives the same look (horse colour, hair...)
@@ -494,7 +493,7 @@ func spawn_unit(kind: String, team: String, pos: Vector3, pers := "auto", yaw :=
 		u.rig.rotation.y = u.facing
 	u.reset_physics_interpolation()
 	units.append(u)
-	grid_add(u, true)
+	grid.add(u, true)
 	if fighting and not _respawning and not puppet:
 		fight_teams[team] = int(fight_teams.get(team, 0)) + 1     # joined the fight (for the scoreboard)
 	think_period = 0.2 + units.size() * 0.0016
@@ -591,426 +590,55 @@ func spawn_proj(kind: String, pos: Vector3, vel: Vector3, shooter, w: Dictionary
 	return p
 
 
-## Things from the Booms tab: `dir` is the screen-right direction (airstrikes).
-## `mine` false: not this computer's person's doing (a friend's, sent to the
-## host), so no 📒 stickers here. Nor for booms a script sets off by itself
-## (🎯 Nuke! and C4 Surprise at Fight!, see later()).
+# ------------------------------------------------- 💣 booms & hits (B3Combat)
+## The Booms tab, explosions, the nuke, shots hitting things and buildings
+## breaking live in B3Combat (`combat`): these pass the calls on.
 func drop(id: String, pos: Vector3, dir := Vector3.RIGHT, mine := true) -> void:
-	var spent0 := spent
-	if puzzle and not puzzle.pay_boom(id, pos):
-		return      # 🧩 in a puzzle, booms cost points and go on your side only
-	if modes and not modes.pay_boom(id, pos):
-		return      # 🌊 Wave Defense: the same, in your fort
-	var paid := spent - spent0      # (a mine, barrel or C4 keeps it: erasing it before the fight gives it back)
-	if mine and not _scripted:
-		if id == "nuke":
-			Settings.award("nuke")
-		if id in SELF_BOOMS:
-			Settings.count("booms", "boom", 10)
-	if _client_cmd({"c": "drop", "id": id, "pos": pos, "dir": dir}):
-		return
-	var d: Dictionary = B3Defs.BOOMS.get(id, {})
-	match id:
-		"grenade":
-			var p := spawn_proj("dropgrenade", pos + Vector3(0, 3.0, 0), Vector3(rng.randf_range(-1, 1), -1.0, rng.randf_range(-1, 1)), null, d)
-			p.fuse = 2.3
-		"dynamite", "c4", "mine", "xbarrel":
-			var bp := spawn_prop(id, pos, rng.randf() * TAU)
-			if paid > 0:
-				bp.set_meta("cost", paid)
-		"cluster", "napalm", "acidbomb":
-			spawn_proj(id, pos + Vector3(0, 26, 0), Vector3(0, -10, 0), null, d)
-			snd("whistle", pos, 0.8)
-		"airstrike":
-			airstrike(pos, dir)
-		"artillery":
-			artillery(pos)
-		"nuke":
-			spawn_proj("nuke", pos + Vector3(0, 40, 0), Vector3(0, -16, 0), null, d)
-			snd("alarm", pos, 1.0)
-			snd("whistle", pos, 1.0)
-			if ui:
-				ui.toast("☢️  NUKE INCOMING!")
+	combat.drop(id, pos, dir, mine)
 
 
 func airstrike(pos: Vector3, dir: Vector3) -> void:
-	if puppet:
-		return     # a friend's copy: the host does the real thing and sends the effects
-	var d := Vector3(dir.x, 0, dir.z).normalized()
-	if d == Vector3.ZERO:
-		d = Vector3.RIGHT
-	var plane := Node3D.new()
-	var body := B3Mats.mat(Color("8a96a8"), 0.5)
-	B3Mats.add(plane, B3Mats.capsule(0.6, 6.0), body, Vector3.ZERO, Vector3(90, 0, 0))
-	B3Mats.add(plane, B3Mats.box(Vector3(9.0, 0.15, 1.6)), body, Vector3(0, 0, 0.2))
-	B3Mats.add(plane, B3Mats.box(Vector3(3.2, 0.12, 0.9)), body, Vector3(0, 0.1, -2.6))
-	B3Mats.add(plane, B3Mats.box(Vector3(0.12, 1.4, 1.0)), body, Vector3(0, 0.7, -2.6))
-	B3Mats.add(plane, B3Mats.sphere(0.45, 10), B3Mats.mat(Color("6fd3ff"), 0.1), Vector3(0, 0.35, 1.6), Vector3.ZERO, Vector3(0.8, 0.6, 1.4))
-	for sx in [-1.0, 1.0]:
-		B3Mats.add(plane, B3Mats.box(Vector3(0.6, 0.16, 1.2)), B3Mats.mat(Color("ff4646")), Vector3(4.2 * sx, 0.02, 0.2), Vector3.ZERO, Vector3.ONE, false)
-	proj_root.add_child(plane)
-	var start := pos - d * 75.0 + Vector3(0, 20, 0)
-	plane.global_position = start
-	plane.global_basis = Basis.looking_at(d, Vector3.UP, true)
-	plane.reset_physics_interpolation()
-	var drops: Array[Vector3] = []
-	for i in 8:
-		drops.append(pos + d * (i - 3.5) * 2.8)
-	planes.append({"node": plane, "dir": d, "speed": 34.0, "drops": drops, "i": 0, "life": 5.0})
-	snd("plane", pos, 1.0)
+	combat.airstrike(pos, dir)
 
 
 func artillery(pos: Vector3) -> void:
-	if puppet:
-		return     # a friend's copy: the host does the real thing and sends the effects
-	var side := Vector3(rng.randf_range(-1, 1), 0, rng.randf_range(-1, 1)).normalized()
-	for i in 10:
-		var t := 0.2 + i * 0.28 + rng.randf() * 0.15
-		var off := Vector3(rng.randf_range(-7, 7), 0, rng.randf_range(-7, 7))
-		later(t, func():
-			var target := pos + off
-			target.y = world.height_at(target.x, target.z)
-			var start := target + side * 18.0 + Vector3(0, 38, 0)
-			var tt := 1.5
-			var v := B3Proj.lob(start, target, tt, "shell")      # lands on target under the Gravity rule
-			spawn_proj("shell", start, v, null, B3Defs.BOOMS.artillery)
-			snd("whistle", target, 0.6))
+	combat.artillery(pos)
 
 
-# --------------------------------------------------------------- explosions
-## The big one: knocks, damages, launches, breaks and chains. `power` is the
-## launch speed (m/s) at the centre; it fades to nothing at `r`.
-## opts: "by" (who threw or fired it), "team" (theirs, in case they've been
-## knocked out since), "up", "kind", "quiet", and "hit" / "skip" (dictionaries
-## that get the fighters' uids (with the damage each took) / the bodies it
-## hit, so a blast that follows can leave them alone).
+func c4_count() -> int:
+	return combat.c4_count()
+
+
+func detonate_c4(mine := true) -> void:
+	combat.detonate_c4(mine)
+
+
 func explode(pos: Vector3, r: float, power: float, dmg: float, opts := {}) -> void:
-	if puppet:
-		return     # a friend's copy: the host does the real thing and sends the effects
-	var up: float = opts.get("up", 0.8)
-	var kind := String(opts.get("kind", "fire"))
-	var by = opts.get("by", null)
-	if by != null and not is_instance_valid(by):
-		by = null
-	r *= B3Rules.boom_r()
-	power *= B3Rules.boom_power()
-	var spare_team := ""
-	if not B3Rules.friendly_fire():
-		var own := String(by.team) if by != null and by is B3Unit else String(opts.get("team", ""))
-		if own != "wild":
-			spare_team = own
-	var hit: Dictionary = opts.get("hit", {})
-	if modes and modes.keep_up:
-		modes.keep_blast(pos, r, dmg, String(by.team) if by is B3Unit else String(opts.get("team", "")))     # 🌊 the attackers' booms hurt the 🚩 keep
-	_blast_bodies(pos, r, power * r_knock, dmg, up, opts.get("skip", {}), 0.0, 0.0, spare_team, {}, by as B3Unit)
-	for u: B3Unit in units.duplicate():
-		if u.dead or not is_instance_valid(u) or hit.has(u.uid):
-			continue
-		if spare_team != "" and u.team == spare_team:
-			continue
-		var c := u.center()
-		var d := c - pos
-		var dist := d.length()
-		if dist > r + u.radius:
-			continue
-		var f := clampf(1.0 - maxf(0.0, dist - u.radius) / r, 0.0, 1.0)
-		var dir := (Vector3(d.x, 0, d.z).normalized() + Vector3.UP * up).normalized()
-		hit[u.uid] = dmg * f
-		u.hurt(dmg * f, dir, power * f * 1.15 + 1.5, by, "blast")      # (its hit marker for you, too)
-	if bool(opts.get("quiet", false)):
-		return
-	fx.explosion(pos, r, 1 if kind == "acid" else 0)
-	shake(clampf(r / 7.0, 0.15, 0.9), pos)
-	if r >= 5.0:
-		snd("mega_boom", pos, 1.0)
-	else:
-		snd("boom", pos, 0.9)
+	combat.explode(pos, r, power, dmg, opts)
 
 
-## Blasts the loose things: ragdolls, props, building pieces and trees.
-## `spare`: a team whose fighters lying on the ground are left alone
-## (Battle Rules: blasts don't hurt teammates). `units_hit`: uids of fighters
-## already hurt by this blast, whose ragdolls are only pushed, not hurt again.
-## `by`: whose blast it is (knocking out someone lying on the ground counts for them).
-func _blast_bodies(pos: Vector3, r: float, power: float, dmg: float, up: float, skip: Dictionary, r_min := 0.0, fall_r := 0.0, spare := "", units_hit: Dictionary = {}, by: B3Unit = null) -> void:
-	var fr := fall_r if fall_r > 0.0 else r
-	_sphere.radius = r
-	_shape_q.transform = Transform3D(Basis.IDENTITY, pos)
-	_shape_q.collision_mask = B3Defs.L_RAGDOLL | B3Defs.L_PROP | B3Defs.L_STRUCT | B3Defs.L_SCENERY
-	var res := space().intersect_shape(_shape_q, 1024)
-	var hit_rd := {}
-	var touched := {}
-	for hit in res:
-		var c = hit.collider
-		if c == null or not is_instance_valid(c):
-			continue
-		var id: int = (c as Object).get_instance_id()
-		if skip.has(id):
-			continue
-		var cp: Vector3 = (c as Node3D).global_position
-		var d := cp - pos
-		var dist := d.length()
-		if dist < r_min:
-			continue
-		skip[id] = true
-		if c is B3Piece:
-			var pc := c as B3Piece
-			var ed := maxf(0.0, dist - pc.size.length() * 0.35)
-			var f2 := clampf(1.0 - ed / fr, 0.0, 1.0)
-			if f2 <= 0.0:
-				continue
-			pc.hp -= dmg * f2 * 1.4
-			if pc.hp <= 0.0 or power * f2 > 14.0:
-				var dir2 := (d.normalized() + Vector3.UP * 0.6).normalized()
-				touched[pc.structure] = true
-				break_piece(pc, dir2 * power * f2 * 0.8)
-			continue
-		var f := clampf(1.0 - dist / fr, 0.0, 1.0)
-		if f <= 0.0:
-			continue
-		var dir := (d.normalized() if dist > 0.05 else Vector3.UP)
-		dir = (dir + Vector3.UP * up * 0.6).normalized()
-		if c is RigidBody3D:
-			var b := c as RigidBody3D
-			if b.has_meta("ragdoll"):
-				var rd = b.get_meta("ragdoll")
-				if is_instance_valid(rd):
-					var mate: bool = spare != "" and is_instance_valid(rd.unit) and not rd.unit.dead and String(rd.unit.team) == spare
-					if mate:
-						continue      # a teammate who's been knocked down isn't hurt or thrown about either
-					if rd.frozen and rd.sinking <= 0.0:
-						rd.unfreeze()
-					if rd.unit and is_instance_valid(rd.unit) and not hit_rd.has(rd.get_instance_id()) and not units_hit.has(rd.unit.uid):
-						hit_rd[rd.get_instance_id()] = true
-						rd.unit.hurt(dmg * f * 0.6, dir, 0.0, by, "blast")
-				if not b.freeze:
-					b.linear_velocity += dir * power * f * 1.1
-					b.angular_velocity += Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * power * f * 0.6
-			elif b is B3Prop:
-				var p := b as B3Prop
-				if not p.freeze:
-					var k := clampf(40.0 / p.mass, 0.4, 1.4)
-					p.linear_velocity += dir * power * f * k
-					p.angular_velocity += Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * power * f * 0.4
-				p.damage(dmg * f)
-			elif not b.freeze:
-				b.linear_velocity += dir * power * f
-				b.angular_velocity += Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * power * f * 0.3
-		elif c is StaticBody3D and (c as Node).has_meta("scenery"):
-			if power * f > 15.0:
-				if net:
-					net.rec_event(["uproot", world.scenery_index(c), dir * power * f * 0.7])
-				world.uproot(c, dir * power * f * 0.7, self)
-	for s in touched:
-		if is_instance_valid(s):
-			_settle_soon(s as B3Struct)
-
-
-## Pushes props and ragdolls around without damage (stomps, charges).
 func blast_props(pos: Vector3, r: float, power: float) -> void:
-	if puppet:
-		return     # a friend's copy: the host does the real thing and sends the effects
-	_sphere.radius = r
-	_shape_q.transform = Transform3D(Basis.IDENTITY, pos)
-	_shape_q.collision_mask = B3Defs.L_RAGDOLL | B3Defs.L_PROP
-	for hit in space().intersect_shape(_shape_q, 128):
-		var c = hit.collider
-		if c is RigidBody3D and not (c as RigidBody3D).freeze:
-			var b := c as RigidBody3D
-			var d := b.global_position - pos
-			var f := clampf(1.0 - d.length() / r, 0.0, 1.0)
-			b.linear_velocity += (Vector3(d.x, 0, d.z).normalized() + Vector3.UP * 0.8).normalized() * power * f
-		elif c is RigidBody3D and (c as Node).has_meta("ragdoll"):
-			var rd = (c as Node).get_meta("ragdoll")
-			if is_instance_valid(rd) and rd.frozen and rd.sinking <= 0.0:
-				rd.unfreeze()
+	combat.blast_props(pos, r, power)
 
 
 func nuke_blast(pos: Vector3) -> void:
-	if puppet:
-		return     # a friend's copy: the host does the real thing and sends the effects
-	fx.nuke(pos)
-	if ui:
-		ui.flash(1.0)
-	cam.shake(1.6)
-	snd("nuke", pos, 1.4)
-	snd("mega_boom", pos, 1.4)
-	snd("rumble", pos, 1.2)
-	# the fireball in the middle, then the shock wave rolling out. The fireball
-	# reaches past the wave's start with bigger explosions, so the wave only
-	# adds whatever damage the fireball didn't already do (never both in full).
-	var fire_hits := {}
-	var hit_bodies := {}
-	explode(pos, 10.0, 42.0, 900.0, {"quiet": true, "up": 1.0, "hit": fire_hits, "skip": hit_bodies})
-	_waves.append({"pos": pos, "r": 10.0, "max": 46.0, "speed": 32.0, "power": 36.0, "dmg": 520.0, "skip": hit_bodies, "units": {}, "fire": fire_hits})
+	combat.nuke_blast(pos)
 
 
-func _wave_tick(w: Dictionary, dt: float) -> bool:
-	var pos: Vector3 = w.pos
-	var r0: float = w.r
-	var r1 := r0 + float(w.speed) * dt
-	var mx: float = w.max
-	w.r = r1
-	var power: float = w.power
-	var dmg: float = w.dmg
-	var waved: Dictionary = w.units       # fighters this wave has reached
-	var fire: Dictionary = w.get("fire", {})     # uid -> damage the fireball already did
-	for u: B3Unit in units.duplicate():
-		if u.dead or waved.has(u.uid):
-			continue
-		var c := u.center()
-		var dist := Vector2(c.x - pos.x, c.z - pos.z).length()
-		if dist > r1:
-			continue
-		waved[u.uid] = true
-		var f := clampf(1.0 - dist / mx, 0.0, 1.0)
-		var d := dmg * f - float(fire.get(u.uid, 0.0))
-		if fire.has(u.uid) and d <= 0.0:
-			continue      # the fireball already hit it harder than the wave would
-		var dir := (Vector3(c.x - pos.x, 0, c.z - pos.z).normalized() + Vector3.UP * 0.9).normalized()
-		u.hurt(d, dir, power * f + 5.0, null, "blast")
-	_blast_bodies(pos, r1, power, dmg, 0.9, w.skip, r0 - 1.0, mx, "", fire.merged(waved))
-	return r1 < mx
-
-
-# ----------------------------------------------------------- hits & breaks
 func shot_hit(hit: Dictionary, w: Dictionary, dir: Vector3, shooter) -> void:
-	var c = hit.collider
-	var p: Vector3 = hit.position
-	if c is B3Unit:
-		(c as B3Unit).hurt(float(w.dmg), dir, float(w.get("knock", 1.0)), shooter, "shot")      # (hurt shows your hit marker, not a dodge)
-	elif c is B3Prop:
-		var pr := c as B3Prop
-		pr.damage(float(w.dmg))
-		if not pr.freeze and is_instance_valid(pr):
-			pr.apply_impulse(dir * float(w.dmg) * 0.5, p - pr.global_position)
-		snd("metal_hit" if pr.kind == "xbarrel" else "thud", p, 0.4)
-	elif c is B3Piece:
-		var pc := c as B3Piece
-		pc.hp -= float(w.dmg) * 0.15
-		if pc.hp <= 0.0:
-			break_piece(pc, dir * 3.0)
-		fx.dust(p, 0.25)
+	combat.shot_hit(hit, w, dir, shooter)
 
 
-## Someone hurt `victim`. If it was the fighter or vehicle you're playing
-## and `victim` is an enemy, the first-person crosshair shows a hit marker.
 func player_hit(by, victim) -> void:
-	if ui == null or by == null or not is_instance_valid(by) or not (by is B3Unit) or by != B3Player.unit:
-		return
-	if (by as B3Unit).ctl != B3Player.me or not (victim is B3Unit) or not (by as B3Unit).is_enemy(victim as B3Unit):
-		return
-	ui.hit_marker()
+	combat.player_hit(by, victim)
 
 
 func break_piece(p: B3Piece, vel: Vector3, whole := false) -> void:
-	if not is_instance_valid(p) or p.is_queued_for_deletion():
-		return
-	var s: B3Struct = p.structure
-	if net and is_instance_valid(s):
-		net.rec_event(["brk", s.get_instance_id(), int(p.get_meta("pi", -1)), vel, whole])
-	if s:
-		s.pieces.erase(p)
-	var xf := p.global_transform
-	var mat: Material = null
-	for c in p.get_children():
-		if c is MeshInstance3D:
-			mat = (c as MeshInstance3D).material_override
-			break
-	if p.whole or p.wedge or whole:
-		var rb := _chunk_body(xf, p.size, 1.0)
-		for c in p.get_children():
-			(c as Node).reparent(rb, true)
-		rb.linear_velocity = vel
-		rb.angular_velocity = Vector3(rng.randf_range(-2, 2), rng.randf_range(-2, 2), rng.randf_range(-2, 2)) * (0.3 + vel.length() * 0.1)
-	else:
-		var n := Vector3i(clampi(ceili(p.size.x / 1.3), 1, 3), clampi(ceili(p.size.y / 1.3), 1, 2), clampi(ceili(p.size.z / 1.3), 1, 3))
-		var sub := p.size / Vector3(n)
-		for ix in n.x:
-			for iy in n.y:
-				for iz in n.z:
-					var lp := -p.size * 0.5 + sub * Vector3(ix + 0.5, iy + 0.5, iz + 0.5)
-					var rb := _chunk_body(Transform3D(xf.basis, xf * lp), sub, 1.0)
-					var cs := CollisionShape3D.new()
-					var bs := BoxShape3D.new()
-					bs.size = sub * 0.96
-					cs.shape = bs
-					rb.add_child(cs)
-					B3Mats.add(rb, B3Mats.box(sub * 0.97), mat)
-					var spread := Vector3(rng.randf_range(-1, 1), rng.randf_range(0, 1), rng.randf_range(-1, 1)) * (1.5 + vel.length() * 0.25)
-					rb.linear_velocity = vel + spread
-					rb.angular_velocity = Vector3(rng.randf_range(-3, 3), rng.randf_range(-3, 3), rng.randf_range(-3, 3)) * (0.3 + vel.length() * 0.08)
-	p.queue_free()
-	fx.dust(xf.origin, maxf(1.0, p.size.length() * 0.4))
-	snd("crumble", xf.origin, 0.8)
-	if s and s.pieces.is_empty():
-		structs.erase(s)
-		s.queue_free()
-	elif s and not whole:
-		_settle_soon(s)
-	_trim_chunks()
-
-
-## Anything left floating after pieces of `s` break falls, at the next go of
-## the `later` list. One blast can break a dozen pieces of one building: it
-## only needs checking once for all of them (settle() looks at every pair of
-## pieces), so while one check is waiting no more are added.
-func _settle_soon(s: B3Struct) -> void:
-	var id := s.get_instance_id()
-	if _settling.has(id):
-		return
-	_settling[id] = true
-	# (looked up by id when it fires: a lambda that captured the building
-	# itself makes Godot print an error if the building is gone by then)
-	later(0.0, func():
-		_settling.erase(id)
-		var st := instance_from_id(id) as B3Struct
-		if st != null and is_instance_valid(st):
-			st.settle())
-
-
-func _chunk_body(xf: Transform3D, size: Vector3, _k: float) -> RigidBody3D:
-	var rb := RigidBody3D.new()
-	rb.collision_layer = B3Defs.L_PROP
-	rb.collision_mask = B3Defs.L_TERRAIN | B3Defs.L_STRUCT | B3Defs.L_UNIT | B3Defs.L_RAGDOLL | B3Defs.L_PROP | B3Defs.L_SCENERY
-	rb.mass = clampf(size.x * size.y * size.z * 120.0, 6.0, 160.0)
-	rb.physics_material_override = B3Prop.pmat()
-	rb.angular_damp = 0.5
-	rb.set_meta("debris", true)
-	prop_root.add_child(rb)
-	rb.global_transform = xf
-	rb.reset_physics_interpolation()
-	chunks.append(rb)
-	return rb
+	combat.break_piece(p, vel, whole)
 
 
 func break_crate(c: B3Prop) -> void:
-	var xf := c.global_transform
-	var v := c.linear_velocity
-	remove_prop(c, false)
-	var mat := B3Mats.mat(Color("c08a4e"))
-	for i in 4:
-		var lp := Vector3(0, -0.375 + i * 0.25, 0)
-		var rb := _chunk_body(Transform3D(xf.basis, xf * lp), Vector3(1.0, 0.22, 0.3), 1.0)
-		var cs := CollisionShape3D.new()
-		var bs := BoxShape3D.new()
-		bs.size = Vector3(1.0, 0.2, 0.3)
-		cs.shape = bs
-		rb.add_child(cs)
-		B3Mats.add(rb, B3Mats.box(Vector3(1.0, 0.2, 0.3)), mat)
-		rb.linear_velocity = v + Vector3(rng.randf_range(-3, 3), rng.randf_range(1, 5), rng.randf_range(-3, 3))
-		rb.angular_velocity = Vector3(rng.randf_range(-5, 5), rng.randf_range(-5, 5), rng.randf_range(-5, 5))
-	fx.poof(xf.origin, 1.0)
-	snd("crumble", xf.origin, 0.7)
-	_trim_chunks()
-
-
-func _trim_chunks() -> void:
-	while chunks.size() > B3Defs.MAX_CHUNKS:
-		var c: RigidBody3D = chunks.pop_front()
-		if is_instance_valid(c):
-			fx.poof(c.global_position, 0.5)
-			c.queue_free()
+	combat.break_crate(c)
 
 
 # ------------------------------------------------------------ bookkeeping
@@ -1192,9 +820,9 @@ static func ko_stickers_for(by: B3Unit, u: B3Unit, mine: bool) -> PackedStringAr
 	if u == null or not is_instance_valid(u):
 		return out
 	if mine and by != null and is_instance_valid(by) and by.is_enemy(u):
-		if by is B3Aircraft:
+		if by.is_aircraft():
 			out.append("ace")
-		elif not (by is B3Vehicle) and String(by.def.body) in ["human", "rider"]:
+		elif not by.is_vehicle() and String(by.def.body) in ["human", "rider"]:
 			out.append("hero")
 	if u.kind == "tank" and (mine or by == null):
 		out.append("tankbuster")
@@ -1213,51 +841,16 @@ static func give_ko_sticker(id: String) -> void:
 			Settings.award("tankbuster")
 
 
-func c4_count() -> int:
-	var n := 0
-	for p in props:
-		if p.kind == "c4" and not p.lit:
-			n += 1
-	return n
-
-
-## 💥 Sets off every C4. `mine`: as for drop() (a script's or a friend's
-## press earns no 📒 stickers on this computer).
-func detonate_c4(mine := true) -> void:
-	var n := c4_count()
-	if n > 0 and mine and not _scripted:
-		Settings.count("booms", "boom", 10, n)
-	if _client_cmd({"c": "c4"}):
-		return
-	var t := 0.0
-	var any := false
-	for p in props:
-		if p.kind == "c4" and not p.lit:
-			p.trigger(t)
-			t += 0.12
-			any = true
-	if any:
-		snd("pin", null, 1.0)
-	elif ui:
-		ui.toast("No C4 placed yet! Pick 📟 C4 from the 💣 Booms tab.", false)
-
-
 # ------------------------------------------------------------ 🪙 budget battles
-## Turns on budget battles: `points` to spend, placing only inside `zone`
-## (x/z; Rect2() = anywhere) and only for `team` ("" = whatever the Toy Box says).
+## The rules (what may go where, paying, points back, hands off) are in
+## B3Budget: these pass the calls on. The numbers stay here (budget, spent,
+## build_zone, build_team), where everything reads them.
+const LAKE_R := B3Budget.LAKE_R
+const ZONE_SLACK := B3Budget.ZONE_SLACK
+
+
 func set_budget(points: int, zone := Rect2(), team := "") -> void:
-	budget = points
-	spent = 0
-	build_zone = zone
-	build_team = team
-	# the glowing area on the ground where you can build (gone with no zone)
-	if zone_vis and is_instance_valid(zone_vis):
-		zone_vis.queue_free()
-	zone_vis = null
-	if zone.size != Vector2.ZERO and world:
-		zone_vis = B3Puzzles.zone_visual(self, zone, B3Puzzles.ZONE_COL)
-		add_child(zone_vis)
-	budget_changed.emit()
+	B3Budget.set_budget(self, points, zone, team)
 
 
 ## Back to the normal sandbox: everything free, place anywhere.
@@ -1266,166 +859,51 @@ func clear_budget() -> void:
 
 
 func points_left() -> int:
-	return budget - spent if budget >= 0 else 1 << 30
+	return B3Budget.points_left(self)
 
 
-## "" if `count` of `id` can go at `pos`, or why not (for a message).
 func can_place(id: String, pos: Vector3, count := 1) -> String:
-	if build_zone.size != Vector2.ZERO and not build_zone.has_point(Vector2(pos.x, pos.z)):
-		return "🚧 You can only build on your side (the glowing area)."
-	# 🌊 Wave Defense: no walls or pools on the 🚩 Fort Keep (fighters may land on its roof)
-	if modes and modes.keep_up and (B3Defs.STRUCTS.has(id) or B3Defs.HAZARDS.has(id)) \
-			and Vector2(pos.x - modes.keep_pos.x, pos.z - modes.keep_pos.z).length() < B3Modes.KEEP_R + 2.0:
-		return "🚩 That's where the keep stands! Build round it."
-	if budget >= 0 and B3Defs.cost(id) * count > points_left():
-		return "🪙 Not enough points for that! You have %d left." % points_left()
-	return ""
+	return B3Budget.can_place(self, id, pos, count)
 
 
-## Pays for `node` (a fighter, building or pool just placed as `id`). The
-## price paid stays on it (meta "cost", and in B3Saves snapshots, so ⏮ Reset
-## keeps it), and erasing it gives back exactly that.
 func buy(node: Node, id: String) -> void:
-	if budget < 0 or node == null:
-		return
-	var c := B3Defs.cost(id)
-	node.set_meta("cost", c)
-	spent += c
-	budget_changed.emit()
+	B3Budget.buy(self, node, id)
 
 
-## Pays for a stack of crates (spawn_struct("crates") makes 6 props): one
-## price for the lot, kept on the first, and they all share meta "stack" so
-## erasing any of them before the fight takes (and pays back) the whole stack.
 func buy_stack(stack: Array, id: String) -> void:
-	if budget < 0 or stack.is_empty():
-		return
-	var sid: int = (stack[0] as Node).get_instance_id()
-	for o in stack:
-		(o as Node).set_meta("stack", sid)
-	buy(stack[0] as Node, id)
+	B3Budget.buy_stack(self, stack, id)
 
 
-## 🪙 What a pool of `kind` ("lava" or "acid") with radius `r` is sold as:
-## up to 5 m it's a Lava (Acid) Pool, bigger is a Lava Lake (Acid Swamp).
-## Pools are priced by their real size, however they were made.
 static func pool_id(kind: String, r: float) -> String:
-	if r > POOL_MAX_R:
-		return "lava_lake" if kind == "lava" else "acid_swamp"
-	return kind
+	return B3Budget.pool_id(kind, r)
 
 
-const POOL_MAX_R := 5.0       # the biggest pool that's still a Pool (see pool_id)
-const LAKE_R := 7.0           # 🪙 budget battles: the biggest pool you can buy (a Lake)
-const ZONE_SLACK := 1.0       # a building or pool may poke this far out of the glowing area
-
-
-## 🪙 Budget battles: how big a pool at `at` can be, at most `r`: no bigger
-## than a Lake, and only just over the edge of your side.
 func pool_room(at: Vector3, r: float) -> float:
-	if budget < 0:
-		return r
-	r = minf(r, LAKE_R)
-	if build_zone.size != Vector2.ZERO:
-		var edge := minf(minf(at.x - build_zone.position.x, build_zone.end.x - at.x), minf(at.z - build_zone.position.y, build_zone.end.y - at.z))
-		r = minf(r, maxf(1.5, edge + ZONE_SLACK))
-	return r
+	return B3Budget.pool_room(self, at, r)
 
 
-## `p` moved onto your side (the glowing area), if there is one.
 func zone_clamp(p: Vector3) -> Vector3:
-	if build_zone.size == Vector2.ZERO:
-		return p
-	var x := clampf(p.x, build_zone.position.x, build_zone.end.x)
-	var z := clampf(p.z, build_zone.position.y, build_zone.end.y)
-	return Vector3(x, world.height_at(x, z), z)
+	return B3Budget.zone_clamp(self, p)
 
 
-## Buildings' footprints on the ground (x across, z deep, as spawn_struct
-## builds them before turning them by their yaw). A wall is as long as its length.
-const FOOT := {"block": Vector2(3, 3), "wall": Vector2(6, 0.6), "ramp": Vector2(2.6, 6), "tower": Vector2(4, 4),
-	"bunker": Vector2(5.6, 5.6), "bridge": Vector2(3, 19), "sandbags": Vector2(5, 1.5), "crates": Vector2(3.2, 1.1)}
-
-
-## 🚧 True if building `id` at `at`, turned by `yaw` (a wall `length` long),
-## fits on your side (the glowing area, give or take ZONE_SLACK). Always
-## true when there's no zone.
 func fits_zone(id: String, at: Vector3, yaw: float, length := 0.0) -> bool:
-	if build_zone.size == Vector2.ZERO:
-		return true
-	var f: Vector2 = FOOT.get(id, Vector2(3, 3))
-	if id == "wall" and length > 0.5:
-		f.x = clampf(length, 2.0, 24.0)
-	var zone := build_zone.grow(ZONE_SLACK)
-	var rot := Basis(Vector3.UP, yaw)
-	for c in [Vector3(-f.x, 0, -f.y), Vector3(f.x, 0, -f.y), Vector3(f.x, 0, f.y), Vector3(-f.x, 0, f.y)]:
-		var w: Vector3 = at + rot * ((c as Vector3) * 0.5)
-		if not zone.has_point(Vector2(w.x, w.z)):
-			return false
-	return true
+	return B3Budget.fits_zone(self, id, at, yaw, length)
 
 
-## 🛡️ True for things nobody may change: a 🧩 puzzle's own army, buildings
-## and pools (B3Puzzles.keeps) and 🌊 Wave Defense's attackers (B3Modes.keeps).
-## The Eraser, the Inspector's buttons, 🎮 Play as, ✋ Grab and 🚀 Launch
-## leave them alone (see hands_off).
 func protected(n: Node) -> bool:
-	if n == null or not is_instance_valid(n):
-		return false
-	if puzzle and puzzle.keeps(n):
-		return true
-	return modes != null and modes.has_method("keeps") and bool(modes.call("keeps", n))
+	return B3Budget.protected(self, n)
 
 
-## Why `what` ("erase", "team", "mood", "launch", "heal", "play" or "grab")
-## can't be done to `n` right now (a message), or "" if it can. Protected
-## things (see protected) can't be touched at all. In a 🧩 puzzle your own
-## army plays fair too: it stays red, there's no free 💚 healing or 🚀
-## launching, and ✋ you can only move it about your side before ▶ Fight!
-## (B3Tools keeps it in the glowing area).
 func hands_off(n: Node, what: String) -> String:
-	if protected(n):
-		var theirs := puzzle != null and puzzle.keeps(n)
-		if what == "play":
-			return "🎮 You can only play your own army in a puzzle." if theirs else "🎮 You can only play your own side."
-		return "🧩 The puzzle's army stays just as it is. Beat it in battle!" if theirs else "🛡️ Hands off! Beat them in battle."
-	if puzzle == null:
-		return ""
-	match what:
-		"team":
-			return "🧩 Your army stays red in a puzzle."
-		"heal":
-			return "💚 No free healing in a puzzle. Bring a medic!"
-		"launch":
-			return "🚀 No launching in a puzzle. Win it in battle!"
-		"grab":
-			if fighting:
-				return "✋ No grabbing once the fight's on. Your army's on its own!"
-	return ""
+	return B3Budget.hands_off(self, n, what)
 
 
-## Erasing something you bought before the fight gives its points back.
 func _refund(node: Node) -> void:
-	if budget < 0 or node == null or not is_instance_valid(node) or not node.has_meta("cost"):
-		return
-	if fighting and not (modes and modes.can_refund(node)):
-		return      # (🌊 in a break between waves, what you bought since the last one still can)
-	spent = maxi(0, spent - int(node.get_meta("cost")))
-	node.remove_meta("cost")
-	budget_changed.emit()
+	B3Budget.refund(self, node)
 
 
-## After clearing: what's still standing is what's still paid for.
 func _recount_spent() -> void:
-	if budget < 0:
-		return
-	var n := 0
-	for arr: Array in [units, structs, hazards, props]:
-		for o in arr:
-			if is_instance_valid(o) and (o as Node).has_meta("cost"):
-				n += int((o as Node).get_meta("cost"))
-	spent = n
-	budget_changed.emit()
+	B3Budget.recount_spent(self)
 
 
 func clear_units() -> void:
@@ -1445,7 +923,7 @@ func clear_units() -> void:
 			u.dead = true
 			u.queue_free()
 	units.clear()
-	_grid_reset()
+	grid.reset()
 	_recount_spent()
 	for rd in ragdolls:
 		if is_instance_valid(rd):
@@ -1498,9 +976,7 @@ func clear_battlefield() -> void:
 	hazards.clear()
 	_recount_spent()
 	_events.clear()
-	_settling.clear()
-	_waves.clear()
-	_sinking.clear()
+	combat.clear()
 	fx.clear()
 	_respawns.clear()
 	mvp = {}
@@ -1572,277 +1048,51 @@ func unit_by_rid(rid: RID) -> B3Unit:
 	return null
 
 
-# ------------------------------------------------ the fighters' map (speed)
-## Standing fighters sorted into GRID-metre squares, so "who's near here?"
-## only looks at a few squares instead of every fighter on the field. It's
-## made once per physics step, the first time something asks: fighters only
-## move in the physics engine's step after all the scripts, so it stays right
-## all step long (ones placed or getting up during the step are added as they
-## come). It's only a first sort: callers still check the real distances, and
-## knocked-out or knocked-down fighters in it are skipped.
-## With only a few fighters on the field, outside the physics step and on a
-## friend's copy it isn't made: everyone is simply looked at, in `units` order.
-const GRID := 6.0
-const GRID_FAR := 2000.0           # further out than this (about to be removed): always looked at
-var grid_min := 64                 # fewer fighters than this: not worth making (tests set 0)
-var grid_r := 0.0                  # the biggest radius of a fighter in it
-var _grid := {}                    # square (cell_x * 4096 + cell_z) -> Array[B3Unit]
-var _grid_far: Array[B3Unit] = []
-var _grid_step := -1               # the physics step it was made (or not made) for
-var _grid_on := false              # it's made for this step
-var _num_step := -1                # the physics step everyone was numbered for without it
-var _grid_n := 0                   # the next order number (B3Unit.grid_i, the order of `units`)
-var _grid_count := 0
-var _grid_x0 := 0                  # the squares anyone is in
-var _grid_x1 := -1
-var _grid_z0 := 0
-var _grid_z1 := -1
-var _foes_step := -1               # the physics step _side_n was counted for (foes_standing)
-var _side_n := {}                  # side ("red", or "wild:wolf" for wild ones) -> fighters standing on it
-var _standing_n := 0
+# ------------------------------------------------ the fighters' map (B3Grid)
+## "Who's near here?" without looking at every fighter on the field: see
+## B3Grid (`grid`). These pass the calls on.
+## grid_min: fewer fighters than this and the map isn't worth making (tests set 0).
+var grid_min: int:
+	get:
+		return grid.min_n
+	set(v):
+		grid.min_n = v
 
 
-## True if the map is made and good for this physics step (making it if
-## it's worth it: B3Unit._think looks at everyone in one go if not).
 func grid_on() -> bool:
-	if puppet or not Engine.is_in_physics_frame():
-		return false
-	var f := Engine.get_physics_frames()
-	if _grid_step != f:
-		_grid_step = f
-		_grid_on = units.size() >= grid_min
-		if _grid_on:
-			_grid_build()
-	return _grid_on
+	return grid.on()
 
 
-## Every fighter, numbered in order (B3Unit.grid_i), for when there's no map.
 func everyone() -> Array[B3Unit]:
-	if not grid_on():
-		var f := Engine.get_physics_frames() if Engine.is_in_physics_frame() else -1
-		if f < 0 or f != _num_step:
-			_num_step = f
-			_grid_number()
-	return units
+	return grid.everyone()
 
 
-func _grid_build() -> void:
-	_grid.clear()
-	_grid_far.clear()
-	# (_grid_put, written out here: this runs for every fighter every step)
-	var i := 0
-	var x0 := 1 << 30
-	var x1 := -(1 << 30)
-	var z0 := 1 << 30
-	var z1 := -(1 << 30)
-	var rmax := 0.0
-	var n := 0
-	for u in units:
-		u.grid_i = i
-		i += 1
-		if u.down:
-			continue
-		var p := u.position
-		if u.radius > rmax:
-			rmax = u.radius
-		n += 1
-		if absf(p.x) > GRID_FAR or absf(p.z) > GRID_FAR:
-			_grid_far.append(u)
-			continue
-		var cx := floori(p.x / GRID)
-		var cz := floori(p.z / GRID)
-		if cx < x0:
-			x0 = cx
-		if cx > x1:
-			x1 = cx
-		if cz < z0:
-			z0 = cz
-		if cz > z1:
-			z1 = cz
-		var k := cx * 4096 + cz
-		var a = _grid.get(k)
-		if a == null:
-			var na: Array[B3Unit] = [u]
-			_grid[k] = na
-		else:
-			(a as Array[B3Unit]).append(u)
-	_grid_n = i
-	_grid_count = n
-	grid_r = rmax
-	_grid_x0 = x0
-	_grid_x1 = x1
-	_grid_z0 = z0
-	_grid_z1 = z1
-
-
-## Everyone's been cleared away: forget the map (it would otherwise hold on
-## to the old fighters, and their size, until the next one is made).
-func _grid_reset() -> void:
-	_grid.clear()
-	_grid_far.clear()
-	grid_r = 0.0
-	_grid_step = -1
-	_grid_on = false
-	_num_step = -1
-	_grid_n = 0
-	_grid_count = 0
-	_grid_x0 = 0
-	_grid_x1 = -1
-	_grid_z0 = 0
-	_grid_z1 = -1
-	_foes_step = -1
-	_side_n.clear()
-	_standing_n = 0
-
-
-## Without the map: just numbers everyone in order (B3Unit.grid_i).
-func _grid_number() -> void:
-	for i in units.size():
-		units[i].grid_i = i
-	_grid_n = units.size()
-
-
-func _grid_put(u: B3Unit) -> void:
-	var p := u.position
-	if u.radius > grid_r:
-		grid_r = u.radius
-	_grid_count += 1
-	if absf(p.x) > GRID_FAR or absf(p.z) > GRID_FAR:
-		_grid_far.append(u)
-		return
-	var cx := floori(p.x / GRID)
-	var cz := floori(p.z / GRID)
-	if cx < _grid_x0:
-		_grid_x0 = cx
-	if cx > _grid_x1:
-		_grid_x1 = cx
-	if cz < _grid_z0:
-		_grid_z0 = cz
-	if cz > _grid_z1:
-		_grid_z1 = cz
-	var k := cx * 4096 + cz
-	var a = _grid.get(k)
-	if a == null:
-		var na: Array[B3Unit] = [u]
-		_grid[k] = na
-	else:
-		(a as Array[B3Unit]).append(u)
-
-
-## A fighter placed (or getting up) in the middle of a physics step goes on
-## the map too, if it's already been made for this step.
 func grid_add(u: B3Unit, new_unit: bool) -> void:
-	if _grid_step != Engine.get_physics_frames() or not Engine.is_in_physics_frame() or puppet:
-		return
-	if new_unit:
-		u.grid_i = _grid_n      # (or numbered with everyone, if that's still to come)
-		_grid_n += 1
-	if _grid_on:
-		_grid_put(u)
-	_foes_step = -1
+	grid.add(u, new_unit)
 
 
-## False only if nobody standing could be `u`'s enemy (B3Unit.is_enemy) this
-## physics step: then there's no point searching the whole field for one (a
-## battle that's been won, or one side alone on the field).
 func foes_standing(u: B3Unit) -> bool:
-	if not grid_on():
-		return true
-	if _foes_step != _grid_step:
-		_foes_step = _grid_step
-		_side_n.clear()
-		_standing_n = 0
-		for o in units:
-			if not o.down:
-				var side: String = o.team if o.team != "wild" else "wild:" + o.kind
-				_side_n[side] = int(_side_n.get(side, 0)) + 1
-				_standing_n += 1
-	var mine: String = u.team if u.team != "wild" else "wild:" + u.kind
-	return _standing_n > int(_side_n.get(mine, 0))
+	return grid.foes_standing(u)
 
 
-## Someone changed sides in the middle of a step: count again.
 func foes_changed() -> void:
-	_foes_step = -1
+	grid.foes_changed()
 
 
-## Every fighter that could be within `r` metres of `p` (across the ground:
-## x and z), in no particular order. Check the real distance, and skip the
-## knocked-down (`down`) and knocked-out (`dead`) ones. `r` grows by
-## `biggest` times the biggest fighter's radius (1.0 for "touching": my
-## reach plus their radius). It may be `units` itself: don't add or remove
-## fighters while going through it (collect who to hit first).
 func units_near(p: Vector3, r: float, biggest := 0.0) -> Array[B3Unit]:
-	if not grid_on():
-		return everyone()
-	r += biggest * grid_r
-	var out: Array[B3Unit] = []
-	var x0 := maxi(floori((p.x - r) / GRID), _grid_x0)
-	var x1 := mini(floori((p.x + r) / GRID), _grid_x1)
-	var z0 := maxi(floori((p.z - r) / GRID), _grid_z0)
-	var z1 := mini(floori((p.z + r) / GRID), _grid_z1)
-	for cx in range(x0, x1 + 1):
-		for cz in range(z0, z1 + 1):
-			var a = _grid.get(cx * 4096 + cz)
-			if a != null:
-				out.append_array(a)
-	if not _grid_far.is_empty():
-		out.append_array(_grid_far)
-	return out
+	return grid.near(p, r, biggest)
 
 
-## For searching outwards from `p` square by square (see B3Unit._think):
-## the fighters in the squares `ring` steps out (0: the square `p` is in).
-## Everyone in ring r is at least (r - 1) * GRID metres away. Past
-## grid_rings(p) there's nobody. Searching out that far would mean looking at
-## more squares than there are fighters, so past grid_ring_cap() it's better
-## to just look at everyone (`units`).
 func grid_ring(p: Vector3, ring: int) -> Array[B3Unit]:
-	var out: Array[B3Unit] = []
-	var cx := floori(p.x / GRID)
-	var cz := floori(p.z / GRID)
-	if ring == 0:
-		var a = _grid.get(cx * 4096 + cz)
-		if a != null:
-			out.append_array(a)
-		if not _grid_far.is_empty():
-			out.append_array(_grid_far)
-		return out
-	# the top and bottom rows, then the two sides between them
-	for zz in [cz - ring, cz + ring]:
-		var z: int = zz
-		if z < _grid_z0 or z > _grid_z1:
-			continue
-		for x in range(maxi(cx - ring, _grid_x0), mini(cx + ring, _grid_x1) + 1):
-			var a = _grid.get(x * 4096 + z)
-			if a != null:
-				out.append_array(a)
-	for xx in [cx - ring, cx + ring]:
-		var x: int = xx
-		if x < _grid_x0 or x > _grid_x1:
-			continue
-		for z in range(maxi(cz - ring + 1, _grid_z0), mini(cz + ring - 1, _grid_z1) + 1):
-			var a = _grid.get(x * 4096 + z)
-			if a != null:
-				out.append_array(a)
-	return out
+	return grid.ring(p, ring)
 
 
-## How many rings out from `p` anyone could be (-1: nobody, or no map now).
 func grid_rings(p: Vector3) -> int:
-	if not grid_on():
-		return -1
-	if _grid_count == 0:
-		return -1
-	if _grid_x1 < _grid_x0:
-		return 0      # (only far-off ones, in ring 0)
-	var cx := floori(p.x / GRID)
-	var cz := floori(p.z / GRID)
-	return maxi(maxi(cx - _grid_x0, _grid_x1 - cx), maxi(cz - _grid_z0, _grid_z1 - cz))
+	return grid.rings(p)
 
 
 func grid_ring_cap() -> int:
-	return int(sqrt(float(_grid_count)) * 0.5) + 1
+	return grid.ring_cap()
 
 
 func enemies_left(_u: B3Unit) -> bool:
@@ -2141,30 +1391,10 @@ func _physics_process(dt: float) -> void:
 	_events_tick(dt)
 	if puppet:
 		return
-	var i := 0
-	while i < _waves.size():
-		if not _wave_tick(_waves[i], dt):
-			_waves.remove_at(i)
-		else:
-			i += 1
-	_planes_tick(dt)
+	combat.waves_tick(dt)       # the nukes' shock waves
+	combat.planes_tick(dt)      # ✈️ airstrike planes
 	_respawn_tick(dt)
-	_hz_t -= dt
-	if _hz_t <= 0.0:
-		_hz_t = 0.15
-		_hazard_bodies()
-	i = 0
-	while i < _sinking.size():
-		var sk: Array = _sinking[i]
-		var b: RigidBody3D = sk[0]
-		sk[1] = float(sk[1]) + dt
-		if not is_instance_valid(b) or float(sk[1]) > 2.2:
-			if is_instance_valid(b):
-				b.queue_free()
-			_sinking.remove_at(i)
-			continue
-		b.global_position.y -= dt * 0.6
-		i += 1
+	combat.pools_tick(dt)       # things sinking in lava and acid
 	_vic_t -= dt
 	if _vic_t <= 0.0:
 		_vic_t = 0.4
@@ -2210,84 +1440,3 @@ func _respawn_tick(dt: float) -> void:
 				snd("pop", p, 0.6)
 		else:
 			i += 1
-
-
-## How far before the target an airstrike plane lets go of a bomb: the bomb
-## keeps 5 m/s of the plane's speed while it falls `h` metres (starting at
-## 2 m/s down) under the Gravity rule, so it still lands on target in Moon gravity.
-static func _bomb_lead(h: float) -> float:
-	var g := B3Proj.gravity("bomb")
-	var t := maxf(h, 0.0) / 2.0 if g < 0.01 else (-2.0 + sqrt(4.0 + 2.0 * g * maxf(h, 0.0))) / g
-	return 5.0 * t
-
-
-func _planes_tick(dt: float) -> void:
-	var i := 0
-	while i < planes.size():
-		var pl: Dictionary = planes[i]
-		var node: Node3D = pl.node
-		if not is_instance_valid(node):
-			planes.remove_at(i)
-			continue
-		var d: Vector3 = pl.dir
-		node.global_position += d * float(pl.speed) * dt
-		var drops: Array[Vector3] = pl.drops
-		var k: int = pl.i
-		while k < drops.size():
-			var target: Vector3 = drops[k]
-			var rel := (node.global_position - target).dot(d)
-			if rel < -_bomb_lead(node.global_position.y - 0.8 - target.y):
-				break
-			var b := spawn_proj("bomb", node.global_position - Vector3(0, 0.8, 0), d * 5.0 + Vector3(0, -2, 0), null, B3Defs.BOOMS.airstrike)
-			b.reset_physics_interpolation()
-			snd("whistle", target, 0.5)
-			k += 1
-		pl.i = k
-		pl.life = float(pl.life) - dt
-		if float(pl.life) <= 0.0:
-			node.queue_free()
-			planes.remove_at(i)
-			continue
-		i += 1
-
-
-## Ragdolls, props and chunks that fall into lava/acid sink and vanish.
-func _hazard_bodies() -> void:
-	if hazards.is_empty():
-		return
-	for rd: B3Ragdoll in ragdolls.duplicate():
-		if not is_instance_valid(rd) or rd.sinking > 0.0:
-			continue
-		var c := rd.center()
-		for h in hazards:
-			if h.kind != "fire" and h.contains(c, -0.3):
-				rd.sink(h.kind)
-				fx.splash(c, h.kind == "acid")
-				snd("sizzle" if h.kind == "lava" else "fizz", c, 0.8)
-				break
-	for p: B3Prop in props.duplicate():
-		if not is_instance_valid(p) or p.sinking > 0.0 or p.freeze:
-			continue
-		for h in hazards:
-			if h.kind != "fire" and h.contains(p.global_position, -0.2):
-				if p.kind == "xbarrel" or p.kind == "dynamite":
-					p.trigger(0.2)
-				else:
-					p.sinking = 0.01
-					p.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-					p.freeze = true
-					fx.splash(p.global_position, h.kind == "acid")
-					snd("sizzle", p.global_position, 0.6)
-				break
-	for c: RigidBody3D in chunks.duplicate():
-		if not is_instance_valid(c):
-			chunks.erase(c)
-			continue
-		for h in hazards:
-			if h.kind != "fire" and h.contains(c.global_position, -0.2):
-				chunks.erase(c)
-				c.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-				c.freeze = true
-				_sinking.append([c, 0.0])
-				fx.splash(c.global_position, h.kind == "acid")
-				break

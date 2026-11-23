@@ -4,6 +4,13 @@ extends Node2D
 ## with drawn, animated limbs (robust walking and AI). Knocked over, grabbed or
 ## KO'd: a ragdoll of real jointed parts that flies and tumbles. Gets back up
 ## if it's only knocked down.
+## All the state lives here. Some of the work is in helpers next door that
+## take the fighter: FighterRagdoll (building the ragdoll, and lying still once
+## knocked out), FighterStatus (what toys and powers do to us) and FighterAI
+## (thinking and fighting). What runs for every fighter every physics step
+## stays here (_step, _act, _effects_step, _solve_limits, _rest_check, and
+## wind, magnets, beams and fire), as GDScript reads an object's own
+## variables much faster than another's.
 
 const LAYER := 16
 const MAX_BEND_SPEED := 14.0  # rad/s: the fastest a ragdoll joint is pushed back inside its limits
@@ -120,12 +127,11 @@ var _roam_at := Vector2.INF    # where the torso was when it started staying put
 var _support_t := 0.0          # lying still: time until we check we're still lying on something
 var _steam_t := -1.0           # when we last made a puff of steam (see _steam)
 var angry_t := 0.0             # a gentle giant that was hurt: stomping mad for a while (see RETALIATE)
-var carrying: Fighter = null   # a pterodactyl flying off with someone (see _snatch)
+var carrying: Fighter = null   # a pterodactyl flying off with someone (see FighterAI.snatch)
 var _bounce_t := -1.0          # when a Bloop last bounced us (see bounce)
 var carry_t := 0.0
 var snatch_cd := 0.0
 var _pic_key: Array = []       # what we looked like when last drawn, lying still or frozen (see _same_picture)
-static var _touch_q: PhysicsShapeQueryParameters2D = null
 
 
 func setup(w: Node, fighter_type: String, pos: Vector2, team_id := "", personality := "", s := 1.0) -> void:
@@ -257,7 +263,7 @@ func make_standing(at: Vector2, vel := Vector2.ZERO) -> void:
 	body.lock_rotation = true
 	body.physics_material_override = _mat(0.3, 0.0)
 	body.collision_layer = LAYER
-	body.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS   # (Wigglies: see World._wigglies_vs_fighters)
+	body.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS   # (Wigglies: see WorldPowers.wigglies_vs_fighters)
 	# FighterPart._integrate_forces reads the contacts straight from the physics
 	# state, which only needs max_contacts_reported. (contact_monitor would also
 	# keep a list of touching bodies and hook up to each one's signals as it
@@ -284,22 +290,7 @@ func make_standing(at: Vector2, vel := Vector2.ZERO) -> void:
 
 ## Squeezed deep into the ground: back out on top, standing still (see World._cleanup).
 func unbury() -> void:
-	var bs := all_bodies()
-	if puppet or bs.is_empty() or frozen_t > 0.0 or _resting:
-		return
-	var c := center()
-	var hs := half_size()
-	var to: Vector2 = world.lift_out_of_ground(c, 6.0 * size)
-	if state == "stand":
-		var feet := Vector2(0.0, hs.y - minf(hs.x, hs.y))
-		to = world.lift_out_of_ground(to + feet, minf(hs.x, hs.y) * 0.9) - feet
-	var up: Vector2 = to - c
-	if up.y > -1.0:
-		return
-	for b in bs:
-		b.global_position += up
-		b.linear_velocity = Vector2.ZERO
-		b.angular_velocity = 0.0
+	FighterRagdoll.unbury(self)
 
 
 func free_bodies() -> void:
@@ -379,7 +370,8 @@ func flipped(v: Vector2) -> Vector2:
 
 ## Turns the fighter into a floppy ragdoll (knocked over, grabbed, or KO).
 ## `soft`: knocked over by a toy or a Wiggly power (not a blast or a blow), so
-## landing and tumbling only hurt a little until we're back up.
+## landing and tumbling only hurt a little until we're back up. (The parts
+## and joints are made by FighterRagdoll.)
 func ragdoll(impulse := Vector2.ZERO, soft := false) -> void:
 	if state != "stand" or puppet:
 		return
@@ -397,9 +389,9 @@ func ragdoll(impulse := Vector2.ZERO, soft := false) -> void:
 		body.queue_free()
 	body = null
 	if beast:
-		_beast_ragdoll(c, v, impulse)
+		FighterRagdoll.make_beast(self, c, v, impulse)
 	else:
-		_person_ragdoll(c, v, impulse)
+		FighterRagdoll.make_person(self, c, v, impulse)
 	# The weapon we just let go of starts out in our hand, right inside our
 	# arm: it mustn't push against our own limbs. (It used to get wedged among
 	# them, and a knocked-out fighter's arms and legs never stopped twitching.)
@@ -410,125 +402,6 @@ func ragdoll(impulse := Vector2.ZERO, soft := false) -> void:
 	down_t = 0.0
 	swing = 0.0
 	hit_t = 0.0
-
-
-func _part(name: String, pos: Vector2, rot: float, half: Vector2, round_p: bool, m: float, vel: Vector2) -> FighterPart:
-	var p := FighterPart.new()
-	p.fighter = self
-	p.part = name
-	p.half = half
-	p.round_part = round_p
-	var cs := CollisionShape2D.new()
-	if round_p:
-		var c := CircleShape2D.new()
-		c.radius = half.x
-		cs.shape = c
-	else:
-		var r := RectangleShape2D.new()
-		r.size = half * 2.0
-		cs.shape = r
-	p.add_child(cs)
-	p.mass = m
-	p.angular_damp = 1.0       # a little joint friction, so limbs settle instead of spinning on
-	p.physics_material_override = _mat(0.8, 0.05)
-	p.collision_layer = LAYER
-	p.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | LAYER
-	p.max_contacts_reported = 3   # (no contact_monitor: see make_standing)
-	p.angular_damp = 1.2
-	p.linear_damp = 0.1
-	p.global_position = pos
-	p.rotation = rot
-	p.linear_velocity = vel
-	world.bodies.add_child(p)
-	parts[name] = p
-	return p
-
-
-func _seg(c: Vector2, a: Vector2, b: Vector2) -> Array:
-	# world centre and rotation of a limb from local points a->b
-	var wa := c + flipped(a)
-	var wb := c + flipped(b)
-	return [(wa + wb) * 0.5, (wb - wa).angle() - PI * 0.5, wa.distance_to(wb)]
-
-
-func _person_ragdoll(c: Vector2, v: Vector2, imp: Vector2) -> void:
-	var o := pose()
-	var s := size
-	var m := 3.0 * s * s
-	var spin := randf_range(-4.0, 4.0)
-	var vel := v + imp
-	_part("head", c + flipped(o.head), 0.0, Vector2(11, 11) * s, true, m * 0.13, vel * 1.1)
-	var tor := _seg(c, o.shoulder, o.hip)
-	_part("torso", tor[0], tor[1], Vector2(7, maxf(8.0, tor[2] * 0.5 + 4.0 * s)) * Vector2(s, 1.0), false, m * 0.4, vel)
-	for side in ["f", "b"]:
-		var ua := _seg(c, o.shoulder, o["elbow_" + side])
-		_part("uarm_" + side, ua[0], ua[1], Vector2(3.0 * s, ua[2] * 0.5), false, m * 0.06, vel * 1.15)
-		var la := _seg(c, o["elbow_" + side], o["hand_" + side])
-		_part("larm_" + side, la[0], la[1], Vector2(2.6 * s, la[2] * 0.5), false, m * 0.05, vel * 1.2)
-		var th := _seg(c, o.hip, o["knee_" + side])
-		_part("thigh_" + side, th[0], th[1], Vector2(3.6 * s, th[2] * 0.5), false, m * 0.1, vel * 0.95)
-		var sn := _seg(c, o["knee_" + side], o["foot_" + side])
-		_part("shin_" + side, sn[0], sn[1], Vector2(3.2 * s, sn[2] * 0.5), false, m * 0.08, vel * 0.9)
-	for p in parts.values():
-		p.angular_velocity = spin
-	_join("torso", "head", c + flipped(o.neck), -0.7, 0.7)
-	for side in ["f", "b"]:
-		# arms flail almost all the way round, but not quite: with no gap at
-		# all, nothing ever slowed a spinning arm and it whirled like a helicopter
-		_join("torso", "uarm_" + side, c + flipped(o.shoulder), -2.7, 2.7)
-		_join("uarm_" + side, "larm_" + side, c + flipped(o["elbow_" + side]), -2.4, 0.2)
-		_join("torso", "thigh_" + side, c + flipped(o.hip), -1.6, 1.6)
-		_join("thigh_" + side, "shin_" + side, c + flipped(o["knee_" + side]), -0.1, 2.4)
-	_no_self_collide()
-
-
-func _beast_ragdoll(c: Vector2, v: Vector2, imp: Vector2) -> void:
-	var b: Vector2 = def.body * size
-	var bc := c + Vector2(0, -float(def.legs) * size * 0.5)
-	var m := maxf(1.0, def.body.x * def.body.y / 900.0) * size * size
-	var vel := v + imp
-	_part("torso", bc, 0.0, Vector2(b.x * 0.45, b.y * 0.42 + float(def.legs) * size * 0.25), false, m * 0.75, vel)
-	var hr := float(def.head) * size
-	var neck_len := float(def.neck) * size
-	var hp_pos := bc + Vector2(facing * (b.x * 0.48 + neck_len * 0.6 + hr * 0.6), -b.y * 0.35 - neck_len * (0.9 if def.get("long_neck", false) else 0.5))
-	_part("head", hp_pos, 0.0, Vector2(hr * 0.8, hr * 0.8), true, m * 0.12, vel * 1.1)
-	_join("torso", "head", bc + Vector2(facing * b.x * 0.45, -b.y * 0.2), -0.8, 0.8)
-	var tl := float(def.tail) * size
-	if tl > 14.0:
-		var tp := bc + Vector2(-facing * (b.x * 0.45 + tl * 0.45), -b.y * 0.05)
-		_part("tail", tp, 0.0, Vector2(tl * 0.45, maxf(3.0, b.y * 0.12)), false, m * 0.1, vel)
-		_join("torso", "tail", bc + Vector2(-facing * b.x * 0.42, -b.y * 0.05), -0.9, 0.9)
-	for p in parts.values():
-		p.angular_velocity = randf_range(-3.0, 3.0)
-	_no_self_collide()
-
-
-func _join(a: String, b: String, at: Vector2, lo: float, hi: float) -> void:
-	var pa: FighterPart = parts.get(a)
-	var pb: FighterPart = parts.get(b)
-	if pa == null or pb == null:
-		return
-	var j := PinJoint2D.new()
-	world.pin_parent.add_child(j)
-	j.global_position = at
-	j.disable_collision = true
-	j.softness = 0.0
-	j.node_a = j.get_path_to(pa)
-	j.node_b = j.get_path_to(pb)
-	pins.append(j)
-	var ref := pb.rotation - pa.rotation
-	if facing < 0.0:
-		var t2 := lo
-		lo = -hi
-		hi = -t2
-	limits.append([pa, pb, ref + lo, ref + hi, pa.to_local(at), pb.to_local(at)])
-
-
-func _no_self_collide() -> void:
-	var ps := parts.values()
-	for i in ps.size():
-		for j in range(i + 1, ps.size()):
-			ps[i].add_collision_exception_with(ps[j])
 
 
 ## Keeps ragdoll joints inside their limits (Godot's own 2D joint limits are too soft).
@@ -919,7 +792,7 @@ func _bump(other, m: float, hit: Vector2, fast: float) -> void:
 	world.fx_event("bowled", {"p": center(), "v": dv})
 
 
-## A Wiggly rolling or flying into us while we stand (World._wigglies_vs_fighters):
+## A Wiggly rolling or flying into us while we stand (WorldPowers.wigglies_vs_fighters):
 ## `rel` is how fast it's coming at us along `dir`. Big and fast bowls us over,
 ## anything else is a soft bump that bounces it off. It hardly hurts: jelly is soft.
 func jelly_bump(w: Wiggly, rel: float, dir: Vector2) -> void:
@@ -968,29 +841,43 @@ func helpless() -> bool:
 	return frozen_t > 0.0 or bubble_t > 0.0 or stun_t > 0.0 or lift_t > 0.0
 
 
+# (in fighter_status.gd: FighterStatus)
 ## Thrown by a toy, a Wiggly or a ground pound: `dv` is how fast it throws us.
-## Fast enough and we fall over (heavy beasts barely budge); `dmg` hurts a bit.
 func shove(dv: Vector2, dmg := 0.0, from = null) -> void:
-	if puppet:
-		return
-	if frozen_t > 0.0:
-		if dv.length() < 300.0:
-			return
-		thaw(true)
-	if dmg > 0.0:
-		hurt(dmg, Vector2.ZERO, from)
-	if state == "stand" and is_instance_valid(body):
-		if dv.length() >= knock_speed():
-			ragdoll(dv, true)
-		else:
-			body.linear_velocity += dv * 0.5
-	else:
-		_soft = true
-		wake()
-		for p in all_bodies():
-			p.linear_velocity += dv * 0.8
+	FighterStatus.shove(self, dv, dmg, from)
 
 
+## Frosty or a Freeze Bomb: an ice block, right where we are.
+func set_frozen(sec: float) -> void:
+	FighterStatus.set_frozen(self, sec)
+
+
+## The ice melts (or gets smashed).
+func thaw(smash := false) -> void:
+	FighterStatus.thaw(self, smash)
+
+
+## Caught in a bubble: floats up, helpless, until it pops.
+func set_bubble(sec: float) -> void:
+	FighterStatus.set_bubble(self, sec)
+
+
+func pop_bubble(fall := true) -> void:
+	FighterStatus.pop_bubble(self, fall)
+
+
+## Zappy: a shock that stuns us for a moment.
+func zap(power := 1.0) -> void:
+	FighterStatus.zap(self, power)
+
+
+## Gummy or a Glue Bomb: sticky and slow for a while.
+func stick(sec: float) -> void:
+	FighterStatus.stick(self, sec)
+
+
+# (what goes on every physics step while it lasts stays here, where it runs
+# quicker: wind, magnets, beams, fire and steam, and counting it all down)
 ## Fans, Big Wind and magnets: `push` is how fast the air (or the pull) would
 ## carry a person. Lighter fighters go faster, a T-Rex hardly moves.
 func blow(push: Vector2, dt: float) -> void:
@@ -1026,91 +913,6 @@ func beam(want: Vector2, dt: float) -> void:
 		b.linear_velocity = b.linear_velocity.lerp(to, minf(1.0, dt * 4.0)) - g
 
 
-## Frosty or a Freeze Bomb: an ice block, right where we are (even in mid-air).
-func set_frozen(sec: float) -> void:
-	if puppet or not alive() or sec <= 0.0:
-		return
-	if bubble_t > 0.0:
-		pop_bubble(false)
-	frozen_t = minf(sec, MAX_FREEZE)
-	burning = 0.0
-	stun_t = 0.0
-	swing = 0.0
-	hit_t = 0.0
-	charge_t = 0.0
-	move = 0.0
-	for b in all_bodies():
-		b.freeze_mode = RigidBody2D.FREEZE_MODE_STATIC
-		b.freeze = true
-	mood = "frozen"
-	_show_status()
-
-
-## The ice melts (or gets smashed): we drop out with a crack.
-func thaw(smash := false) -> void:
-	var was := frozen_t > 0.0
-	frozen_t = 0.0
-	for b in all_bodies():
-		if b.freeze:
-			b.freeze = false
-	if not was:
-		return
-	if alive():
-		mood = "calm"
-	_show_status()
-	world.fx_event("ice_pop", {"p": center(), "r": radius(), "smash": smash})
-
-
-## Caught in a bubble: floats up, helpless, until it pops.
-func set_bubble(sec: float) -> void:
-	if puppet or state != "stand" or not alive() or frozen_t > 0.0 or not is_instance_valid(body):
-		return
-	bubble_t = sec
-	body.gravity_scale = 0.0
-	body.linear_velocity = Vector2(body.linear_velocity.x * 0.3, minf(body.linear_velocity.y * 0.1, -40.0))
-	swing = 0.0
-	hit_t = 0.0
-	charge_t = 0.0
-	mood = "scared"
-	_show_status()
-
-
-## Pop! `fall`: tumble down as a ragdoll and get back up after.
-func pop_bubble(fall := true) -> void:
-	if bubble_t <= 0.0:
-		return
-	bubble_t = 0.0
-	if is_instance_valid(body):
-		body.gravity_scale = 0.0 if def.get("flies", false) else 1.0
-	if alive():
-		mood = "calm"
-	_show_status()
-	world.fx_event("pop_bubble", {"p": center(), "r": radius() * 1.3})
-	if fall and state == "stand":
-		ragdoll(Vector2(0, -60), true)   # a long way down: a soft landing
-
-
-## Zappy: a shock that stuns us for a moment. Wet fighters and ones in metal
-## armor get it worse.
-func zap(power := 1.0) -> void:
-	if puppet or not alive() or frozen_t > 0.0:
-		return
-	var k := 1.0 + (0.8 if wet > 0.2 else 0.0) + 0.3 * minf(2.0, metal())
-	stun_t = maxf(stun_t, 0.9 + 0.5 * k)
-	swing = 0.0
-	hit_t = 0.0
-	charge_t = 0.0
-	flash = 1.0
-	if bubble_t > 0.0:
-		pop_bubble()
-	if state == "stand" and is_instance_valid(body):
-		body.linear_velocity.y = minf(body.linear_velocity.y, -140.0)   # a little jolt
-	hurt(9.0 * k * power)
-	if alive():
-		mood = "zapped"
-		_show_status()
-
-
 ## Blaze and fire: catch fire, unless we're wet (then it just steams, and
 ## dries off by `dry`). A fire on the ground calls this every step with a
 ## little `dry` each time, so a soaked soldier steams for a second or so
@@ -1128,15 +930,6 @@ func ignite(sec: float, dry := 0.5) -> void:
 	burning = maxf(burning, sec)
 	if bubble_t > 0.0:
 		pop_bubble()
-
-
-## Gummy or a Glue Bomb: sticky and slow for a while.
-func stick(sec: float) -> void:
-	if puppet or not alive():
-		return
-	goo_t = maxf(goo_t, sec)
-	charge_t = 0.0
-	_show_status()
 
 
 ## A magnet `k` (0..1) close by: metal armor gets pulled toward it, and a
@@ -1166,7 +959,8 @@ func _steam() -> void:
 		world.fx_event("steam", {"p": center()})
 
 
-## Counts down what toys and powers did to us (every physics step).
+## Counts down what toys and powers did to us (every physics step: the rest
+## of what they do is in FighterStatus).
 func _effects_step(dt: float) -> void:
 	if wet > 0.0:
 		wet = maxf(0.0, wet - dt * 0.07)
@@ -1196,7 +990,7 @@ func _effects_step(dt: float) -> void:
 	yank_t = maxf(0.0, yank_t - dt * 0.4)
 	snatch_cd = maxf(0.0, snatch_cd - dt)
 	if carrying != null and (state != "stand" or not alive()):
-		_drop_carried()   # knocked out of the sky: they fall too
+		FighterAI.drop_carried(self)   # knocked out of the sky: they fall too
 	if angry_t > 0.0:
 		angry_t -= dt
 		if angry_t <= 0.0 and alive():
@@ -1234,6 +1028,7 @@ func face() -> String:
 
 
 # ------------------------------------------------------------------- AI
+# (who to go after, aiming and attacking are in fighter_ai.gd: FighterAI)
 func enemy_of(o) -> bool:
 	if o == self or not (o is Fighter) or not o.alive():
 		return false
@@ -1242,6 +1037,7 @@ func enemy_of(o) -> bool:
 	return o.team != team
 
 
+# ------------------------------------------------------------- each step
 func physics_step(dt: float) -> void:
 	if mood.contains("+"):
 		mood = mood.get_slice("+", 0)
@@ -1280,7 +1076,7 @@ func _step(dt: float) -> void:
 				_support_t -= dt
 				if _support_t <= 0.0:
 					_support_t = REST_CHECK
-					if not _supported():
+					if not FighterRagdoll.supported(self):
 						wake()
 				return
 			_solve_limits(dt)
@@ -1304,13 +1100,13 @@ func _step(dt: float) -> void:
 	if hit_t > 0.0:
 		hit_t -= dt
 		if hit_t <= 0.0:
-			_melee_hit(_hit_wd)
+			FighterAI.melee_hit(self, _hit_wd)
 			# the blow can knock ourselves over (a barrel right next to us)
 			if state != "stand" or not is_instance_valid(body):
 				return
 	_ground_check()
 	if carrying != null:
-		_carry(dt)
+		FighterAI.carry(self, dt)
 	if weapon_toy and is_instance_valid(weapon_toy):
 		var hand := _hand_world()
 		var rot := aim if _wtype() in ["gun", "launcher", "flame"] else (aim if swing <= 0.0 else aim + (PI * 0.5 - _swing_angle()) * facing)
@@ -1341,12 +1137,12 @@ func _step(dt: float) -> void:
 		_locomote(dt)
 		return
 	if player_id >= 0:
-		_player(dt)
+		FighterAI.player(self, dt)
 	elif world.battle_on:
 		think_t -= dt
 		if think_t <= 0.0:
 			think_t = randf_range(0.12, 0.22)
-			_think()
+			FighterAI.think(self)
 		_act(dt)
 	else:
 		move = move_toward(move, 0.0, dt * 4.0)
@@ -1409,64 +1205,22 @@ func _rest_check(dt: float) -> void:
 				p.freeze = true
 
 
-## Lying still: is any of our parts still touching the ground, a platform, a
-## toy or someone else (a couple of pixels in the direction of gravity)?
-## If what we lay on went (a toy knocked away, a Wiggly hopping off), we fall.
+# (in fighter_ragdoll.gd: FighterRagdoll)
+## Lying still: is any of our parts still touching something?
 func _supported() -> bool:
-	if _touch_q == null:
-		_touch_q = PhysicsShapeQueryParameters2D.new()
-		_touch_q.collision_mask = Toy.LAYER_GROUND | Toy.LAYER_TOYS | Toy.LAYER_WIGGLIES | LAYER
-	var down: Vector2 = world.gravity_vec().normalized() * 3.0
-	var mine: Array[RID] = []
-	for p in parts.values():
-		if is_instance_valid(p):
-			mine.append(p.get_rid())
-	_touch_q.exclude = mine
-	var space: PhysicsDirectSpaceState2D = world.get_world_2d().direct_space_state
-	for p in parts.values():
-		if not is_instance_valid(p) or p.get_child_count() == 0:
-			continue
-		var cs := p.get_child(0) as CollisionShape2D
-		if cs == null or cs.shape == null:
-			continue
-		_touch_q.shape = cs.shape
-		_touch_q.transform = p.global_transform.translated(down)
-		if not space.intersect_shape(_touch_q, 1).is_empty():
-			return true
-	return false
+	return FighterRagdoll.supported(self)
 
 
-## Something hit us while we lay still (World._handle_impacts): wake up and
-## take some of the blow, as if we'd been loose all along. `from` is where it
-## came from, `m` how heavy it is.
+## Something hit us while we lay still (World._handle_impacts).
 func knocked_while_resting(from: Vector2, closing: float, m: float) -> void:
-	wake()
-	var dir := (center() - from).normalized()
-	var dv := dir * closing * m / (m + weight())
-	for p in all_bodies():
-		p.linear_velocity += dv
+	FighterRagdoll.knocked_while_resting(self, from, closing, m)
 
 
-## A knocked-out ragdoll lying still moves again: a blast or a bump, a fan,
-## a beam, a grab, the gravity changing, the ground (or whatever it lay on)
-## going. Frozen bodies don't feel any of that by themselves, so everything
-## that can move them calls this first (see also World.wake_resting and
-## World._handle_impacts).
+## A knocked-out ragdoll lying still moves again (see FighterRagdoll.wake).
+## (Mostly we aren't lying still: that's checked here, quickly.)
 func wake(and_neighbours := true) -> void:
-	if not _resting:
-		return
-	_resting = false
-	_rest_t = 0.0
-	_still_t = 0.0
-	_rest_at.clear()
-	_roam_at = Vector2.INF
-	for p in parts.values():
-		if is_instance_valid(p):
-			p.freeze = false
-	# anyone lying on (or right next to) us moves too; further into a heap,
-	# _supported() notices soon enough if we were holding someone up
-	if and_neighbours:
-		world.wake_resting(center(), radius() * 1.5, false)
+	if _resting:
+		FighterRagdoll.wake(self, and_neighbours)
 
 
 func is_resting() -> bool:
@@ -1547,50 +1301,8 @@ func _locomote(dt: float) -> void:
 		world.fx_event("jump", {"p": body.global_position + Vector2(0, half_size().y)})
 
 
-func _think() -> void:
-	# medics look after hurt teammates first
-	if def.get("heals", false):
-		var hurt_ally = _nearest(func(o): return o != self and o is Fighter and o.alive() and o.team == team and o.hp < o.max_hp * 0.75, 700.0)
-		if hurt_ally:
-			set_meta("heal_target", hurt_ally)
-		else:
-			remove_meta("heal_target")
-	if pers == "peaceful" and angry_t <= 0.0:
-		target = null
-		return
-	if angry_t > 0.0:
-		# angry: after whoever hurt us (or anyone else close by who's in the way)
-		if target == null or not is_instance_valid(target) or not target.alive():
-			target = _nearest(func(o): return enemy_of(o), 600.0)
-		return
-	var guard: bool = pers == "defend" and not world.brave      # 📣 CHARGE!: guards leave their post too
-	if target == null or not is_instance_valid(target) or not target.alive() or (guard and target.center().distance_to(center()) > 1500.0):
-		# defenders watch as far as their weapon reaches (a sniper sees a long way)
-		var watch := 1400.0 if not guard else maxf(900.0, _reach() * 1.05)
-		target = _nearest(func(o): return enemy_of(o), watch)
-		# nobody close by: everyone except guards goes looking for a fight, so a
-		# battle never stalls with two armies waiting at opposite ends
-		if target == null and not guard:
-			target = _nearest(func(o): return enemy_of(o), INF)
-	elif pers != "defend" and target.center().distance_to(center()) > 600.0:
-		# chasing someone far away: switch if somebody closer shows up
-		var closer = _nearest(func(o): return enemy_of(o), target.center().distance_to(center()) * 0.6)
-		if closer:
-			target = closer
-
-
-func _nearest(pred: Callable, max_d: float):
-	var best = null
-	var bd := max_d
-	for o in world.fighters():
-		if pred.call(o):
-			var d: float = o.center().distance_to(center())
-			if d < bd:
-				bd = d
-				best = o
-	return best
-
-
+## Where to stand, which way to face and aim, and attacking when in range
+## (every physics step; who to go after is FighterAI.think).
 func _act(dt: float) -> void:
 	var c := center()
 	if has_meta("heal_target"):
@@ -1606,7 +1318,7 @@ func _act(dt: float) -> void:
 					world.fx_event("heal", {"p": ally.center()})
 			return
 	if target == null or not is_instance_valid(target):
-		_wander(dt)
+		FighterAI.wander(self, dt)
 		mood = "calm"
 		return
 	var tc: Vector2 = target.center()
@@ -1617,7 +1329,7 @@ func _act(dt: float) -> void:
 	var ranged := wt in ["gun", "launcher", "bow", "throw", "flame"]
 	mood = "angry"
 	facing = signf(d.x) if absf(d.x) > 4.0 else facing
-	aim = _aim_at(tc, wt)
+	aim = FighterAI.aim_at(self, tc, wt)
 	# where do we want to stand?
 	var want := 0.0
 	# 📣 CHARGE! even cowards find their courage (they used to run into the
@@ -1664,253 +1376,33 @@ func _act(dt: float) -> void:
 	# a pterodactyl swooping on someone small enough snatches them up
 	if def.get("flies", false) and carrying == null and snatch_cd <= 0.0 and dist <= reach + radius() * 0.6 + target.radius() * 0.5 \
 			and target.state == "stand" and not target.helpless() and target.weight() <= SNATCH_MAX and not target.puppet:
-		_snatch(target)
+		FighterAI.snatch(self, target)
 		return
 	# attack when in range
 	if dist <= reach + radius() * 0.6 + target.radius() * 0.5 and cool <= 0.0:
-		if ranged and not _clear_shot(tc):
+		if ranged and not FighterAI.clear_shot(self, tc):
 			_blind_t += dt
 			if randf() < 0.1:
 				want_jump = true
 			return
 		_blind_t = 0.0
-		_attack(tc, wt)
+		FighterAI.attack(self, tc, wt)
 
 
-## A pterodactyl grabs `o` in its claws and flies off up into the sky with it,
-## then lets go: a long (soft) way down, and they get back up.
-func _snatch(o: Fighter) -> void:
-	o.ragdoll(Vector2(0, -120), true)
-	if o.state == "stand":
-		return
-	carrying = o
-	carry_t = 1.8
-	snatch_cd = 7.0
-	cool = _rate()
-	world.fx_event("snatch", {"p": o.center()})
-
-
-func _carry(dt: float) -> void:
-	var o := carrying
-	if not is_instance_valid(o) or o.state == "stand" or o.frozen_t > 0.0 or o.is_resting() or not o.held_by.is_empty() or carry_t <= 0.0:
-		_drop_carried()
-		return
-	carry_t -= dt
-	o.down_t = 0.0
-	o.lift_t = 0.2      # (kicking helplessly, and not getting up in mid-air)
-	o._soft = true      # a soft landing when we let go
-	var claws := body.global_position + Vector2(facing * 6.0, half_size().y + 16.0 * size)
-	var pull: Vector2 = ((claws - o.center()) * 10.0 + body.linear_velocity).limit_length(900.0)
-	var g: Vector2 = world.gravity_vec() * dt
-	for b in o.all_bodies():
-		b.linear_velocity = b.linear_velocity.lerp(pull, minf(1.0, dt * 14.0)) - g
-
-
-func _drop_carried() -> void:
-	carrying = null
-	carry_t = 0.0
-
-
-## Bounced up off a Bloop (a living trampoline): `v` is how fast. False if
-## we've only just bounced.
+## Bounced up off a Bloop: `v` is how fast. False if we've only just bounced (FighterStatus).
 func bounce(v: Vector2) -> bool:
-	if puppet or frozen_t > 0.0 or world.vision_time - _bounce_t < 0.3:
-		return false
-	_bounce_t = world.vision_time
-	if state == "stand" and is_instance_valid(body):
-		body.linear_velocity = Vector2(body.linear_velocity.x, 0.0) + v
-	else:
-		_soft = true
-		wake()
-		for b in all_bodies():
-			b.linear_velocity = Vector2(b.linear_velocity.x, 0.0) * 0.8 + v
-	return true
+	return FighterStatus.bounce(self, v)
 
 
-## Twinkle's warp: pops out at `to` (as a tumbling ragdoll that lands softly).
+## Twinkle's warp: pops out at `to` (FighterStatus).
 func warp_to(to: Vector2) -> void:
-	if puppet:
-		return
-	if state == "stand":
-		ragdoll(Vector2.ZERO, true)
-	_soft = true
-	wake()
-	var by := to - center()
-	for b in all_bodies():
-		b.global_position += by
-		b.linear_velocity = Vector2(randf_range(-40.0, 40.0), -60.0)
-		b.angular_velocity = 0.0
+	FighterStatus.warp_to(self, to)
 
 
 ## A laser sword held up facing the shot bats a bullet away (most of the time).
 func deflects(from: Vector2) -> bool:
 	return weapon_id == "laser_sword" and state == "stand" and alive() and not helpless() and not puppet \
 		and signf(from.x - center().x) == facing and randf() < DEFLECT
-
-
-func _wander(dt: float) -> void:
-	wander_t -= dt
-	if wander_t <= 0.0:
-		wander_t = randf_range(1.0, 3.0)
-		wander_dir = 0.0 if randf() < 0.4 else (-1.0 if randf() < 0.5 else 1.0)
-		if pers == "defend" and wander_dir != 0.0:
-			facing = wander_dir   # a guard looks about
-	if pers == "defend":
-		# Guards stand at their post. (They used to wander about until they were
-		# 60 px from it: a sniper on a tower walked right off the top.)
-		var dx := home.x - center().x
-		move = clampf(dx / 60.0, -0.8, 0.8) if absf(dx) > 12.0 else 0.0
-		return
-	move = wander_dir * 0.5
-
-
-func _aim_at(tc: Vector2, wt: String) -> float:
-	var from := center() + Vector2(0, -20.0 * size)
-	var d := tc - from
-	if wt == "bow" or wt == "throw":
-		var v := 900.0 if wt == "bow" else 620.0
-		var g := 980.0
-		var x := absf(d.x)
-		var y := -d.y
-		var v2 := v * v
-		var disc := v2 * v2 - g * (g * x * x + 2.0 * y * v2)
-		if disc >= 0.0 and x > 1.0:
-			var ang := atan((v2 - sqrt(disc)) / (g * x))
-			return (-ang if d.x >= 0.0 else PI + ang)
-		return (-PI * 0.25 if d.x >= 0.0 else -PI * 0.75)
-	return d.angle()
-
-
-func _clear_shot(tc: Vector2) -> bool:
-	var from := center() + Vector2(0, -20.0 * size)
-	var q := PhysicsRayQueryParameters2D.create(from, tc, Toy.LAYER_GROUND)
-	return world.get_world_2d().direct_space_state.intersect_ray(q).is_empty()
-
-
-func _attack(tc: Vector2, wt: String) -> void:
-	var wd := _wdef()
-	match wt:
-		"melee", "beast":
-			cool = _rate()
-			swing = _swing_time()
-			swing_hit = false
-			if beast and String(def.get("voice", "")) != "" and randf() < 0.4:
-				world.fx_event("voice", {"p": center(), "v": String(def.voice)})
-			var glow: bool = wd.get("glow", false)
-			var sw := {"p": center(), "fists": wd.get("fists", false), "beast": beast, "f": facing, "r": _reach() * (1.0 if beast else 0.9), "glow": glow}
-			if glow and weapon_toy and is_instance_valid(weapon_toy):
-				var lc: Color = weapon_toy.shown_color()
-				sw.c = Color(lc.r * 0.9, lc.g * 0.9, lc.b * 1.1, 0.45)   # a laser sword's glowing swoosh (drawn glowing: see Effects)
-			world.fx_event("swing", sw)
-			# the blow lands halfway through the swing (counted in physics steps, so ⏸ pause stops it)
-			hit_t = _swing_time() * 0.5
-			_hit_wd = wd
-		"gun":
-			if int(wd.get("burst", 0)) > 0:
-				if reload_t > 0.0:
-					cool = reload_t   # still reloading: try again when it's done
-					return
-				ammo -= 1
-				if ammo <= 0:
-					ammo = int(wd.burst)
-					reload_t = float(wd.get("reload", 1.5))
-					world.fx_event("reload", {"p": center()})
-			cool = _rate() * randf_range(0.9, 1.2)
-			var muzzle := _muzzle()
-			for i in int(wd.get("pellets", 1)):
-				var ang := aim + randf_range(-1.0, 1.0) * float(wd.get("spread", 0.03))
-				world.shoot(self, muzzle, ang, float(wd.get("range", 800.0)), float(wd.get("dmg", 15.0)), float(wd.get("knock", 120.0)), bool(wd.get("laser", false)))
-			world.fx_event("shot", {"p": muzzle, "a": aim, "s": String(wd.get("sound", "gun_pistol")), "laser": wd.get("laser", false)})
-		"launcher":
-			cool = _rate()
-			world.launch(self, "rocket", _muzzle(), aim + randf_range(-0.04, 0.04), 950.0)
-			world.fx_event("shot", {"p": _muzzle(), "a": aim, "s": "bazooka"})
-		"bow":
-			cool = _rate()
-			world.launch(self, "arrow", _muzzle(), aim + randf_range(-0.03, 0.03), 900.0)
-			world.fx_event("bow", {"p": _muzzle()})
-		"throw":
-			cool = _rate()
-			world.launch(self, "grenade", _hand_world(), aim + randf_range(-0.05, 0.05), 620.0)
-			world.fx_event("pin", {"p": center()})
-		"flame":
-			cool = _rate()
-			world.flame(self, _muzzle(), aim, float(wd.get("range", 220.0)), float(wd.get("dmg", 40.0)) * _rate())
-
-
-func _muzzle() -> Vector2:
-	var hand := _hand_world()
-	var len := 26.0
-	if weapon_toy and is_instance_valid(weapon_toy):
-		len = weapon_toy.w * 0.5 * weapon_toy.size_scale
-	return hand + Vector2.from_angle(aim) * len
-
-
-func _melee_hit(wd: Dictionary) -> void:
-	if state != "stand" or puppet:
-		return
-	var reach := float(wd.get("reach", 40.0)) * (size if not beast else 1.0)
-	# A beast decides to attack counting its own body (see _act), so it hits
-	# from there too. Otherwise big or resized beasts swung at thin air.
-	var body_x := radius() * 0.6 if beast else 0.0
-	var c := center()
-	var front := c + Vector2(facing * (reach * 0.6 + body_x), -10.0 * size)
-	var kind := String(def.get("attack", "bite")) if beast else "melee"
-	var hit_any := false
-	var hit_ko := false
-	var hit_player := false
-	for o in world.fighters():
-		if not enemy_of(o) and not (team == "wild" and o.team == "wild" and o != self and o.type != type):
-			continue
-		var oc: Vector2 = o.center()
-		var d := oc - c
-		var in_front: bool = signf(d.x) == facing or absf(d.x) < o.radius()
-		var area: bool = absf(d.x) < reach + body_x + o.radius() * 0.8 and absf(d.y) < reach * 0.7 + o.radius()
-		if kind == "stomp":
-			area = d.length() < reach + body_x + o.radius() * 0.5
-			in_front = true
-		elif kind == "tail":
-			area = absf(d.x) < reach + body_x + o.radius() * 0.8 and absf(d.y) < reach * 0.6 + o.radius()
-			in_front = true
-		if area and in_front:
-			var knock_dir := Vector2(signf(d.x) if d.x != 0.0 else facing, -0.55).normalized()
-			o.hurt(float(wd.get("dmg", 10.0)), knock_dir * float(wd.get("knock", 300.0)), self)
-			hit_any = true
-			if not o.alive():
-				hit_ko = true
-			if o.player_id >= 0:
-				hit_player = true
-	# hit toys and Wigglies too
-	for t2 in world.all_things():
-		if t2 is Toy and not t2.extra.has("held_by") and not t2.freeze and t2.global_position.distance_to(front) < reach * 0.8:
-			t2.linear_velocity += Vector2(facing, -0.4).normalized() * float(wd.get("knock", 300.0)) * clampf(2.0 / t2.mass, 0.1, 1.5)
-			if t2.def.has("breaks"):
-				ToyLogic.impact(world, t2, null, 9999.0, t2.global_position)
-			elif t2.id == "barrel":
-				ToyLogic.trigger(world, t2)
-		elif t2 is Wiggly and t2.com.distance_to(front) < reach:
-			t2.add_velocity(Vector2(facing, -0.6).normalized() * float(wd.get("knock", 300.0)))
-	if kind == "stomp":
-		world.fx_event("stomp", {"p": c + Vector2(0, half_size().y), "r": reach})
-	elif kind == "charge" and hit_any:
-		charge_t = 0.0
-	if hit_any:
-		# (a heavy blow, or a knock-out: the screen jolts, and if you're in it, the game stops for a blink)
-		world.fx_event("hit", {"p": front, "s": String(wd.get("sound", "punch")), "beast": beast, "f": facing,
-			"big": hit_ko or float(wd.get("dmg", 10.0)) >= 38.0, "ko": hit_ko, "pl": hit_player or player_id >= 0})
-
-
-func _player(dt: float) -> void:
-	move = move_input
-	aim = (aim_point - (center() + Vector2(0, -20.0 * size))).angle()
-	if absf(aim_point.x - center().x) > 6.0:
-		facing = signf(aim_point.x - center().x)
-	if want_attack and cool <= 0.0:
-		var wt := _wtype()
-		if wt == "bow" or wt == "throw":
-			aim = _aim_at(aim_point, wt)
-		_attack(aim_point, wt)
-	mood = "angry" if want_attack else "calm"
 
 
 # --------------------------------------------------------------- drawing

@@ -23,7 +23,7 @@ const SHIELD_UP := Vector3(-0.36, -0.24, -0.55)
 
 func setup(u: B3Unit) -> void:
 	unit = u
-	if u == null or u.rig == null or u is B3Vehicle:
+	if u == null or u.rig == null or u.is_vehicle():
 		return
 	var rig: B3Rig = u.rig
 	hold = rig.hold

@@ -331,7 +331,7 @@ func _fighter_bar(t: Fighter) -> void:
 	tb.add_theme_stylebox_override("normal", UI.box(tc, 14, 2, tc.lightened(0.3), 12))
 	var pd := Catalog.personality(t.pers)
 	add.call("%s %s" % [pd.emoji, pd.name], "Change personality: " + String(pd.desc), func():
-		var ids: Array = Catalog.PERSONALITIES.map(func(x): return x.id)
+		var ids: Array = Catalog.PERS_ORDER
 		var i := ids.find(t.pers)
 		game.send({"cmd": "pers", "uid": uid, "pers": ids[(i + 1) % ids.size()]}))
 	if t.weapon_id != "":
@@ -470,7 +470,8 @@ func _build_toybox() -> void:
 		refresh_pickers())
 	pers_row.add_child(auto_b)
 	pers_buttons[""] = auto_b
-	for pd in Catalog.PERSONALITIES:
+	for pers_id: String in Catalog.PERS_ORDER:
+		var pd: Dictionary = Catalog.PERS[pers_id]
 		var pb := UI.button(String(pd.emoji), UI.PANEL2, 17, 40)
 		pb.custom_minimum_size.y = 34
 		pb.tooltip_text = "%s: %s" % [pd.name, pd.desc]

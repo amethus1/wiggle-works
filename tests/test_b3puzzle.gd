@@ -1,4 +1,4 @@
-extends Node
+extends TestBase
 ## Headless checks for 🧩 Army Puzzles and the 🪙 budget they use, the ⭐
 ## stars of the 📜 History battles, and 🎲 Surprise Battles' fair prices:
 ## the budget (prices, your side only, refunds, ⏮ Reset, clearing), the
@@ -16,52 +16,13 @@ extends Node
 
 const SPEED := 6.0
 
-var fails := 0
-var b = null
-
-
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
 
 ## A new battle on `map`. `sd` picks other random numbers (_win_rates).
 func fresh(map := "grassland", sd := 0) -> void:
 	if b and is_instance_valid(b):
 		B3Player.stop()
-		b.queue_free()
-		await get_tree().physics_frame
-		await get_tree().physics_frame
-	seed(99 + sd)
-	b = load("res://battle3d/battle3d.gd").new()
-	add_child(b)
-	b.begin({"seed": 777 + sd * 104729, "map": map})
-	Engine.physics_ticks_per_second = int(60 * SPEED)
-	Engine.time_scale = SPEED
-
-
-func sim(t: float) -> void:
-	var end: float = b.time + t
-	var guard := 0
-	while b.time < end and guard < int(t * 60.0 * SPEED) + 600:
-		await get_tree().physics_frame
-		guard += 1
-
-
-func frames(n := 3) -> void:
-	for i in n:
-		await get_tree().process_frame
-
-
-func at(x: float, z: float) -> Vector3:
-	return Vector3(x, b.world.height_at(x, z), z)
-
-
-## Knocks `u` out straight away.
-func ko(u: B3Unit) -> void:
-	if is_instance_valid(u) and not u.dead:
-		u.hurt(99999.0, Vector3.UP, 1.0, null, "blast")
+	await drop_battle()
+	start_battle(99 + sd, {"seed": 777 + sd * 104729, "map": map})
 
 
 ## Red's health left, from 0 (nobody standing) to 1 (not a scratch), out of
@@ -80,18 +41,6 @@ func live(team := "") -> int:
 		if is_instance_valid(u) and not u.dead and (team == "" or u.team == team):
 			n += 1
 	return n
-
-
-## Every bit of text shown inside `n`.
-func texts(n: Node) -> String:
-	var out := ""
-	if n is Label:
-		out += (n as Label).text + "\n"
-	elif n is Button:
-		out += (n as Button).text + "\n"
-	for c in n.get_children():
-		out += texts(c)
-	return out
 
 
 ## Fights until someone wins (or `limit` seconds of battle).
@@ -126,8 +75,7 @@ func _ready() -> void:
 	Settings.b3_puzzles = keep_puzzles
 	Settings.b3_hist_stars = keep_hist
 	B3Rules.reset()
-	print("test_b3puzzle: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 func _all() -> void:

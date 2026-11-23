@@ -1,25 +1,18 @@
-extends Node
+extends TestBase
 ## Toys and Wiggly powers against people, animals and dinosaurs: zaps, fire,
 ## water and rain, ice, ground pounds, Gummy, big Wigglies, the saucer's
 ## beam, fans, bubbles, magnets, wired battle traps and heavy things bowling
 ## armies over.
 ## godot --headless --path . -- --test=toyfight
 
-var fails := 0
 var w: World
 var events := {}
 var fxv: Effects
 
 
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
-
-func frames(n: int) -> void:
-	for i in n:
-		await get_tree().physics_frame
+## (frames() waits physics steps here: the playground's clock)
+func _init() -> void:
+	frames_are_steps = true
 
 
 func fresh() -> void:
@@ -43,13 +36,9 @@ func dummy(type: String, x: float, team := "red", y := 150.0) -> Fighter:
 	return f
 
 
-## Waits up to `sec` seconds for `cond` to come true.
-func wait_for(cond: Callable, sec: float) -> bool:
-	for i in int(sec * 120.0):
-		if cond.call():
-			return true
-		await get_tree().physics_frame
-	return bool(cond.call())
+## Waits up to `sec` seconds (of physics steps) for `cond` to come true.
+func wait_for(cond: Callable, sec := 3.0) -> bool:
+	return await wait_steps_for(cond, sec)
 
 
 func _ready() -> void:
@@ -82,8 +71,7 @@ func _ready() -> void:
 	await _juice()
 	await _speed()
 
-	print("test_toyfight: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 func _zappy() -> void:

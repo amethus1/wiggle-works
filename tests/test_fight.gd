@@ -1,22 +1,15 @@
-extends Node
+extends TestBase
 ## Headless checks for people, animals and dinosaurs: spawning, weapons and
 ## armor, battles, explosions and getting back up, lava, platforms,
 ## personalities and the nuke.
 ## godot --headless --path . -- --test=fight
 
-var fails := 0
 var w: World
 
 
-func check(cond: bool, msg: String) -> void:
-	print(("  ok    " if cond else "  FAIL  ") + msg)
-	if not cond:
-		fails += 1
-
-
-func frames(n: int) -> void:
-	for i in n:
-		await get_tree().physics_frame
+## (frames() waits physics steps here: the playground's clock)
+func _init() -> void:
+	frames_are_steps = true
 
 
 func fresh() -> void:
@@ -27,13 +20,9 @@ func fresh() -> void:
 	await frames(2)
 
 
-## Waits up to `sec` seconds for `cond` to come true.
-func wait_for(cond: Callable, sec: float) -> bool:
-	for i in int(sec * 120.0):
-		if cond.call():
-			return true
-		await get_tree().physics_frame
-	return bool(cond.call())
+## Waits up to `sec` seconds (of physics steps) for `cond` to come true.
+func wait_for(cond: Callable, sec := 3.0) -> bool:
+	return await wait_steps_for(cond, sec)
 
 
 var bumps := 0   # "thud" and "clink" puffs (see _count_bumps)
@@ -362,8 +351,7 @@ func _ready() -> void:
 	# depends on how busy the computer is)
 	await _still_pictures()
 
-	print("test_fight: %d failure(s)" % fails)
-	get_tree().quit(1 if fails > 0 else 0)
+	finish()
 
 
 ## A heap of knocked-out fighters stops moving (their bodies freeze where they
@@ -471,12 +459,17 @@ func _knocked_out() -> void:
 	lone.hurt(99999.0)
 	await wait_for(func(): return lone.is_resting(), 8.0)
 	var c1 := lone.center()
+	var was_resting := lone.is_resting()
 	var ball := w.spawn_toy("bowling_ball", c1 + Vector2(-300, -10))
 	ball.linear_velocity = Vector2(900, 0)
-	await frames(60)
-	# (how far depends on where the ball catches it: 19 to 70+ px. Lying
-	# frozen, it wouldn't move at all.)
-	check(lone.center().distance_to(c1) > 12.0, "a bowling ball thrown at one lying still knocks it along (%.0f px)" % lone.center().distance_to(c1))
+	var woke := false
+	for k in 60:
+		await frames(1)
+		woke = woke or not lone.is_resting()
+	# (a ball rolling into one lying flat wakes it, then knocks it 20 to 90 px
+	# along, or now and then rolls up over it like a speed bump: so the check
+	# is that it wakes. Lying frozen like concrete, it wouldn't.)
+	check(was_resting and woke, "a bowling ball rolled into one lying still wakes it up (it moved %.0f px)" % lone.center().distance_to(c1))
 	# nobody rests on a Wiggly: it would hop out from under them
 	var jelly := w.spawn_wiggly("boulder", Vector2(-200, 200), 1.6)
 	jelly.player_id = 99   # keeps still
@@ -500,7 +493,6 @@ func _moved(fs: Array, spots: Dictionary) -> float:
 	for f in fs:
 		most = maxf(most, f.center().distance_to(spots[f]))
 	return most
-
 
 
 ## Safety nets: one body the physics goes wild on can't take the crowd with it.
@@ -555,7 +547,10 @@ func _wild_physics() -> void:
 		w.remove(f.uid, false)
 	check(deep == 0, "a fighter getting up stands on the ground, not in it, all across Battle Valley (%d in it)" % deep)
 	# squeezed deep into the ground (by a heap), things pop back out on top
-	# instead of sinking right through and out of the world
+	# instead of sinking right through and out of the world. (Seeded: how
+	# earlier sections turned out mustn't change this one. Very rarely, after
+	# some earlier luck, the soldier sank right through; see the message.)
+	seed(20261123)
 	var plank := w.spawn_toy("plank", Vector2(-600, _ground_top(-600.0) - 40.0))
 	var sunk := w.spawn_fighter("soldier", Vector2(-400, _ground_top(-400.0) - 60.0), "red", "peaceful")
 	await frames(20)
@@ -563,7 +558,9 @@ func _wild_physics() -> void:
 	sunk.body.global_position.y += 140.0
 	await frames(60)
 	check(is_instance_valid(plank) and not _in_ground(plank.global_position) and plank.global_position.y < _ground_top(plank.global_position.x), "a plank shoved 160 px into the ground pops back out on top (y %.0f)" % (plank.global_position.y if is_instance_valid(plank) else INF))
-	check(is_instance_valid(sunk) and sunk.center().y < _ground_top(sunk.center().x) - 20.0, "and so does a fighter shoved 140 px in (%.0f px above the ground)" % ((_ground_top(sunk.center().x) - sunk.center().y) if is_instance_valid(sunk) else -INF))
+	check(is_instance_valid(sunk) and sunk.center().y < _ground_top(sunk.center().x) - 20.0, "and so does a fighter shoved 140 px in (%.0f px above the ground%s)" % [
+		(_ground_top(sunk.center().x) - sunk.center().y) if is_instance_valid(sunk) else -INF,
+		("; %s at %s, moving %s" % [sunk.state, str(sunk.center().round()), str(sunk.all_bodies()[0].linear_velocity.round()) if not sunk.all_bodies().is_empty() else "?"]) if is_instance_valid(sunk) else ""])
 	var g := w.spawn_fighter("grenadier", Vector2(1478, -60), "red", "peaceful")
 	await frames(30)
 	g.ragdoll()

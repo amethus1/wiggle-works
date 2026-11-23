@@ -1,6 +1,9 @@
 extends Node
 ## Every Wiggly, toy, world, magic spell and sticker in Wiggle Works.
-## Autoloaded as `Catalog`.
+## Autoloaded as `Catalog`. It's also the one home of what 2D and 3D Battle
+## share: the stickers, the teams' order and names, the personalities' order,
+## names and icons, and the names of the fighters both have (B3Defs reads them
+## from here).
 
 # ---------------------------------------------------------------- Wigglies
 ## Soft jelly critters. radius = body size; stiff/press = how firm the jelly is;
@@ -144,6 +147,8 @@ const TOYS := [
 ]
 
 # --------------------------------------------------------------- Fighters
+## The teams (3D Battle uses the same order and names, with its own brighter
+## colours and an icon each: B3Defs.TEAM).
 const TEAMS := {
 	"red": {"name": "Red", "color": Color("e74c3c")},
 	"blue": {"name": "Blue", "color": Color("3d8bfd")},
@@ -153,17 +158,23 @@ const TEAMS := {
 }
 const TEAM_ORDER := ["red", "blue", "green", "yellow", "wild"]
 
-const PERSONALITIES := [
-	{"id": "attack", "name": "Attack", "emoji": "⚔️", "desc": "Charges the nearest enemy."},
-	{"id": "defend", "name": "Defend", "emoji": "🛡️", "desc": "Guards its spot and fights anyone who comes close."},
-	{"id": "ranged", "name": "Ranged", "emoji": "🎯", "desc": "Keeps its distance and shoots."},
-	{"id": "berserk", "name": "Berserk", "emoji": "😡", "desc": "Fast and fearless. Always charges."},
-	{"id": "coward", "name": "Coward", "emoji": "😱", "desc": "Runs away when it gets hurt."},
-	{"id": "peaceful", "name": "Peaceful", "emoji": "🌼", "desc": "Just wanders around. Never fights."},
-]
+## How a fighter behaves. 3D Battle has the same six (and ✨ Auto first), and
+## takes their order, names and icons from here (B3Defs.PERS: it words its own
+## tips, and its Ranged shows 🏹).
+const PERS_ORDER := ["attack", "defend", "ranged", "berserk", "coward", "peaceful"]
+const PERS := {
+	"attack": {"id": "attack", "name": "Attack", "emoji": "⚔️", "desc": "Charges the nearest enemy."},
+	"defend": {"id": "defend", "name": "Defend", "emoji": "🛡️", "desc": "Guards its spot and fights anyone who comes close."},
+	"ranged": {"id": "ranged", "name": "Ranged", "emoji": "🎯", "desc": "Keeps its distance and shoots."},
+	"berserk": {"id": "berserk", "name": "Berserk", "emoji": "😡", "desc": "Fast and fearless. Always charges."},
+	"coward": {"id": "coward", "name": "Coward", "emoji": "😱", "desc": "Runs away when it gets hurt."},
+	"peaceful": {"id": "peaceful", "name": "Peaceful", "emoji": "🌼", "desc": "Just wanders around. Never fights."},
+}
 
 ## People, animals and dinosaurs. Spawn ids are "f:<id>".
 ## kind: person | beast.  For beasts: body (w, h), legs (length), biped, neck, head, tail, attack.
+## 3D Battle's fighters of the same kinds take their names from here
+## (B3Defs.UNITS; its Triceratops is "trike").
 const FIGHTERS := {
 	"stick": {"cat": "People", "name": "Stick Figure", "desc": "Fights with fists. Give it a weapon!", "hp": 100.0, "speed": 160.0, "pers": "attack", "skin": Color("f6d7b0")},
 	"soldier": {"cat": "People", "name": "Soldier", "desc": "Rifle and helmet.", "hp": 110.0, "speed": 150.0, "weapon": "rifle", "helmet": "army", "armor": 0.1, "pers": "ranged", "skin": Color("e0b48c")},
@@ -394,10 +405,7 @@ func team_color(team: String) -> Color:
 
 
 func personality(id: String) -> Dictionary:
-	for p in PERSONALITIES:
-		if p.id == id:
-			return p
-	return PERSONALITIES[0]
+	return PERS.get(id, PERS.attack)
 
 
 func world_def(id: String) -> Dictionary:

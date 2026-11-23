@@ -4,6 +4,10 @@ extends Node2D
 ## stickers. Every player action arrives as a command (apply_command), so a
 ## friend's clicks over Wi-Fi go through exactly the same code as yours.
 ## On a network client the world is a "puppet": it draws what the host sends.
+## All the state lives here. Some of the work is in helpers next door that
+## take the world: WorldTerrain (platforms and pools), WorldLinks (links and
+## power), WorldPowers (Wiggly powers), WorldMagic (spells), WorldCommands
+## (commands and grabbing) and WorldSave (saving, loading and undo).
 
 signal fx(name: String, args: Dictionary)   # every visual/sound event (the host forwards these)
 ## rebuilt: the playground was loaded, undone or cleared (old effects go too);
@@ -14,6 +18,7 @@ const UNDO_MAX := 15
 const MAX_TOYS := 420
 const MAX_WIGGLIES := 40
 const MAX_FIGHTERS := 120
+const SINK_FAST := 350.0        # px/s down: checked for being stuck in the ground every step (see _cleanup)
 const BURIED := 16.0           # px: something whose middle is this deep in the ground is stuck in it (see _cleanup)
 const SPLIT_STRETCH := 2.35
 
@@ -90,7 +95,8 @@ var cars_on := 0               # go-karts and monster trucks driving (last step)
 var flung := 0                 # things that left the world through the floor or the sides (bench2d counts them)
 var blown := 0                 # ...of them, ones already miles past the edge: thrown there in a single step
 var _water_hold := 0           # above 0: adding several platforms, cut the water once at the end
-var _jelly_q: PhysicsShapeQueryParameters2D = null
+var _jelly_q: PhysicsShapeQueryParameters2D = null   # (Wigglies bumping into fighters: see WorldPowers)
+var _metal_q: PhysicsShapeQueryParameters2D = null   # (zaps running along metal: see WorldPowers)
 # fighters(), toys() and wigglies(), rebuilt only after `things` (or the
 # fighter layer) changes. Read-only: they're handed out, never changed in place,
 # so anyone looping over one while things come and go keeps a steady list.
@@ -175,42 +181,18 @@ func load_world(id: String, with_starters := true) -> void:
 	world_changed.emit(true)
 
 
+# ------------------------------------------------------- platforms and pools
+# (building platforms, blasts breaking them, pools of water, lava and acid,
+# and cutting the water to the shape of the ground are in world_terrain.gd:
+# WorldTerrain)
 ## Water areas are rectangles; cut away the ground so only the pond shows.
 func _cut_water() -> void:
-	if _water_hold > 0:
-		return   # (whoever is adding platforms cuts it once they're all there)
-	water_version += 1
-	water_shapes.clear()
-	for wi in water.size():
-		var rect: Rect2 = water[wi]
-		var pieces: Array = [PackedVector2Array([rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)])]
-		for g in terrain.get_children():
-			# ground from the last world (or a removed platform) is still here until
-			# the end of the frame: it mustn't cut holes in the new water
-			if not (g is Ground) or g.is_queued_for_deletion():
-				continue
-			var next: Array = []
-			for pc in pieces:
-				for out in Geometry2D.clip_polygons(pc, g.poly):
-					# clockwise pieces are holes (ground sunk completely in the water)
-					if not Geometry2D.is_polygon_clockwise(out):
-						next.append(out)
-			pieces = next
-		for pc in pieces:
-			var x0 := INF
-			var x1 := -INF
-			for v in pc:
-				if absf(v.y - rect.position.y) < 1.0:
-					x0 = minf(x0, v.x)
-					x1 = maxf(x1, v.x)
-			water_shapes.append({"poly": pc, "top": rect.position.y, "x0": x0, "x1": x1, "kind": liquid_kinds[wi] if wi < liquid_kinds.size() else "water"})
+	WorldTerrain.cut_water(self)
 
 
 ## Adds a pool of water, lava or acid (its top edge is the surface).
 func add_liquid(r: Rect2, kind: String, group := 0) -> void:
-	water.append(r)
-	liquid_kinds.append(kind)
-	liquid_groups.append(group)
+	WorldTerrain.add_liquid(self, r, kind, group)
 
 
 ## "" if `p` is not in any liquid, else water / lava / acid.
@@ -221,116 +203,18 @@ func in_liquid(p: Vector2) -> String:
 	return ""
 
 
-# -------------------------------------------------------------- platforms
 func add_platform(poly: PackedVector2Array, style: String, group := 0) -> Ground:
-	if group == 0:
-		next_group += 1
-		group = next_group
-	var g := Ground.new()
-	g.setup(poly, Worlds.platform_style(style), group)
-	g.set_meta("group", group)
-	terrain.add_child(g)
-	var hp := _platform_hp(poly, style)
-	platforms.append({"poly": poly, "style": style, "group": group, "node": g, "hp": hp, "max": hp})
-	_cut_water()
-	wake_resting()   # (one built right on top of a knocked-out fighter pushes it out)
-	return g
-
-
-## How much blasting a platform you built takes before it breaks: wood least,
-## concrete most, and big ones more than small ones.
-const PLATFORM_HP := {"wood": 160.0, "stone": 320.0, "metal": 420.0, "steel": 420.0, "concrete": 520.0, "rock": 520.0}
-
-
-static func _platform_hp(poly: PackedVector2Array, style: String) -> float:
-	var area := 0.0
-	for i in poly.size():
-		area += poly[i].cross(poly[(i + 1) % poly.size()])
-	return float(PLATFORM_HP.get(style, 300.0)) * clampf(absf(area) * 0.5 / 5000.0, 0.6, 2.5)
-
-
-## Can blasts break this platform? Only ones you built (the world's own forts,
-## catwalks and islands stay), and not the walls of a tub (the lava would go
-## everywhere).
-func platform_breakable(pl: Dictionary) -> bool:
-	return int(pl.group) > 0 and not liquid_groups.has(int(pl.group))
+	return WorldTerrain.add_platform(self, poly, style, group)
 
 
 ## An explosion at `p` cracks the platforms you built nearby, and breaks them
 ## once they've taken enough (see Combat.blast).
 func damage_platforms(p: Vector2, rad: float, dmg: float) -> void:
-	if puppet:
-		return
-	var broke: Array = []
-	for pl in platforms:
-		if not platform_breakable(pl):
-			continue
-		var poly: PackedVector2Array = pl.poly
-		var d := 0.0
-		var near := p
-		if not Geometry2D.is_point_in_polygon(p, poly):
-			d = INF
-			for i in poly.size():
-				var q := Geometry2D.get_closest_point_to_segment(p, poly[i], poly[(i + 1) % poly.size()])
-				if p.distance_to(q) < d:
-					d = p.distance_to(q)
-					near = q
-		if d > rad:
-			continue
-		pl.hp = float(pl.get("hp", 100.0)) - dmg * 2.2 * (1.0 - d / rad)
-		if pl.hp <= 0.0:
-			broke.append(pl)
-		elif is_instance_valid(pl.node):
-			var before: int = pl.node.cracks
-			(pl.node as Ground).set_damage(1.0 - float(pl.hp) / maxf(1.0, float(pl.get("max", 100.0))))
-			if pl.node.cracks != before:
-				fx_event("plat_crack", {"p": near, "c": (pl.node as Ground).style.get("fill", Color.GRAY)})
-	for pl in broke:
-		_break_platform(pl)
+	WorldTerrain.damage_platforms(self, p, rad, dmg)
 
 
-## A platform blown to bits: whatever stood on it falls.
-func _break_platform(pl: Dictionary) -> void:
-	platforms.erase(pl)
-	var poly: PackedVector2Array = pl.poly
-	var box := Rect2(poly[0], Vector2.ZERO)
-	for v in poly:
-		box = box.expand(v)
-	var col: Color = Worlds.platform_style(String(pl.style)).get("fill", Color.GRAY)
-	if is_instance_valid(pl.node):
-		pl.node.queue_free()
-	fx_event("plat_break", {"p": box.get_center(), "w": box.size.x, "h": box.size.y, "c": col})
-	_cut_water.call_deferred()
-	wake_resting()
-
-
-func platform_at(p: Vector2) -> int:
-	for pl in platforms:
-		if Geometry2D.is_point_in_polygon(p, pl.poly):
-			return int(pl.group)
-	return 0
-
-
-## Removes every platform (and tub liquid) in a group.
-func remove_platform_group(group: int) -> void:
-	if group == 0:
-		return
-	var keep: Array = []
-	for pl in platforms:
-		if int(pl.group) == group:
-			if is_instance_valid(pl.node):
-				pl.node.queue_free()
-				fx_event("crumble", {"p": _poly_center(pl.poly)})
-		else:
-			keep.append(pl)
-	platforms = keep
-	for i in range(water.size() - 1, -1, -1):
-		if i < liquid_groups.size() and int(liquid_groups[i]) == group:
-			water.remove_at(i)
-			liquid_kinds.remove_at(i)
-			liquid_groups.remove_at(i)
-	_cut_water.call_deferred()
-	wake_resting()   # knocked-out fighters lying on it fall
+static func rect_poly(r: Rect2) -> PackedVector2Array:
+	return WorldTerrain.rect_poly(r)
 
 
 ## Knocked-out ragdolls lying still (frozen, see Fighter._rest_check) move
@@ -340,17 +224,6 @@ func wake_resting(p := Vector2.INF, r := 0.0, and_neighbours := true) -> void:
 	for f in fighters():
 		if f.is_resting() and (p == Vector2.INF or f.center().distance_to(p) < r + f.radius() * 2.0):
 			f.wake(and_neighbours)
-
-
-static func _poly_center(poly: PackedVector2Array) -> Vector2:
-	var c := Vector2.ZERO
-	for v in poly:
-		c += v
-	return c / maxf(1.0, poly.size())
-
-
-static func rect_poly(r: Rect2) -> PackedVector2Array:
-	return PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
 
 
 func set_gravity(id: String) -> void:
@@ -480,6 +353,17 @@ func lift_out_of_ground(pos: Vector2, r: float) -> Vector2:
 			return p
 		p.y -= 12.0
 	return pos
+
+
+## Heading down faster than SINK_FAST px/s (see _cleanup).
+func _sinking_fast(t) -> bool:
+	var b: RigidBody2D = null
+	if t is Fighter:
+		var f := t as Fighter
+		b = f.body if f.state == "stand" and is_instance_valid(f.body) else f.parts.get("torso") as RigidBody2D
+	elif t is Toy:
+		b = t
+	return b != null and is_instance_valid(b) and b.linear_velocity.y > SINK_FAST
 
 
 ## True if `p` is inside the solid ground (or a platform).
@@ -765,16 +649,7 @@ func clear_toys() -> void:
 
 ## Takes away every platform and pit the players built (the world's own stay).
 func clear_placed() -> void:
-	var groups := {}
-	# placed things have groups above 0; the world's own forts and catwalks are below 0
-	for pl in platforms:
-		if int(pl.group) > 0:
-			groups[int(pl.group)] = true
-	for i in liquid_groups.size():
-		if int(liquid_groups[i]) > 0:
-			groups[int(liquid_groups[i])] = true
-	for g in groups:
-		remove_platform_group(g)
+	WorldTerrain.clear_placed(self)
 
 
 func get_thing(uid: int):
@@ -790,47 +665,18 @@ func _pos_of(t) -> Vector2:
 
 
 # ------------------------------------------------------------------ links
+# (making links, and the power along wires, are in world_links.gd: WorldLinks)
 func add_link(kind: String, a: PhysicsBody2D, b: PhysicsBody2D, pa: Vector2, pb: Vector2) -> Link:
-	if a == null or b == null or a == b:
-		return null
-	var l := Link.new()
-	l.setup(kind, a, b, pa, pb)
-	l.uid_a = _owner_uid(a)
-	l.uid_b = _owner_uid(b)
-	if l.uid_a == l.uid_b and l.uid_a != 0:
-		return null
-	l.build(pin_parent)
-	links.append(l)
-	for body in [a, b]:
-		if body is FighterPart and body.fighter:
-			body.fighter.wake()   # (a knocked-out fighter lying still: the rope or glue can move it now)
-	return l
+	return WorldLinks.add_link(self, kind, a, b, pa, pb)
 
 
-## Toy `a` passes through toy `b` from now on, and goes on doing so after a
-## save, an undo or loading (the Spinny Wheel's arms and seats turn in front
-## of its post). Kept in `a.extra.nc`: asking the physics for a body's list
-## complains about bodies that have gone since.
+## Toy `a` passes through toy `b` from now on (and after a save, an undo or loading).
 func no_collide(a: Toy, b: Toy) -> void:
-	a.add_collision_exception_with(b)
-	if not a.extra.has("nc"):
-		a.extra.nc = []
-	if not (a.extra.nc as Array).has(b.uid):
-		(a.extra.nc as Array).append(b.uid)
-
-
-func _owner_uid(body: PhysicsBody2D) -> int:
-	if body is JellyPoint:
-		return body.wiggly.uid
-	if body is FighterPart:
-		return body.fighter.uid
-	if body is Toy:
-		return body.uid
-	return 0
+	WorldLinks.no_collide(a, b)
 
 
 func links_of(uid: int) -> Array:
-	return links.filter(func(l): return l.uid_a == uid or l.uid_b == uid)
+	return WorldLinks.links_of(self, uid)
 
 
 ## The physics body under `p` for linking: a toy, or the nearest edge point of a Wiggly.
@@ -876,740 +722,56 @@ func _holder_or(t: Toy):
 	return t
 
 
-# --------------------------------------------------------------- commands
+# ------------------------------------------------------ commands and grabs
+# (every command, and grabbing and dragging things, are in world_commands.gd:
+# WorldCommands)
 ## Everything a player can do. pid 0 = the local/host player.
 func apply_command(pid: int, c: Dictionary) -> void:
-	var t = things.get(int(c.get("uid", -1)))
-	var at := Vector2(float(c.get("x", 0.0)), float(c.get("y", 0.0)))
-	match String(c.get("cmd", "")):
-		"spawn":
-			push_undo()
-			var made = spawn(String(c.id), at, String(c.get("team", "")), String(c.get("pers", "")))
-			if made:
-				fx_event("spawn", {"p": at})
-				if made is Wiggly:
-					Settings.award("hello")
-					if count_wigglies() >= 12:
-						Settings.award("family")
-		"grab":
-			if t:
-				grab_start(pid, t, at)
-		"drag":
-			if grabs.has(pid):
-				grabs[pid].target = at
-				grabs[pid].whole = bool(c.get("whole", false))
-				grabs[pid].seen = Time.get_ticks_msec()
-		"release":
-			grab_end(pid)
-		"use":
-			if t is Toy or t is Wiggly or t is Fighter:
-				push_undo("use %d" % t.uid)
-			if t is Toy:
-				ToyLogic.use(self, t)
-			elif t is Wiggly:
-				t.use_special()
-			elif t is Fighter and t.state == "stand" and not t.helpless():
-				var en = t._nearest(func(o): return t.enemy_of(o), 900.0)
-				var aim_at: Vector2 = en.center() if en else t.center() + Vector2(t.facing * 200.0, -20)
-				t.aim = t._aim_at(aim_at, t._wtype())
-				t._attack(aim_at, t._wtype())
-		"team":
-			if t is Fighter:
-				push_undo("team %d" % t.uid)
-				t.team = String(c.get("team", t.team))
-				t.target = null
-		"pers":
-			if t is Fighter:
-				push_undo("pers %d" % t.uid)
-				t.pers = String(c.get("pers", t.pers))
-				t.home = t.center()
-				t.target = null
-		"give":
-			if t is Toy and (t.def.has("weapon") or t.def.has("armor")):
-				var best: Fighter = null
-				var bd := 260.0
-				for f in fighters():
-					if f.state == "stand" and not f.beast and f.center().distance_to(t.global_position) < bd:
-						bd = f.center().distance_to(t.global_position)
-						best = f
-				if best and best.equip(t):
-					Settings.count("gifts", "armory", 5)
-				else:
-					fx_event("nope", {})
-		"drop":
-			if t is Fighter:
-				t._drop_weapon(Vector2(t.facing * 150.0, -200))
-				t.weapon_id = ""
-		"revive":
-			# just this one fighter (✨ Heal Everyone is the spell for everybody)
-			if t is Fighter:
-				t.revive()
-				fx_event("heal", {"p": t.center()})
-		"fight":
-			battle_on = bool(c.get("on", true))
-			for f in fighters():
-				f.target = null
-			fx_event("battle_start" if battle_on else "click", {})
-			world_changed.emit(false)
-		"platform":
-			var a := Vector2(c.x0, c.y0)
-			var b := Vector2(c.x1, c.y1)
-			var r := Rect2(a, Vector2.ZERO).expand(b)
-			if r.size.x < 12.0:
-				r = r.grow_individual(6, 0, 6, 0)
-			if r.size.y < 12.0:
-				r = r.grow_individual(0, 6, 0, 6)
-			push_undo()
-			add_platform(rect_poly(r), String(c.get("style", "wood")))
-			fx_event("build", {"p": r.get_center()})
-			Settings.count("platforms", "builder", 10)
-		"unplatform":
-			var g := platform_at(at)
-			if g != 0:
-				push_undo()
-				remove_platform_group(g)
-		"detonate":
-			for o in toys():
-				if o.id == "c4":
-					ToyLogic.trigger(self, o)
-		"link":
-			var a := _resolve_body(int(c.get("a", -1)), int(c.get("ai", -1)), Vector2(c.ax, c.ay))
-			var b := _resolve_body(int(c.get("b", -1)), int(c.get("bi", -1)), Vector2(c.bx, c.by))
-			if a and b:
-				push_undo()
-				var l := add_link(String(c.kind), a, b, Vector2(c.ax, c.ay), Vector2(c.bx, c.by))
-				if l:
-					fx_event("link", {"p": Vector2(c.bx, c.by), "k": String(c.kind)})
-					var src = things.get(l.uid_a)
-					var dst = things.get(l.uid_b)
-					if l.kind == "wire" and src is Toy and dst is Toy and (ToyLogic.is_source(src) or ToyLogic.is_source(dst)):
-						Settings.award("inventor")
-		"unlink":
-			if t:
-				push_undo()
-				for l in links_of(t.uid):
-					l.destroy()
-				links = links.filter(func(l): return not l.broken)
-				fx_event("click", {"p": _pos_of(t)})
-		"paint":
-			if t:
-				push_undo("paint %d" % t.uid)
-				t.paint = Color(String(c.get("color", "ffffff")))
-				if t is Fighter:
-					t.queue_redraw()
-				fx_event("paint", {"p": _pos_of(t), "c": t.paint})
-				Settings.count("paints", "painter", 10)
-		"erase":
-			if t:
-				push_undo()
-				remove(t.uid)
-		"clone":
-			if t:
-				push_undo()
-				clone(t)
-		"resize":
-			if t:
-				push_undo("resize %d" % t.uid)
-			if t is Fighter:
-				resize_fighter(t, float(c.get("s", 1.0)))
-			elif t is Toy:
-				t.set_size(float(c.get("s", 1.0)))
-			elif t is Wiggly:
-				resize_wiggly(t, float(c.get("s", 1.0)))
-		"flip":
-			if t is Toy:
-				t.set_facing(-t.facing)
-			elif t is Fighter:
-				t.facing = -t.facing
-		"nail":
-			if t is Toy and not t.extra.has("held_by"):
-				t.nailed = not t.nailed
-				t.update_freeze()
-				fx_event("nail", {"p": t.global_position, "on": t.nailed})
-		"rotate":
-			if t is Toy:
-				if t.freeze or paused:
-					t.rotation += float(c.get("d", 0.0)) * 0.12
-				else:
-					t.angular_velocity = float(c.get("d", 0.0)) * 5.0
-		"play":
-			for w in wigglies():
-				if w.player_id == pid:
-					w.player_id = -1
-			for f in fighters():
-				if f.player_id == pid:
-					f.player_id = -1
-					f.want_attack = false
-					f.move_input = 0.0
-			if t is Wiggly:
-				t.player_id = pid
-				t.idle_t = 0.0
-			elif t is Fighter:
-				t.player_id = pid
-		"input":
-			for w in wigglies():
-				if w.player_id == pid:
-					w.move_input = clampf(float(c.get("move", 0.0)), -1.0, 1.0)
-					if bool(c.get("jump", false)):
-						w.want_jump = true
-					if bool(c.get("special", false)):
-						w.use_special()
-			for f in fighters():
-				if f.player_id == pid:
-					f.move_input = clampf(float(c.get("move", 0.0)), -1.0, 1.0)
-					if bool(c.get("jump", false)):
-						f.want_jump = true
-					if c.has("attack"):
-						f.want_attack = bool(c.attack)
-					if c.has("ax"):
-						f.aim_point = Vector2(c.ax, c.ay)
-		"magic":
-			push_undo()
-			cast_magic(String(c.get("id", "")))
-		"gravity":
-			set_gravity(String(c.get("id", "normal")))
-			world_changed.emit(false)
-		"night":
-			set_night(bool(c.get("on", false)))
-			world_changed.emit(false)
-		"pause":
-			set_paused(bool(c.get("on", false)))
-			world_changed.emit(false)
-		"speed":
-			set_speed(float(c.get("v", 1.0)))
-			world_changed.emit(false)
-		"world":
-			if allow_world_actions or pid == 0:
-				load_world(String(c.get("id", "meadow")))
-		"clear":
-			if allow_world_actions or pid == 0:
-				clear_toys()
-				world_changed.emit(true)
-		"undo":
-			if allow_world_actions or pid == 0:
-				undo()
-
-
-func _resolve_body(uid: int, idx: int, at := Vector2.INF) -> PhysicsBody2D:
-	var t = things.get(uid)
-	if t is Toy:
-		return t
-	if t is Fighter:
-		return t.body_near(at if at != Vector2.INF else t.center())
-	if t is Wiggly and not t.points.is_empty():
-		return t.points[clampi(idx, 0, t.points.size() - 1)]
-	return null
-
-
-func clone(t) -> void:
-	if t is Fighter:
-		var f := spawn_fighter(t.type, t.center() + Vector2(t.radius() + 30.0, -10), t.team, t.pers, t.size / float(t.def.get("scale", 1.0)))
-		if f:
-			f.paint = t.paint
-	elif t is Wiggly:
-		var w := spawn_wiggly(t.kind, t.com + Vector2(t.radius() * 2.2, -20), t.size)
-		if w:
-			w.paint = t.paint
-	elif t is Toy and t.parent_uid == 0:
-		var made = spawn(t.id, t.global_position + Vector2(t.bound_radius() * 1.6 + 10, -20))
-		if made is Toy:
-			made.paint = t.paint
-			made.set_size(t.size_scale)
-			made.rotation = t.rotation
-	fx_event("spawn", {"p": _pos_of(t)})
-
-
-# ------------------------------------------------------------------ grabs
-func grab_start(pid: int, t, at: Vector2) -> void:
-	if t is Toy and t.extra.has("held_by"):
-		return   # a weapon in someone's hands goes where they go
-	var g := {"uid": t.uid, "target": at, "whole": false, "seen": Time.get_ticks_msec(), "pull": 0.0}
-	if t is Wiggly:
-		g.idx = t.nearest_point(at)
-		g.off = t.pts[g.idx] - at
-		t.grabbed_by[pid] = true
-		t.idle_t = 0.0
-	elif t is Fighter:
-		t.wake()
-		if t.frozen_t > 0.0:
-			t.thaw(true)   # grabbing an ice block cracks it open
-		if t.state == "stand":
-			t.ragdoll()
-		var part: PhysicsBody2D = t.body_near(at)
-		g.part = part
-		g.local = part.to_local(at) if part else Vector2.ZERO
-		t.held_by[pid] = true
-	else:
-		g.local = t.to_local(at)
-	grabs[pid] = g
-	fx_event("grab", {"p": at})
+	WorldCommands.apply(self, pid, c)
 
 
 func grab_end(pid: int) -> void:
-	if not grabs.has(pid):
-		return
-	var g: Dictionary = grabs[pid]
-	grabs.erase(pid)
-	var t = things.get(g.uid)
-	if t is Fighter:
-		t.held_by.erase(pid)
-		t.down_t = 0.6
-		t.wake()
-	elif t is Toy and (t.def.has("weapon") or t.def.has("armor")):
-		# drop a weapon or armor on a person to give it to them
-		for f in fighters():
-			if f.state == "stand" and not f.beast and f.hit_test(t.global_position, 18.0):
-				if f.equip(t):
-					Settings.count("gifts", "armory", 5)
-				break
-	if t is Wiggly:
-		t.grabbed_by.erase(pid)
-		# Drop a Wiggly onto one of the same kind to combine them.
-		for o in wigglies():
-			if o != t and o.kind == t.kind and o.com.distance_to(t.com) < (o.radius() + t.radius()) * 0.85 and not _just_popped(o, t):
-				merge_wigglies(o, t)
-				break
+	WorldCommands.grab_end(self, pid)
 
 
-func _drive_grabs(dt: float) -> void:
-	var now := Time.get_ticks_msec()
-	for pid in grabs.keys():
-		var g: Dictionary = grabs[pid]
-		var t = things.get(g.uid)
-		if t == null or (pid != 0 and now - int(g.seen) > 1500):
-			grab_end(pid)
-			continue
-		var target: Vector2 = g.target
-		if t is Wiggly:
-			if t.points.is_empty():
-				continue
-			if paused:
-				# physics is stopped, so pushing won't move it: carry the whole Wiggly
-				var mv: Vector2 = target + g.off - t.points[int(g.idx)].global_position
-				t.teleport(t.com + mv)
-				continue
-			if g.whole or t.frozen_t > 0.0:
-				var d: Vector2 = target - t.com
-				for p in t.points:
-					p.linear_velocity = d * 14.0
-				continue
-			var n := Wiggly.N
-			for k in [-1, 0, 1]:
-				var i: int = (int(g.idx) + k + n) % n
-				var body: JellyPoint = t.points[i]
-				var want: Vector2 = target + g.off
-				var err := want - body.global_position
-				body.linear_velocity = (err * (22.0 if k == 0 else 12.0)).limit_length(2800.0)
-			if t.stretch > SPLIT_STRETCH:
-				g.pull += dt
-				if g.pull > 0.12:
-					split_wiggly(t, pid)
-			else:
-				g.pull = 0.0
-		elif t is Fighter:
-			var part = g.get("part")
-			if part == null or not is_instance_valid(part):
-				if t.state == "stand":
-					t.ragdoll()
-				part = t.body_near(target)
-				g.part = part
-				g.local = Vector2.ZERO
-			if part:
-				var pa: Vector2 = part.to_global(g.local)
-				if paused:
-					# physics is stopped: carry every piece of the ragdoll along
-					for b in t.all_bodies():
-						b.global_position += target - pa
-				else:
-					part.linear_velocity = ((target - pa) * 16.0).limit_length(2600.0)
-				t.down_t = 0.0
-		elif t is Toy:
-			var anchor: Vector2 = t.to_global(g.local)
-			var delta: Vector2 = target - anchor
-			wake_resting(t.global_position, t.bound_radius() + 40.0)   # (dragging it out from under one)
-			if t.freeze or paused:
-				t.global_position += delta
-				if t.freeze:
-					PhysicsServer2D.body_set_state(t.get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM, t.global_transform)
-			else:
-				t.linear_velocity = (delta * 16.0).limit_length(2600.0)
-				t.angular_velocity *= 0.85
-
-
-# ---------------------------------------------------------- Wiggly magic
+# ---------------------------------------------------------- Wiggly powers
+# (popping and merging Wigglies, zaps, heat, ice, ground pounds, warps and
+# pushes are in world_powers.gd: WorldPowers)
 func split_wiggly(w: Wiggly, pid := -1) -> void:
-	if w.size < 0.62:
-		return
-	var s: float = w.size * 0.74
-	var c: Vector2 = w.com
-	var g = grabs.get(pid)
-	var pull_dir := Vector2.RIGHT
-	if g != null:
-		pull_dir = (Vector2(g.target) - c).normalized()
-	var kind := w.kind
-	var paint := w.paint
-	var vel := w.com_vel
-	remove(w.uid, false)
-	var w1 := spawn_wiggly(kind, c - pull_dir * 18.0 * s, s)
-	var w2 := spawn_wiggly(kind, c + pull_dir * 30.0 * s, s)
-	for nw in [w1, w2]:
-		if nw:
-			nw.paint = paint
-			nw.dizzy_t = 1.2
-			nw.set_meta("popped_t", nw.t)
-	if w1:
-		w1.set_velocity(vel - pull_dir * 260.0)
-	if w2:
-		w2.set_velocity(vel + pull_dir * 260.0)
-		# remove() let go of the old Wiggly, so keep hold of this half instead
-		if pid >= 0 and g != null:
-			grab_start(pid, w2, Vector2(g.target))
-	fx_event("split", {"p": c, "k": kind})
-	Settings.award("pop")
-
-
-## The two halves of a Wiggly that just popped: letting go of one right away
-## mustn't stick them straight back together.
-func _just_popped(a: Wiggly, b: Wiggly) -> bool:
-	return a.t - float(a.get_meta("popped_t", -INF)) < 1.0 and b.t - float(b.get_meta("popped_t", -INF)) < 1.0
+	WorldPowers.split_wiggly(self, w, pid)
 
 
 func merge_wigglies(a: Wiggly, b: Wiggly) -> void:
-	var s := minf(2.2, sqrt(a.size * a.size + b.size * b.size))
-	var c := (a.com * a.size + b.com * b.size) / (a.size + b.size)
-	var kind := a.kind
-	var paint := a.paint
-	remove(a.uid, false)
-	remove(b.uid, false)
-	var w := spawn_wiggly(kind, c + Vector2(0, -10), s)
-	if w:
-		w.paint = paint
-		w.party_t = 1.5
-	fx_event("merge", {"p": c, "k": kind})
-
-
-func resize_wiggly(w: Wiggly, s: float) -> void:
-	var c := w.com
-	var kind := w.kind
-	var paint := w.paint
-	var pid := w.player_id
-	remove(w.uid, false)
-	var nw := spawn_wiggly(kind, c, s)
-	if nw:
-		nw.paint = paint
-		nw.player_id = pid
+	WorldPowers.merge_wigglies(self, a, b)
 
 
 func zap_area(c: Vector2, rad: float, from: Wiggly) -> void:
-	var hits: Array = []
-	var zapped: Array = []
-	var metal: Array = []
-	for t in all_things():
-		if t == from:
-			continue
-		var p := _pos_of(t)
-		if p.distance_to(c) > rad:
-			continue
-		if t is Toy:
-			t.zap_power = 3.0
-			t.electric = 1.0
-			hits.append(p)
-			if t.def.get("metal", false):
-				metal.append(t)
-		elif t is Wiggly:
-			t.electric = 1.2
-			hits.append(p)
-		elif t is Fighter and t.alive() and t.frozen_t <= 0.0:
-			zapped.append(t)
-			hits.append(p)
-	fx_event("zap", {"p": c, "hits": hits, "r": rad})
-	_zap_water(c, rad, from, zapped)
-	_zap_metal(metal, zapped)
-	if not zapped.is_empty():
-		_zap_chain(zapped)
+	WorldPowers.zap_area(self, c, rad, from)
 
 
-## A zap that reaches a pond runs through all of it: everyone and everything
-## in the water gets it (up to the knees counts).
-func _zap_water(c: Vector2, rad: float, from, zapped: Array) -> void:
-	for i in water.size():
-		if i < liquid_kinds.size() and String(liquid_kinds[i]) != "water":
-			continue
-		var r: Rect2 = water[i]
-		var near := Vector2(clampf(c.x, r.position.x, r.end.x), clampf(c.y, r.position.y, r.end.y))
-		if near.distance_to(c) > rad:
-			continue
-		var pool := r.grow_individual(0.0, 50.0, 0.0, 0.0)
-		for t in all_things():
-			if t == from or not pool.has_point(_pos_of(t)):
-				continue
-			if t is Fighter:
-				if t.alive() and t.frozen_t <= 0.0 and not zapped.has(t):
-					t.wet = maxf(t.wet, 1.0)
-					zapped.append(t)
-			elif t is Wiggly:
-				t.electric = 1.2
-			elif t is Toy:
-				t.zap_power = 3.0
-				t.electric = 1.0
-		fx_event("zap_pool", {"p": near, "x0": r.position.x, "x1": r.end.x, "y": r.position.y})
-
-
-var _metal_q: PhysicsShapeQueryParameters2D = null
-
-
-## ...and along metal: from the metal toys it hit to every metal toy touching
-## them (a row of beams, a machine standing on one), and into anyone touching
-## any of it (standing on a metal beam, leaning on a barrel).
-func _zap_metal(start: Array, zapped: Array) -> void:
-	if start.is_empty():
-		return
-	if _metal_q == null:
-		_metal_q = PhysicsShapeQueryParameters2D.new()
-		_metal_q.collision_mask = Toy.LAYER_TOYS | Fighter.LAYER
-		_metal_q.margin = 4.0
-	var space := get_world_2d().direct_space_state
-	var seen := {}
-	for t in start:
-		seen[t] = true
-	var queue: Array = start.duplicate()
-	var pairs: Array = []
-	var i := 0
-	while i < queue.size() and i < 40:
-		var t: Toy = queue[i]
-		i += 1
-		if not is_instance_valid(t):
-			continue
-		var cs: CollisionShape2D = null
-		for k in t.get_children():
-			if k is CollisionShape2D and not k.is_queued_for_deletion():
-				cs = k
-				break
-		if cs == null or cs.shape == null:
-			continue
-		_metal_q.shape = cs.shape
-		_metal_q.transform = t.global_transform * cs.transform
-		_metal_q.exclude = [t.get_rid()]
-		for hit in space.intersect_shape(_metal_q, 12):
-			var o = hit.collider
-			if o is Toy and o.def.get("metal", false) and not seen.has(o) and things.get(o.uid) == o:
-				seen[o] = true
-				o.electric = 1.0
-				o.zap_power = 3.0
-				queue.append(o)
-				pairs.append([t.global_position, o.global_position])
-			elif o is FighterPart and o.fighter and o.fighter.alive() and o.fighter.frozen_t <= 0.0 and not zapped.has(o.fighter):
-				zapped.append(o.fighter)
-				pairs.append([t.global_position, o.fighter.center()])
-	if not pairs.is_empty():
-		fx_event("zap_metal", {"p": pairs[0][0], "pairs": pairs})
-
-
-## Twinkle's warp takes the fighters close by along: each one pops out high in
-## the air above where it stood, and comes tumbling down (softly).
 func warp_fighters(c: Vector2, rad: float) -> void:
-	var up := -gravity_dir() if gravity_dir() != Vector2.ZERO else Vector2.UP
-	var n := 0
-	for f in fighters():
-		if n >= 4:
-			break
-		if not f.alive() or f.frozen_t > 0.0 or f.center().distance_to(c) > rad + f.radius() * 0.5:
-			continue
-		var at: Vector2 = f.center()
-		var to := lift_out_of_ground(at + up * randf_range(300.0, 400.0) + Vector2(randf_range(-60.0, 60.0), 0.0), f.radius() * 0.5)
-		f.warp_to(to)
-		fx_event("warp", {"a": at, "b": to, "r": f.radius()})
-		n += 1
-
-
-## Zappy's zap jumps on from soldier to soldier, further through wet ones
-## (a whole pond of them) and ones in metal armor. Up to 12 in all.
-func _zap_chain(first: Array) -> void:
-	var hit := {}
-	for f in first:
-		hit[f] = true
-	var others: Array = fighters().filter(func(o): return o.alive() and o.frozen_t <= 0.0 and not hit.has(o))
-	var queue: Array = first.duplicate()
-	var pairs: Array = []
-	var i := 0
-	while i < queue.size() and hit.size() < 12:
-		var a: Fighter = queue[i]
-		i += 1
-		var ac := a.center()
-		var reach := 70.0 + a.radius() * 0.5 + (110.0 if a.wet > 0.2 else 0.0) + 30.0 * minf(2.0, a.metal())
-		for o in others:
-			if hit.has(o):
-				continue
-			var oc: Vector2 = o.center()
-			var r2 := reach + (60.0 if o.wet > 0.2 and a.wet > 0.2 else 0.0) + 20.0 * minf(2.0, o.metal())
-			if ac.distance_to(oc) < r2:
-				hit[o] = true
-				queue.append(o)
-				pairs.append([ac, oc])
-				if hit.size() >= 12:
-					break
-	for f in hit:
-		f.zap()
-	if not pairs.is_empty():
-		fx_event("zap_chain", {"p": pairs[0][0], "pairs": pairs})
+	WorldPowers.warp_fighters(self, c, rad)
 
 
 func heat_area(c: Vector2, rad: float, from: Wiggly) -> void:
-	for t in all_things():
-		if t == from:
-			continue
-		var p := _pos_of(t)
-		if p.distance_to(c) > rad:
-			continue
-		if t is Toy:
-			if t.frozen_t > 0.0:
-				t.frozen_t = 0.01
-			ToyLogic.heat(self, t)
-		elif t is Wiggly and t.frozen_t > 0.0:
-			t.set_frozen(0.0)
-		elif t is Fighter:
-			t.ignite(3.0)   # (melts the ice instead if it's frozen)
-	fx_event("heat", {"p": c, "r": rad})
+	WorldPowers.heat_area(self, c, rad, from)
 
 
 func freeze_area(c: Vector2, rad: float, sec: float, from = null) -> void:
-	var mid_air := false
-	for t in all_things():
-		if t == from:
-			continue
-		var p := _pos_of(t)
-		if p.distance_to(c) > rad:
-			continue
-		if t is Toy and not t.nailed:
-			if t.get_contact_count() == 0 and t.linear_velocity.length() > 60.0:
-				mid_air = true
-			t.frozen_t = sec
-			t.update_freeze()
-		elif t is Wiggly:
-			if not t.grounded:
-				mid_air = true
-			t.set_frozen(sec)
-		elif t is Fighter and t.alive():
-			if t.state == "stand" and not t.grounded and not t.def.get("flies", false):
-				mid_air = true
-			t.set_frozen(sec)
-	if mid_air:
-		Settings.award("freeze")
-	fx_event("freeze", {"p": c, "r": rad})
+	WorldPowers.freeze_area(self, c, rad, sec, from)
 
 
 func ground_pound(c: Vector2, rad: float, from: Wiggly) -> void:
-	push_away(c, rad, 950.0, from)
-	# squads standing nearby get launched (a T-Rex only wobbles unless it's right there)
-	var power := 1000.0 * sqrt(from.size) if from else 1000.0
-	var up := -gravity_dir() if gravity_dir() != Vector2.ZERO else Vector2.UP
-	for f in fighters():
-		var d: Vector2 = f.center() - c
-		var dist := d.length()
-		if dist > rad + f.radius() * 0.5:
-			continue
-		var k := pow(clampf(1.0 - dist / (rad + f.radius() * 0.5), 0.0, 1.0), 0.7)
-		var dir := ((d / dist if dist > 1.0 else up) + up * 0.9).normalized()
-		f.shove(dir * power * k / sqrt(f._mass_k()), 8.0 * k)
-	fx_event("pound", {"p": c, "r": rad})
+	WorldPowers.ground_pound(self, c, rad, from)
 
 
 ## Throws everything near `c` outward (heavier things move less).
 func push_away(c: Vector2, rad: float, power: float, skip = null) -> void:
-	var up := -gravity_dir() if gravity_dir() != Vector2.ZERO else Vector2.UP
-	for t in all_things():
-		if t == skip:
-			continue
-		var p := _pos_of(t)
-		var d := p - c
-		var dist := d.length()
-		if dist > rad:
-			continue
-		var f := pow(1.0 - dist / rad, 0.7)
-		var dir := d / dist if dist > 1.0 else up
-		var dv := dir * power * f + up * power * 0.3 * f
-		if t is Toy and not t.freeze:
-			t.linear_velocity += dv * clampf(3.0 / t.mass, 0.12, 1.4)
-			t.angular_velocity += randf_range(-6, 6) * f
-		elif t is Wiggly and t.frozen_t <= 0.0:
-			t.add_velocity(dv)
-			if f > 0.5:
-				t.dizzy_t = 2.0
-
-
-## Wigglies don't push standing fighters around (a squishy jelly on a soldier's
-## head would bounce them about), but a big or fast one rolling into them
-## bowls them over, and a sticky Gummy grabs on. One shape check per Wiggly
-## that's moving fast enough (or sticky), so even a big army costs little.
-func _wigglies_vs_fighters() -> void:
-	for w in wiggly_layer.get_children():
-		if not (w is Wiggly) or things.get(w.uid) != w or w.points.is_empty() or w.frozen_t > 0.0:
-			continue
-		var sticky: bool = w.kind == "gummy" and w.special_t > 0.0 and w.stuck_links < 3
-		var bouncy: bool = w.kind == "bloop"   # (a living trampoline: see _trampoline)
-		var m: float = float(w.def.mass) * Wiggly.N * w.size * w.size
-		var spd: float = w.com_vel.length()
-		if not sticky and not bouncy and spd * m / (m + 1.0) < 120.0:
-			continue   # too small or slow to bump anybody
-		if _jelly_q == null:
-			_jelly_q = PhysicsShapeQueryParameters2D.new()
-			_jelly_q.shape = CircleShape2D.new()
-			_jelly_q.collision_mask = Fighter.LAYER
-		(_jelly_q.shape as CircleShape2D).radius = w.radius() * 0.95 + 4.0
-		_jelly_q.transform = Transform2D(0.0, w.com)
-		for hit in get_world_2d().direct_space_state.intersect_shape(_jelly_q, 8):
-			var b = hit.collider
-			if not (b is FighterPart) or b.part != "body" or b.fighter == null:
-				continue
-			var f: Fighter = b.fighter
-			var d: Vector2 = f.center() - w.com
-			if bouncy and _trampoline(w, f, b, d):
-				continue
-			if not sticky and spd * m / (m + 1.0) < 120.0:
-				continue   # (a slow Bloop just being a trampoline)
-			var dir := d.normalized() if d.length() > 1.0 else Vector2(signf(w.com_vel.x), 0)
-			if sticky:
-				var jp: JellyPoint = w.points[w.nearest_point(f.center())]
-				if not links.any(func(l): return l.a == jp and l.b == b):
-					sticky_touch(w, jp, b, jp.global_position)
-			var rel: float = (w.com_vel - (b as RigidBody2D).linear_velocity).dot(dir)
-			if rel > 60.0:
-				f.jelly_bump(w, rel, dir)
-
-
-## Someone coming down on top of a Bloop: BOING! It throws them up high (a
-## living trampoline) and squashes down under them. True if it did.
-func _trampoline(w: Wiggly, f: Fighter, b, d: Vector2) -> bool:
-	var up := -gravity_dir() if gravity_dir() != Vector2.ZERO else Vector2.UP
-	# (only landing on top: feet above its middle, not standing beside it)
-	var feet := d - up * f.half_size().y
-	if feet.dot(up) < w.radius() * 0.25 or absf(feet.dot(up.orthogonal())) > w.radius() * 0.8:
-		return false
-	var v: Vector2 = (b as RigidBody2D).linear_velocity
-	var falling := -(v - w.com_vel).dot(up)
-	if falling < 140.0 or not f.bounce(up * clampf(falling * 1.1 + 420.0, 650.0, 1300.0)):
-		return false
-	w.add_velocity(-up * minf(falling, 600.0) * 0.45)
-	fx_event("boing", {"p": w.com + up * w.radius(), "big": true})
-	return true
+	WorldPowers.push_away(self, c, rad, power, skip)
 
 
 func sticky_touch(w: Wiggly, p: JellyPoint, other, at: Vector2) -> void:
-	if w.stuck_links >= 3 or not (other is PhysicsBody2D):
-		return
-	if other is JellyPoint and other.wiggly == w:
-		return
-	for l in links:
-		if (l.a == p and l.b == other) or (l.a == other and l.b == p):
-			return
-	if other is StaticBody2D:
-		return
-	var l := add_link("glue", p, other, p.global_position, at)
-	if l:
-		w.stuck_links += 1
-		fx_event("glue", {"p": at})
-		if other is FighterPart and other.fighter:
-			other.fighter.stick(3.0)   # and it stays slow while Gummy hangs on (see _physics_process)
+	WorldPowers.sticky_touch(self, w, p, other, at)
 
 
 # -------------------------------------------------------------- impacts
@@ -1728,7 +890,7 @@ func _physics_process(dt: float) -> void:
 	if puppet:
 		return
 	if paused:
-		_drive_grabs(dt)   # everything is stopped, but you can still move things around
+		WorldCommands.drive_grabs(self, dt)   # everything is stopped, but you can still move things around
 		return
 	if profiling:
 		_prof_t = Time.get_ticks_usec()
@@ -1741,7 +903,7 @@ func _physics_process(dt: float) -> void:
 			w.physics_step(dt)
 	if profiling:
 		_lap("wigglies")
-	_wigglies_vs_fighters()
+	WorldPowers.wigglies_vs_fighters(self)
 	if profiling:
 		_lap("wigglies_vs_fighters")
 	for f in fighters():
@@ -1752,7 +914,7 @@ func _physics_process(dt: float) -> void:
 	if profiling:
 		_lap("hazards")
 	Worlds.tick(self, dt)
-	_step_strikes(dt)
+	WorldMagic.step_strikes(self, dt)
 	_battle_t -= dt
 	if _battle_t <= 0.0:
 		_battle_t = 0.5
@@ -1765,24 +927,13 @@ func _physics_process(dt: float) -> void:
 	elif last_winner != "" or teams_up < 2:
 		quiet_t = 0.0
 		brave = false
-	_drive_grabs(dt)
+	WorldCommands.drive_grabs(self, dt)
 	if profiling:
 		_lap("battle_check")
-	for l in links:
-		if not l.broken and not l.step(dt):
-			fx_event("snap", {"p": l.world_b() if is_instance_valid(l.b) else Vector2.ZERO})
-			l.destroy()
-		elif l.kind == "glue" and l.a is JellyPoint and l.b is FighterPart and l.b.fighter:
-			l.b.fighter.goo_t = maxf(l.b.fighter.goo_t, 0.3)   # a Wiggly stuck on: slow going
-			if l.a.wiggly.special_t <= 0.0 and randf() < dt * 0.4:
-				# Sticky Mode is over: sooner or later they shake the Gummy off
-				fx_event("snap", {"p": l.world_b()})
-				l.destroy()
-	if links.any(func(l): return l.broken):
-		links = links.filter(func(l): return not l.broken)
+	WorldLinks.step(self, dt)
 	if profiling:
 		_lap("links")
-	_step_power()
+	WorldLinks.step_power(self)
 	if profiling:
 		_lap("power")
 	cars_on = 0
@@ -1790,8 +941,8 @@ func _physics_process(dt: float) -> void:
 		ToyLogic.step(self, t, dt)
 	if profiling:
 		_lap("toys")
-	_step_water(dt)
-	_step_magic(dt)
+	WorldTerrain.step_water(self, dt)
+	WorldMagic.step(self, dt)
 	if profiling:
 		_lap("water_magic")
 	_cleanup()
@@ -1809,210 +960,13 @@ func _lap(part: String) -> void:
 	_prof_t = now
 
 
-## Power flows from active sources through wires to everything connected.
-## A switch, button or timer that is off blocks the flow.
-func _step_power() -> void:
-	var ts := toys()
-	for t in ts:
-		t.powered = false
-	var adj := {}
-	for l in links:
-		if l.kind != "wire" or l.broken:
-			l.signal_on = false
-			continue
-		if not adj.has(l.uid_a):
-			adj[l.uid_a] = []
-		adj[l.uid_a].append(l.uid_b)
-		if not adj.has(l.uid_b):
-			adj[l.uid_b] = []
-		adj[l.uid_b].append(l.uid_a)
-	var queue: Array = []
-	for t in ts:
-		if ToyLogic.emits(t):
-			queue.append(t.uid)
-	var seen := {}
-	while not queue.is_empty():
-		var u: int = queue.pop_back()
-		if seen.has(u):
-			continue
-		seen[u] = true
-		var t = things.get(u)
-		if t is Toy and not ToyLogic.emits(t):
-			t.powered = true
-			if ToyLogic.is_source(t):
-				continue   # an "off" switch/button/timer stops the power here
-		for v in adj.get(u, []):
-			if not seen.has(v):
-				queue.append(v)
-	for l in links:
-		if l.kind == "wire":
-			l.signal_on = seen.has(l.uid_a) and seen.has(l.uid_b)
-
-
-func _step_water(dt: float) -> void:
-	if water.is_empty():
-		return
-	var g: float = Catalog.gravity_def(gravity_id).g.length()
-	g = maxf(g, 300.0)
-	for t in all_things():
-		if t is Toy:
-			if t.freeze:
-				continue
-			var he: Vector2 = t.half_extents()
-			var r: Rect2 = in_water(t.global_position + Vector2(0, he.y))
-			if r.size == Vector2.ZERO:
-				t.extra.erase("in_water")
-				continue
-			var sub := clampf((t.global_position.y + he.y - r.position.y) / (he.y * 2.0), 0.0, 1.0)
-			var lift := 1.9 if t.def.get("floaty", false) else 0.55
-			t.linear_velocity += Vector2(0, -g * lift * sub * dt)
-			t.linear_velocity *= maxf(0.0, 1.0 - 2.4 * sub * dt)
-			t.angular_velocity *= maxf(0.0, 1.0 - 2.0 * sub * dt)
-			t.wet = 1.0
-			if not t.extra.has("in_water"):
-				t.extra.in_water = true
-				if t.linear_velocity.length() > 160.0:
-					fx_event("splash", {"p": Vector2(t.global_position.x, r.position.y), "s": he.length() / 30.0})
-		elif t is Wiggly:
-			if t.frozen_t > 0.0 or t.points.is_empty():
-				continue
-			var under := 0
-			var surface := 0.0
-			for p in t.points:
-				var r: Rect2 = in_water(p.global_position)
-				if r.size != Vector2.ZERO:
-					under += 1
-					surface = r.position.y
-					var lift := 0.55 if t.kind == "boulder" else 1.7
-					p.linear_velocity += Vector2(0, -g * lift * dt)
-					p.linear_velocity *= maxf(0.0, 1.0 - 2.0 * dt)
-			if under > 0:
-				t.wet = 1.0
-				if not t.has_meta("in_water"):
-					t.set_meta("in_water", true)
-					Settings.award("splash")
-					if t.com_vel.length() > 140.0:
-						fx_event("splash", {"p": Vector2(t.com.x, surface), "s": t.size * 1.2})
-			elif t.has_meta("in_water"):
-				t.remove_meta("in_water")
-
-
 # ------------------------------------------------------------------ magic
+# (in world_magic.gd: WorldMagic)
 func cast_magic(id: String) -> void:
-	match id:
-		"party":
-			magic.party = 8.0
-			for w in wigglies():
-				w.party_t = 8.0
-		"ball_rain":
-			_ball_rain = 26
-		"wind":
-			wind_dir = -1.0 if randf() < 0.5 else 1.0
-			magic.wind = 5.0
-		"rain":
-			magic.rain = 10.0
-		"snow":
-			magic.snow = 12.0
-		"wobble":
-			magic.wobble = 4.0
-		"float":
-			magic["float"] = 6.0
-			set_gravity(gravity_id)
-		"airstrike":
-			var y := view_rect.position.y - 120.0
-			var dir := 1.0 if randf() < 0.5 else -1.0
-			var x0 := view_rect.position.x if dir > 0.0 else view_rect.end.x
-			fx_event("plane", {"y": y - 60.0, "dir": dir, "x0": x0, "w": view_rect.size.x})
-			for i in 9:
-				_strikes.append({"t": 0.8 + i * 0.22, "p": Vector2(x0 + dir * view_rect.size.x * (0.1 + i * 0.1), y), "kind": "shell", "v": Vector2(dir * 300.0, 200.0)})
-		"artillery":
-			fx_event("alarm", {})
-			for i in 10:
-				_strikes.append({"t": 1.2 + i * 0.35 + randf() * 0.2, "p": Vector2(randf_range(view_rect.position.x + 80, view_rect.end.x - 80), view_rect.position.y - 150.0), "kind": "shell", "v": Vector2(randf_range(-80, 80), 600.0), "whistle": true})
-		"meteors":
-			for i in 12:
-				_strikes.append({"t": 0.3 + i * 0.3 + randf() * 0.2, "p": Vector2(randf_range(view_rect.position.x, view_rect.end.x), view_rect.position.y - 150.0), "kind": "meteor", "v": Vector2(randf_range(150, 350), 500.0)})
-		"heal_all":
-			for f in fighters():
-				f.revive()
-		"rainbow":
-			var i := 0
-			var sorted := toys().duplicate()
-			sorted.sort_custom(func(a, b): return a.global_position.x < b.global_position.x)
-			for t in sorted:
-				if t.parent_uid == 0 or true:
-					t.paint = Color.from_hsv(fmod(float(i) * 0.09, 1.0), 0.65, 1.0)
-					i += 1
-			for w in wigglies():
-				w.paint = Color.from_hsv(randf(), 0.55, 1.0)
-	fx_event("magic", {"id": id, "dir": wind_dir})
+	WorldMagic.cast(self, id)
 
 
-func _step_magic(dt: float) -> void:
-	for k in magic.keys():
-		magic[k] -= dt
-		if magic[k] <= 0.0:
-			magic.erase(k)
-			if k == "float":
-				set_gravity(gravity_id)
-			fx_event("magic_end", {"id": k})
-	if magic.has("wind"):
-		for t in all_things():
-			if t is Toy and not t.freeze:
-				t.linear_velocity.x += wind_dir * 900.0 * dt * clampf(2.0 / t.mass, 0.1, 1.0)
-			elif t is Wiggly and t.frozen_t <= 0.0:
-				t.add_velocity(Vector2(wind_dir * 700.0 * dt * (2.0 if t.kind == "puffy" else 1.0), 0))
-			elif t is Fighter:
-				t.blow(Vector2(wind_dir * 240.0, 0), dt)   # armies lean into it; chickens tumble away
-	if magic.has("wobble"):
-		for t in all_things():
-			if t is Fighter:
-				# now and then the ground bucks under someone's feet
-				if randf() < 0.012:
-					t.shove(Vector2(randf_range(-160, 160), randf_range(-260, -120)))
-			elif randf() < 0.08:
-				var kick := Vector2(randf_range(-260, 260), randf_range(-420, -120))
-				if t is Toy and not t.freeze:
-					t.linear_velocity += kick * clampf(3.0 / t.mass, 0.2, 1.0)
-				elif t is Wiggly:
-					t.add_velocity(kick)
-	if magic.has("rain"):
-		# everyone gets wet: burning fighters fizzle out, and the napalm fires die down
-		for t in all_things():
-			if t is Fighter or t is Toy:
-				t.wet = 1.0
-		for z in fires:
-			z.t -= dt * 2.5
-	if magic.has("float"):
-		for w in wigglies():
-			w.add_velocity(Vector2(0, -30.0 * dt))
-	if _ball_rain > 0:
-		_ball_rain_t -= dt
-		if _ball_rain_t <= 0.0:
-			_ball_rain_t = 0.11
-			_ball_rain -= 1
-			var ids := ["beach_ball", "bouncy_ball", "soccer_ball", "marble", "bouncy_ball"]
-			var b := spawn_toy(ids[randi() % ids.size()], Vector2(randf_range(view_rect.position.x + 60, view_rect.end.x - 60), view_rect.position.y - 60))
-			if b:
-				b.linear_velocity = Vector2(randf_range(-80, 80), 200)
-
-
-func _step_strikes(dt: float) -> void:
-	for st in _strikes:
-		st.t -= dt
-		if st.t <= 0.0:
-			var b := spawn_toy(String(st.kind), st.p, 0.0, 1.0, Combat.PROJ[String(st.kind)])
-			if b:
-				b.extra.proj = "bomb"
-				b.extra.life = 8.0
-				b.linear_velocity = st.v
-				if st.kind == "meteor":
-					b.extra.meteor = true
-				if st.get("whistle", false):
-					fx_event("whistle", {"p": st.p})
-	_strikes = _strikes.filter(func(st): return st.t > 0.0)
-
-
+# --------------------------------------------------------------- fighting
 func shoot(shooter, from: Vector2, ang: float, rng: float, dmg: float, knock: float, laser := false) -> void:
 	Combat.shoot(self, shooter, from, ang, rng, dmg, knock, laser)
 
@@ -2055,8 +1009,9 @@ func _cleanup() -> void:
 			# up and sinks right through: pop it back out on top. (Only when its
 			# middle is more than BURIED px down, so nothing just pressed into
 			# the ground a little jumps about; an eighth of everything each
-			# step, as the check isn't free.)
-			if (tick + t.uid) % 8 == 0 and not puppet and in_ground(p - Vector2(0.0, BURIED)):
+			# step, as the check isn't free, but every step for anything
+			# heading down fast, which could sink through between two looks.)
+			if ((tick + t.uid) % 8 == 0 or _sinking_fast(t)) and not puppet and in_ground(p - Vector2(0.0, BURIED)):
 				_unbury(t)
 			continue
 		flung += 1
@@ -2096,225 +1051,25 @@ func fx_event(name: String, args: Dictionary) -> void:
 
 
 # ------------------------------------------------------------------- undo
-## Saves the playground for Ctrl+Z. `key` names a small change ("paint 12"):
-## doing the same one again within a couple of seconds (painting, resizing,
-## flipping a switch, clicking away) is one step to undo, not fifteen.
+# (in world_save.gd: WorldSave)
+## Saves the playground for Ctrl+Z (`key`: see WorldSave.push_undo).
 func push_undo(key := "") -> void:
-	if puppet:
-		return
-	var now := Time.get_ticks_msec()
-	if key != "" and key == _undo_key and now - _undo_at < 2000 and not _undo.is_empty():
-		_undo_at = now
-		return
-	_undo_key = key
-	_undo_at = now
-	_undo.append(serialize())
-	if _undo.size() > UNDO_MAX:
-		_undo.pop_front()
+	WorldSave.push_undo(self, key)
 
 
 func undo() -> void:
-	if _undo.is_empty():
-		fx_event("nope", {})
-		return
-	_undo_key = ""
-	restore(_undo.pop_back())
-	fx_event("undo", {})
+	WorldSave.undo(self)
 
 
 ## The whole playground as plain data (saves, undo).
 func serialize() -> Dictionary:
-	var ts: Array = []
-	var ws: Array = []
-	for t in all_things():
-		if t is Toy:
-			var e := {"uid": t.uid, "id": t.id, "x": t.global_position.x, "y": t.global_position.y, "a": t.rotation,
-				"vx": t.linear_velocity.x, "vy": t.linear_velocity.y, "va": t.angular_velocity, "s": t.size_scale,
-				"paint": t.paint.to_html() if t.paint.a > 0.0 else "", "letter": t.letter, "on": t.on, "f": t.facing,
-				"nail": t.nailed, "parent": t.parent_uid, "pr": t.r if t.def.get("part", false) else 0.0}
-			if t.frozen_t > 0.0:
-				e.ice = t.frozen_t
-			if t.bubble_t > 0.0:
-				e.bub = t.bubble_t
-			# toys this one passes through (see no_collide)
-			var nc: Array = []
-			for o_uid in t.extra.get("nc", []):
-				if things.get(int(o_uid)) is Toy:
-					nc.append(int(o_uid))
-			if not nc.is_empty():
-				e.nc = nc
-			ts.append(e)
-		elif t is Wiggly:
-			var pp: Array = []
-			for p in t.pts:
-				pp.append([p.x, p.y])
-			ws.append({"uid": t.uid, "kind": t.kind, "s": t.size, "x": t.com.x, "y": t.com.y,
-				"paint": t.paint.to_html() if t.paint.a > 0.0 else "", "pts": pp})
-	var fs: Array = []
-	for f in fighters():
-		var c: Vector2 = f.center()
-		var e := {"uid": f.uid, "type": f.type, "team": f.team, "pers": f.pers, "s": f.size / float(f.def.get("scale", 1.0)),
-			"x": c.x, "y": c.y, "hp": f.hp, "armor": f.armor, "helmet": f.helmet, "body_armor": f.body_armor, "shield": f.shield,
-			"weapon": f.weapon_toy.uid if f.weapon_toy and is_instance_valid(f.weapon_toy) else 0, "f": f.facing,
-			"paint": f.paint.to_html() if f.paint.a > 0.0 else ""}
-		# what toys and powers are doing to them: 🧊 🫧 ⚡ 🍬 💧 🔥
-		var fx_now := {"ice": f.frozen_t, "bub": f.bubble_t, "zap": f.stun_t, "goo": f.goo_t, "wet": f.wet, "burn": f.burning, "acid": f.acid}
-		for k in fx_now:
-			if float(fx_now[k]) > 0.0:
-				e[k] = fx_now[k]
-		fs.append(e)
-	var ps: Array = []
-	for pl in platforms:
-		var pts: Array = []
-		for v in pl.poly:
-			pts.append([v.x, v.y])
-		var pe := {"poly": pts, "style": pl.style, "group": pl.group}
-		if float(pl.get("hp", 0.0)) < float(pl.get("max", 0.0)):
-			pe.hp = pl.hp   # (cracked by blasts)
-		ps.append(pe)
-	var lq: Array = []
-	for i in water.size():
-		if i < liquid_groups.size() and int(liquid_groups[i]) != 0:
-			var r: Rect2 = water[i]
-			lq.append({"r": [r.position.x, r.position.y, r.size.x, r.size.y], "kind": liquid_kinds[i], "group": liquid_groups[i]})
-	var ls: Array = []
-	for l in links:
-		if l.broken or not l.valid():
-			continue
-		ls.append({"k": l.kind, "a": l.uid_a, "ai": l.a.index if l.a is JellyPoint else -1, "b": l.uid_b,
-			"bi": l.b.index if l.b is JellyPoint else -1, "la": [l.la.x, l.la.y], "lb": [l.lb.x, l.lb.y], "rest": l.rest})
-	return {"v": 2, "world": world_id, "gravity": gravity_id, "night": night, "next_uid": next_uid, "toys": ts, "wigglies": ws, "links": ls,
-		"fighters": fs, "platforms": ps, "liquids": lq, "battle": battle_on}
+	return WorldSave.serialize(self)
 
 
+## Loads serialize()'s data. The links between things go back a physics step
+## later, once the things they join are there.
 func restore(d: Dictionary) -> void:
-	if String(d.get("world", world_id)) != world_id:
-		load_world(String(d.world), false)
-	_clear_all()
-	# Each thing is made under a new number and then given its saved one. New
-	# numbers start above every saved one, so a new thing can't land on a number
-	# that something loaded a moment ago already has (that knocked the older one
-	# out of the world, but left it lying there: a stray nobody could touch).
-	for key in ["toys", "wigglies", "fighters"]:
-		for e in d.get(key, []):
-			next_uid = maxi(next_uid, int(e.get("uid", 0)))
-	# placed platforms and tubs
-	for pl in platforms:
-		if is_instance_valid(pl.node):
-			pl.node.queue_free()
-	platforms.clear()
-	for i in range(water.size() - 1, -1, -1):
-		if i < liquid_groups.size() and int(liquid_groups[i]) != 0:
-			water.remove_at(i)
-			liquid_kinds.remove_at(i)
-			liquid_groups.remove_at(i)
-	_water_hold += 1
-	for e in d.get("platforms", []):
-		var poly := PackedVector2Array()
-		for v in e.poly:
-			poly.append(Vector2(v[0], v[1]))
-		var made := add_platform(poly, String(e.style), int(e.group))
-		if e.has("hp"):
-			var pl: Dictionary = platforms[platforms.size() - 1]
-			pl.hp = float(e.hp)
-			made.set_damage(1.0 - float(pl.hp) / maxf(1.0, float(pl.max)))
-		next_group = maxi(next_group, int(e.group))
-	for e in d.get("liquids", []):
-		add_liquid(Rect2(e.r[0], e.r[1], e.r[2], e.r[3]), String(e.kind), int(e.group))
-	_water_hold -= 1
-	_cut_water()
-	battle_on = bool(d.get("battle", true))
-	set_gravity(String(d.get("gravity", "normal")))
-	set_night(bool(d.get("night", false)))
-	for e in d.get("toys", []):
-		var def_o: Dictionary = Builders.part_def(String(e.id), float(e.pr)) if float(e.get("pr", 0.0)) > 0.0 else {}
-		var t := spawn_toy(String(e.id), Vector2(e.x, e.y), float(e.a), float(e.get("s", 1.0)), def_o)
-		if t == null:
-			continue
-		_take_saved_number(t, int(e.uid))
-		t.linear_velocity = Vector2(e.vx, e.vy)
-		t.angular_velocity = float(e.va)
-		if String(e.get("paint", "")) != "":
-			t.paint = Color(String(e.paint))
-		t.letter = String(e.get("letter", ""))
-		t.on = bool(e.get("on", false))
-		if float(e.get("f", 1.0)) < 0.0:
-			t.set_facing(-1.0)
-		t.nailed = bool(e.get("nail", false))
-		if t.nailed:
-			t.global_position = Vector2(e.x, e.y)   # (right where it was nailed, even set into the ground like a trap's plate)
-		t.parent_uid = int(e.get("parent", 0))
-		t.frozen_t = float(e.get("ice", 0.0))
-		if float(e.get("bub", 0.0)) > 0.0:
-			ToyLogic._bubble(self, t, float(e.bub))
-		t.update_freeze()
-		ToyLogic.update_light(self, t)
-	for e in d.get("toys", []):
-		var t = things.get(int(e.get("uid", 0)))
-		for o_uid in e.get("nc", []):
-			var o = things.get(int(o_uid))
-			if t is Toy and o is Toy and o != t:
-				no_collide(t, o)
-	for e in d.get("wigglies", []):
-		var w := spawn_wiggly(String(e.kind), Vector2(e.x, e.y), float(e.get("s", 1.0)))
-		if w == null:
-			continue
-		_take_saved_number(w, int(e.uid))
-		if String(e.get("paint", "")) != "":
-			w.paint = Color(String(e.paint))
-		var pp: Array = e.get("pts", [])
-		if pp.size() == Wiggly.N:
-			for i in Wiggly.N:
-				w.points[i].global_position = Vector2(pp[i][0], pp[i][1])
-	for e in d.get("fighters", []):
-		var f := spawn_fighter(String(e.type), Vector2(e.x, e.y), String(e.team), String(e.pers), float(e.get("s", 1.0)), false)
-		if f == null:
-			continue
-		_take_saved_number(f, int(e.uid))
-		f.hp = float(e.get("hp", f.max_hp))
-		f.armor = float(e.get("armor", f.armor))
-		f.helmet = String(e.get("helmet", f.helmet))
-		f.body_armor = bool(e.get("body_armor", false))
-		f.shield = bool(e.get("shield", false))
-		f.facing = float(e.get("f", 1.0))
-		if String(e.get("paint", "")) != "":
-			f.paint = Color(String(e.paint))
-		var wt = things.get(int(e.get("weapon", 0)))
-		if wt is Toy:
-			f.equip(wt)
-		if f.hp <= 0.0:
-			f.hp = 0.0
-			f._ko(Vector2.ZERO, null)
-		else:
-			# what toys and powers were doing to them
-			f.wet = float(e.get("wet", 0.0))
-			f.burning = float(e.get("burn", 0.0))
-			f.acid = float(e.get("acid", 0.0))
-			f.goo_t = float(e.get("goo", 0.0))
-			f.stun_t = float(e.get("zap", 0.0))
-			if float(e.get("bub", 0.0)) > 0.0:
-				f.set_bubble(float(e.bub))
-			if float(e.get("ice", 0.0)) > 0.0:
-				f.set_frozen(float(e.ice))
-			if f.stun_t > 0.0:
-				f.mood = "zapped"
-			f._show_status()
-	next_uid = maxi(next_uid, int(d.get("next_uid", next_uid)))
+	WorldSave.restore(self, d)
 	await get_tree().physics_frame
-	for e in d.get("links", []):
-		var a := _resolve_body(int(e.a), int(e.ai))
-		var b := _resolve_body(int(e.b), int(e.bi))
-		if a == null or b == null:
-			continue
-		var l := Link.new()
-		l.kind = String(e.k)
-		l.a = a
-		l.b = b
-		l.la = Vector2(e.la[0], e.la[1])
-		l.lb = Vector2(e.lb[0], e.lb[1])
-		l.rest = float(e.get("rest", 20.0))
-		l.uid_a = int(e.a)
-		l.uid_b = int(e.b)
-		l.build(pin_parent)
-		links.append(l)
-	world_changed.emit(true)
+	WorldSave.restore_links(self, d)
+
